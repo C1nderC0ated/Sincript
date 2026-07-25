@@ -176,6 +176,28 @@ Invoke-Test 'example.preset keys are all recognized by the validator' {
     }
     Assert-True ($usedCount -gt 0) 'example.preset has no active directives - parser problem?'
     Assert-True ($unknown.Count -eq 0) ("example.preset uses key(s) the validator rejects: " + ($unknown -join ', '))
+
+    # The commented-out examples are the ones people actually enable, so they have to be valid
+    # the moment the "#" comes off. This file once shipped "# power_timeouts=1   # explanation",
+    # which uncomments into a value of "1   # explanation" - rejected by the very validator this
+    # file is meant to demonstrate. Prose comment lines are skipped; only "key=value" shapes are
+    # judged, and they are judged by the same three format rules the README documents.
+    $badExamples = New-Object System.Collections.Generic.List[string]
+    $commented = 0
+    foreach ($raw in $preset) {
+        $line = $raw.Trim()
+        if (-not ($line.StartsWith('#') -or $line.StartsWith(';'))) { continue }
+        $body = $line.TrimStart('#', ';').Trim()
+        if ($body -notmatch '^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') { continue }   # prose, not a directive
+        $k = $Matches[1]; $v = $Matches[2]
+        $commented++
+        if (-not $recognized.Contains($k)) { $badExamples.Add("unknown key -> $body"); continue }
+        if ($v -match '#')                 { $badExamples.Add("inline comment becomes part of the value -> $body") }
+        if ($body -match '\s=|=\s')        { $badExamples.Add("spaces around '=' -> $body") }
+        if ($v.Trim() -eq '')              { $badExamples.Add("empty value -> $body") }
+    }
+    Assert-True ($commented -ge 5) "Only $commented commented example directive(s) found - the file lost its opt-in examples, or the detection broke."
+    Assert-True ($badExamples.Count -eq 0) ("example.preset ships commented directives that are INVALID once uncommented: " + (($badExamples | Select-Object -First 3) -join ' | '))
 }
 
 # ===============================================================================
@@ -308,8 +330,10 @@ Invoke-Test "No unescaped ')' closes a block early (hosts-restore crash class)" 
 #     Performance" clone that /setactive (which targets the canonical GUID)
 #     never used - plans piled up and High was silently activated instead.
 # ===============================================================================
-Invoke-Test ':DoPowerCore duplicates Ultimate onto its canonical GUID' {
-    $b = ((Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'DoPowerCore') -join "`n")
+Invoke-Test ':DoPowerPlanSwitch duplicates Ultimate onto its canonical GUID' {
+    # The scheme switch moved from :DoPowerCore into :DoPowerPlanSwitch when the power
+    # action gained a current-plan path; :DoPowerCore is now the compatible aggregate.
+    $b = ((Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'DoPowerPlanSwitch') -join "`n")
     Assert-True ($b -match '(?i)duplicatescheme\s+e9a42b02-d5df-448d-aa00-03f14749eb61\s+e9a42b02-d5df-448d-aa00-03f14749eb61') 'duplicatescheme lost its destination GUID - every run would create another Ultimate clone and setactive would keep falling back to High (regression).'
 }
 
@@ -1526,7 +1550,8 @@ Invoke-Test ':RestoreHostsBak falls back to Documents hosts_*.bak' {
     Assert-True ($body.Count -gt 0) ':RestoreHostsBak body empty.'
     $joined = $body -join "`n"
     Assert-True ($joined -match 'hosts_\*\.bak') ':RestoreHostsBak no longer looks for Documents hosts_*.bak (regression).'
-    Assert-True ($joined -match 'dir /b /o-d') ':RestoreHostsBak no longer picks the newest Documents hosts backup (regression).'
+    Assert-True ($joined -match 'dir /b /od\b')   ':RestoreHostsBak no longer picks the OLDEST Documents hosts backup - newest-first restores the blocklist this script applied, not the user original (regression of F2).'
+    Assert-True ($joined -notmatch 'dir /b /o-d') ':RestoreHostsBak reverted to newest-first (/o-d) - that is the poisoned copy (regression of F2).'
     Assert-True ($joined -match 'copy /y "!_hsrc!"') ':RestoreHostsBak no longer restores from the resolved _hsrc path (regression).'
 }
 
@@ -1793,6 +1818,607 @@ Invoke-Test 'Cleanup deletes stay behind CleanRoot-proven flags' {
     foreach ($ln in $cuDels) {
         Assert-True ($ln -match '(?i)if defined _clean') (':Cleanup has an ungated cleanup delete: ' + $ln.Trim())
     }
+}
+
+
+# ===============================================================================
+# 76. F1/F2: the beside-the-file hosts.bak is WRITE-ONCE. Re-running "apply hosts"
+#     used to copy the already-applied blocklist over the pristine original, and
+#     :RestoreHostsBak prefers that file - so the undo restored the blocklist onto
+#     itself. Documents keeps a randomized per-run snapshot.
+# ===============================================================================
+Invoke-Test ':ApplyHosts keeps the pristine hosts.bak (write-once) + randomized doc snapshot' {
+    $body = Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'ApplyHosts'
+    $body = @($body)
+    Assert-True ($body.Count -gt 0) ':ApplyHosts body empty.'
+    $code = @($body | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+    Assert-True ($code -match '(?i)if not exist "%_HOSTS%\.bak" copy /y') ':ApplyHosts copies over hosts.bak unconditionally again - a re-run buries the true original (regression of F1).'
+    Assert-True ($code -match '(?i)hosts_%RANDOM%%RANDOM%\.bak')          ':ApplyHosts doc snapshot is no longer randomized (regression of F1).'
+    Assert-True ($code -match '(?i)_hbak!"=="0"')                          ':ApplyHosts lost its no-backup abort gate (regression of the data-loss guard).'
+}
+
+# ===============================================================================
+# 77. F1: :ResetHostsDefault follows the same write-once rule and gained the
+#     Documents snapshot it never had.
+# ===============================================================================
+Invoke-Test ':ResetHostsDefault is write-once and writes a Documents snapshot' {
+    $body = Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'ResetHostsDefault'
+    $body = @($body)
+    Assert-True ($body.Count -gt 0) ':ResetHostsDefault body empty.'
+    $code = @($body | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+    Assert-True ($code -match '(?i)if not exist "%_HOSTS%\.bak" copy /y') ':ResetHostsDefault overwrites the pristine hosts.bak again (regression of F1).'
+    Assert-True ($code -match '(?i)hosts_%RANDOM%%RANDOM%\.bak')          ':ResetHostsDefault no longer writes a Documents snapshot (regression of F1).'
+}
+
+# ===============================================================================
+# 78. F1/F4: :InstallAsarInto - both backups write-once (a re-run is the DOCUMENTED
+#     workflow), and with an original present but no backup landed it must refuse
+#     the write instead of overwriting and advising a Discord reinstall.
+# ===============================================================================
+Invoke-Test ':InstallAsarInto backups are write-once and gate the install' {
+    $body = Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'InstallAsarInto'
+    $body = @($body)
+    Assert-True ($body.Count -gt 0) ':InstallAsarInto body empty.'
+    $code = @($body | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+    Assert-True ($code -match '(?i)if not exist "!_localbak!" copy /y') ':InstallAsarInto overwrites the local .bak again - a re-run backs up OpenAsar over the stock asar (regression of F1).'
+    Assert-True ($code -match '(?i)if not exist "!_docbak!"\s+copy /y')  ':InstallAsarInto overwrites the Documents .bak again - the asar has no randomized fallback, so both copies die (regression of F1).'
+    $gate = $code.IndexOf('if "!_hadorig!"=="1" if not defined _bakloc')
+    $write = $code.IndexOf('copy /y "%_src%"')
+    Assert-True ($gate -ge 0)             ':InstallAsarInto lost the "no backup landed -> refuse" gate (regression of F4).'
+    Assert-True ($write -ge 0)            ':InstallAsarInto install copy not found - routine changed shape?'
+    Assert-True ($gate -lt $write)        ':InstallAsarInto gate no longer precedes the install copy - it overwrites first (regression of F4).'
+}
+
+# ===============================================================================
+# 79. F1/F4: :UnityBoot - boot.config.bak write-once, aborts when no backup landed,
+#     and no longer claims the .bak unconditionally.
+# ===============================================================================
+Invoke-Test ':UnityBoot backs up boot.config write-once and aborts without one' {
+    $body = Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'UnityBoot'
+    $body = @($body)
+    Assert-True ($body.Count -gt 0) ':UnityBoot body empty.'
+    $code = @($body | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+    Assert-True ($code -match '(?i)if not exist "boot\.config\.bak" copy /y') ':UnityBoot copies over boot.config.bak unconditionally again (regression of F1).'
+    Assert-True ($code -match '(?i)_ubbak!"=="0"')                              ':UnityBoot lost its no-backup abort gate (regression of F4).'
+    $joined = $body -join "`n"
+    Assert-True ($joined -notmatch '(?i)^echo\s+Old file') ':UnityBoot claims the .bak unconditionally again (regression of the false-success fix).'
+}
+
+# ===============================================================================
+# 80. F4: :StartupWorker must confirm the undo .reg actually landed before it
+#     flips the entry. ErrorActionPreference is SilentlyContinue, so a blocked
+#     Out-File would otherwise fail silently and the flip would be unbacked -
+#     while the result text still named a backup file that does not exist.
+# ===============================================================================
+Invoke-Test ':StartupWorker verifies the undo backup landed before flipping' {
+    $body = Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'StartupWorker'
+    $body = @($body)
+    Assert-True ($body.Count -gt 0) ':StartupWorker body empty.'
+    $joined = $body -join "`n"
+    $chk = $joined.IndexOf('Test-Path -LiteralPath $bak')
+    $set = $joined.IndexOf('[Microsoft.Win32.Registry]::SetValue')
+    Assert-True ($chk -ge 0)      ':StartupWorker no longer verifies the undo .reg landed (regression of F4).'
+    Assert-True ($set -ge 0)      ':StartupWorker SetValue call not found - routine changed shape?'
+    Assert-True ($chk -lt $set)   ':StartupWorker verifies the backup AFTER writing the new value (regression of F4).'
+}
+
+# ===============================================================================
+# 81. F3: OneDrive file sync is opt-in, never part of the privacy core. It rode
+#     "Apply recommended safe set" (no prompts) and the LIGHT preset ("nothing
+#     risky") while appearing on no screen and in no README.
+# ===============================================================================
+Invoke-Test 'OneDrive sync block is opt-in, not in :DoPrivacyCore' {
+    $cmd = Read-Lines $CmdPath
+    $core = Get-RoutineBody -Lines $cmd -Label 'DoPrivacyCore'
+    $core = @($core)
+    Assert-True ($core.Count -gt 0) ':DoPrivacyCore body empty.'
+    Assert-True (($core -join "`n") -notmatch '(?i)DisableFileSyncNGSC') ':DoPrivacyCore writes DisableFileSyncNGSC again - it would ride Apply-recommended and every preset unprompted (regression of F3).'
+
+    $od = Get-RoutineBody -Lines $cmd -Label 'DoOneDriveSyncOff'
+    $od = @($od)
+    Assert-True ($od.Count -gt 0) ':DoOneDriveSyncOff is missing.'
+    $odCode = @($od | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+    Assert-True ($odCode -match '(?i)call :SafeRegAdd .*DisableFileSyncNGSC') ':DoOneDriveSyncOff no longer writes the policy through :SafeRegAdd (so it would not be backed up).'
+
+    $priv = (Get-RoutineBody -Lines $cmd -Label 'Privacy') -join "`n"
+    Assert-True ($priv -match '(?i)call :DoOneDriveSyncOff') ':Privacy no longer offers OneDrive as an opt-in prompt (regression of F3).'
+
+    $chk = (Get-RoutineBody -Lines $cmd -Label 'PresetCheckLine') -join "`n"
+    Assert-True ($chk -match '(?i)"%_k%"=="onedrive_off"') 'Preset validator lost the onedrive_off key.'
+    $all = ($cmd -join "`n")
+    Assert-True ($all -match '(?i)if defined _P_ONEDRIVE\s+call :DoOneDriveSyncOff') 'Custom presets no longer apply onedrive_off.'
+}
+
+# ===============================================================================
+# 82. F3: the privacy screen must name what the core actually changes beyond
+#     telemetry - Widgets feed, Start app-launch tracking, dmwappushservice.
+# ===============================================================================
+Invoke-Test 'Privacy screen discloses Widgets / app-launch tracking / dmwappushservice' {
+    $cmd = Read-Lines $CmdPath
+    $pv = Get-RoutineBody -Lines $cmd -Label 'Privacy'
+    $priv = (@($pv) | Where-Object { $_.Trim() -match '^(?i)echo\b' }) -join "`n"
+    Assert-True ($priv.Length -gt 0) ':Privacy has no echo lines - routine changed shape?'
+    Assert-True ($priv -match '(?i)widgets')          ':Privacy screen no longer discloses the Widgets / News and Interests write (regression of F3).'
+    Assert-True ($priv -match '(?i)app-launch')       ':Privacy screen no longer discloses Start app-launch tracking (regression of F3).'
+    Assert-True ($priv -match '(?i)dmwappushservice') ':Privacy screen no longer discloses dmwappushservice / its MDM caveat (regression of F3).'
+    $core = Get-RoutineBody -Lines $cmd -Label 'DoPrivacyCore'
+    $core = @($core) -join "`n"
+    Assert-True ($core -match '(?i)AllowNewsAndInterests') ':DoPrivacyCore no longer writes AllowNewsAndInterests - screen text and code disagree.'
+    Assert-True ($core -match '(?i)Start_TrackProgs')      ':DoPrivacyCore no longer writes Start_TrackProgs - screen text and code disagree.'
+}
+
+
+# ===============================================================================
+# 83. F5: every action that tracks _FAILS also sets _RUNTRACK, so :Run can count a
+#     failed sc/schtasks/powercfg call on a non-elevated run. Registry writes bump
+#     _FAILS independently, so the gap only ever hid service-level failures - but
+#     that is still an [OK] over a "sc stop" that did nothing.
+# ===============================================================================
+Invoke-Test 'Core actions set _RUNTRACK alongside _FAILS (service failures counted)' {
+    $cmd = Read-Lines $CmdPath
+    foreach ($r in 'Privacy','Power','Performance','ApplyRecommended') {
+        $b = Get-RoutineBody -Lines $cmd -Label $r
+        $b = @($b)
+        Assert-True ($b.Count -gt 0) (":$r body empty.")
+        $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+        Assert-True ($code -match '(?i)set "_RUNTRACK=1"') ":$r no longer sets _RUNTRACK - a failed sc/schtasks/powercfg on a non-elevated run goes uncounted and the action can still print [OK] (regression of F5)."
+        Assert-True ($code -match '(?i)set "_FAILS=0"')    ":$r no longer resets _FAILS before its writes (regression)."
+    }
+}
+
+# ===============================================================================
+# 84. F6/F7: OpenAsar - _DONE only means at least ONE flavor worked, so a per-flavor
+#     failure tally is what keeps the closing line honest; and the downloaded
+#     nightly is a temp file that used to be left behind after a successful install.
+# ===============================================================================
+Invoke-Test 'OpenAsar counts per-flavor failures and cleans up the downloaded nightly' {
+    $cmd = Read-Lines $CmdPath
+    $ia = Get-RoutineBody -Lines $cmd -Label 'InstallAsarInto'
+    $ia = @($ia)
+    Assert-True ($ia.Count -gt 0) ':InstallAsarInto body empty.'
+    $iaCode = @($ia | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+    $bumps = ([regex]::Matches($iaCode, '(?i)set /a _OAFAIL\+=1')).Count
+    Assert-True ($bumps -ge 2) "::InstallAsarInto should bump _OAFAIL on BOTH failure exits (no-backup abort and copy-failed); found $bumps (regression of F6)."
+
+    # :OpenAsar's install loop lives past :OA_HaveSrc, and that sub-label does NOT start
+    # with '_', so it ends the routine body. Concatenate rather than assert on a stub.
+    foreach ($r in 'OpenAsar','DoOpenAsarSilent') {
+        if ($r -eq 'OpenAsar') {
+            $b1 = Get-RoutineBody -Lines $cmd -Label 'OpenAsar'
+            $b2 = Get-RoutineBody -Lines $cmd -Label 'OA_HaveSrc'
+            $b = @($b1) + @($b2)
+        } else {
+            $b = Get-RoutineBody -Lines $cmd -Label $r
+        }
+        $b = @($b)
+        Assert-True ($b.Count -gt 0) (":$r body empty.")
+        $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+        Assert-True ($code -match '(?i)set "_OAFAIL=0"')  ":$r does not reset _OAFAIL before the install loop - a stale tally would carry over (regression of F6)."
+        Assert-True ($code -match '(?i)_OAFAIL%"=="0"')   ":$r never reports the failure tally, so a partial install still reads as success (regression of F6)."
+        Assert-True ($code -match '(?i)del /f /q "%TEMP%\\openasar_nightly\.asar"') ":$r leaves the downloaded nightly behind in %TEMP% (regression of F7)."
+    }
+}
+
+# ===============================================================================
+# 85. F8: the Status hosts line is guarded on the file existing - it used to print
+#     the [hosts file] header and then nothing at all when the file was missing.
+# ===============================================================================
+Invoke-Test ':Status hosts line is guarded on the file existing' {
+    $b = Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'Status'
+    $b = @($b)
+    Assert-True ($b.Count -gt 0) ':Status body empty.'
+    $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    Assert-True ($code -match '(?i)if exist "%_hostsf%" for /f') ':Status runs the hosts line count unguarded again - a missing hosts prints an empty section (regression of F8).'
+    Assert-True ($code -match '(?i)if not defined _hlines echo')  ':Status has no fallback line when the hosts count could not be taken (regression of F8).'
+}
+
+# ===============================================================================
+# 86. F9: DisableStatusMessages is read numerically. findstr /C:"0x1" was a
+#     SUBSTRING match, so 0x10 / 0x1a / 0x1f all read as "enabled".
+# ===============================================================================
+Invoke-Test ':VerboseStatusNote compares DisableStatusMessages numerically' {
+    $b = Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'VerboseStatusNote'
+    $b = @($b)
+    Assert-True ($b.Count -gt 0) ':VerboseStatusNote body empty.'
+    $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+    Assert-True ($code -notmatch '(?i)findstr /I /C:"0x1"') ':VerboseStatusNote is substring-matching "0x1" again - 0x10/0x1a would read as enabled (regression of F9).'
+    Assert-True ($code -match '(?i)set /a _dsmval')          ':VerboseStatusNote no longer parses the value with set /a (regression of F9).'
+    Assert-True ($code -match '(?i)if not "!_dsmval!"=="0" set "_dsmon=1"') ':VerboseStatusNote no longer treats any nonzero value as the override being in force (regression of F9).'
+}
+
+# ===============================================================================
+# 87. F10: :BackupSingleValue maps all five hives, matching :SafeRegAdd. Only
+#     HKLM/HKCU reach it today, but a half-map exports the wrong key the moment
+#     this helper gains a second caller.
+# ===============================================================================
+Invoke-Test ':BackupSingleValue maps all five hives like :SafeRegAdd' {
+    $b = Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'BackupSingleValue'
+    $b = @($b)
+    Assert-True ($b.Count -gt 0) ':BackupSingleValue body empty.'
+    $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+    foreach ($h in 'HKEY_LOCAL_MACHINE','HKEY_CURRENT_USER','HKEY_CLASSES_ROOT','HKEY_USERS','HKEY_CURRENT_CONFIG') {
+        Assert-True ($code -match [regex]::Escape($h)) ":BackupSingleValue no longer maps $h - reg export would get a short-name key it cannot resolve (regression of F10)."
+    }
+}
+
+
+# ===============================================================================
+# 88. The power action is split by SCOPE: :DoPowerPlanSwitch changes which scheme
+#     is active, :DoPowerTimeouts tunes whichever scheme IS active ("powercfg
+#     -change" always targets the active one). :DoPowerCore stays the aggregate so
+#     preset "power=1" and Apply-recommended keep their existing meaning.
+# ===============================================================================
+Invoke-Test 'Power action splits plan switch from plan-agnostic timeouts' {
+    $cmd = Read-Lines $CmdPath
+    $sw = ((Get-RoutineBody -Lines $cmd -Label 'DoPowerPlanSwitch') -join "`n")
+    $to = ((Get-RoutineBody -Lines $cmd -Label 'DoPowerTimeouts')   -join "`n")
+    $co = ((Get-RoutineBody -Lines $cmd -Label 'DoPowerCore')       -join "`n")
+    Assert-True ($sw.Length -gt 0) ':DoPowerPlanSwitch is missing.'
+    Assert-True ($to.Length -gt 0) ':DoPowerTimeouts is missing.'
+    Assert-True ($sw -match '(?i)setactive')      ':DoPowerPlanSwitch no longer activates a scheme.'
+    Assert-True ($sw -notmatch '(?i)powercfg -change') ':DoPowerPlanSwitch absorbed the timeout calls again - declining the plan switch would take the timeouts with it (regression of the split).'
+    Assert-True ($to -notmatch '(?i)setactive')   ':DoPowerTimeouts switches the scheme - it must only tune the ACTIVE one, or the current-plan path silently changes plans (regression of the split).'
+    $chg = ([regex]::Matches($to, '(?i)powercfg -change -')).Count
+    Assert-True ($chg -eq 6) "::DoPowerTimeouts should hold all 6 monitor/standby/disk AC+DC calls; found $chg."
+    Assert-True ($co -match '(?i)call :DoPowerPlanSwitch') ':DoPowerCore no longer switches the plan - preset "power=1" would quietly stop doing what it always did.'
+    Assert-True ($co -match '(?i)call :DoPowerTimeouts')   ':DoPowerCore no longer applies the timeouts - preset "power=1" would quietly stop doing what it always did.'
+    # Ultimate Performance is a workstation plan Windows hides on battery-powered machines,
+    # so which plan gets activated is now an explicit choice rather than a hidden yes/no.
+    Assert-True ($sw -match '(?i)if not defined _PWPLAN set "_PWPLAN=ultimate"') ':DoPowerPlanSwitch no longer defaults an unset request to ultimate - preset "power=1" and Apply-recommended would silently change meaning (regression).'
+    Assert-True ($sw -match '(?i)"%_PWPLAN%"=="high"')     ':DoPowerPlanSwitch lost the High Performance branch (regression).'
+    Assert-True ($sw -match '(?i)"%_PWPLAN%"=="balanced"') ':DoPowerPlanSwitch lost the Balanced branch - there would be no in-app way back to the Windows default plan (regression).'
+    Assert-True ($sw -match '(?i)381b4222-f694-41f0-9685-ff5bb260df2e') ':DoPowerPlanSwitch no longer knows the Balanced GUID (regression).'
+    Assert-True ($sw -match '(?i)8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c') ':DoPowerPlanSwitch no longer knows the High Performance GUID (regression).'
+}
+
+# ===============================================================================
+# 89. Declining the plan switch must NOT end the action. Every other option on the
+#     screen acts on the active scheme, so one "no" used to throw away four working
+#     changes. The screen also shows the current plan before asking.
+# ===============================================================================
+Invoke-Test ':Power offers a current-plan path when the switch is declined' {
+    $b = Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'Power'
+    $b = @($b)
+    Assert-True ($b.Count -gt 0) ':Power body empty.'
+    $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    Assert-True ($code -notmatch '(?i)if /i not "%_c%"=="Y" goto MainMenu') ':Power sends a declined plan switch straight back to the main menu again - hibernation, min CPU state and throttling become unreachable (regression of the current-plan path).'
+    Assert-True ($code -match '(?i)set /p "_c2=')             ':Power no longer asks whether to apply changes to the CURRENT plan (regression).'
+    Assert-True ($code -match '(?i)if defined _PWPLAN call :DoPowerPlanSwitch') ':Power no longer gates the scheme switch on the plan answer (regression).'
+    Assert-True ($code -match '(?i)set "_PWPLAN="')           ':Power does not clear _PWPLAN first - a stale value from a previous visit would switch the plan without being asked.'
+    Assert-True ($code -match '(?i)powercfg /getactivescheme') ':Power no longer shows the current plan before asking to change it (regression).'
+    Assert-True ($code -match '(?i)call :Summary')            ':Power no longer reports through :Summary.'
+    Assert-True ($code -match '(?i)set /p "_c=Choose \[1/2/3/N\]') ':Power no longer offers an explicit plan choice - a yes/no hides the fact that "yes" means a workstation plan (regression).'
+    foreach ($v in 'ultimate','high','balanced') {
+        Assert-True ($code -match ('(?i)set "_PWPLAN=' + $v + '"')) ":Power can no longer select the $v plan (regression)."
+    }
+    # The advisory lines are conditional (`if /i "%MACHINE%"=="laptop" echo ...`), so match
+    # any line that echoes - but still drop rem, because this test's own subject is discussed
+    # in the routine's comments and would satisfy the assertion without any user seeing it.
+    $echoes = (@($b | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' -and $_ -match '(?i)\becho\b' }) -join "`n")
+    Assert-True ($echoes -match '(?i)undervolt') ':Power no longer warns a laptop that a plan jump is where a stable undervolt fails - that is a real WHEA 0x124 on real hardware, not a theoretical caveat (regression).'
+    Assert-True ($echoes -match '(?i)MACHINE|battery-powered') ':Power lost the machine-aware framing on the plan warning (regression).'
+}
+
+# ===============================================================================
+# 90. Preset key power_timeouts = the timeouts WITHOUT the scheme switch, and it
+#     must not double-run when power=1 already covered them.
+# ===============================================================================
+Invoke-Test 'Preset key power_timeouts applies timeouts without switching plans' {
+    $cmd = Read-Lines $CmdPath
+    $chk = ((Get-RoutineBody -Lines $cmd -Label 'PresetCheckLine') -join "`n")
+    Assert-True ($chk -match '(?i)"%_k%"=="power_timeouts"') 'Preset validator lost the power_timeouts key.'
+    $all = ($cmd -join "`n")
+    Assert-True ($all -match '(?i)if not defined _P_POWER if defined _P_PWTIMEOUTS call :DoPowerTimeouts') 'Custom presets no longer apply power_timeouts, or lost the guard that stops it running twice alongside power=1.'
+    Assert-True ($chk -match '(?i)"%_k%"=="power_plan"') 'Preset validator lost the power_plan key - a preset could only ever get the hidden Ultimate default.'
+    $pk = ((Get-RoutineBody -Lines $cmd -Label 'PChkPlan') -join "`n")
+    Assert-True ($pk.Length -gt 0) ':PChkPlan is missing.'
+    foreach ($v in 'ultimate','high','balanced') {
+        Assert-True ($pk -match ('(?i)"%~1"=="' + $v + '"')) ":PChkPlan no longer accepts $v (regression)."
+    }
+    Assert-True ($pk -match '(?i)_perr\+=1') ':PChkPlan accepts an unrecognised plan name instead of reporting it (regression).'
+    Assert-True ($all -match '(?i)if defined _P_PWPLAN\s+set "_PWPLAN=%_P_PWPLAN%"') 'Custom presets parse power_plan but never hand it to :DoPowerPlanSwitch (regression).'
+}
+
+
+# ===============================================================================
+# 91. The power action captures an undo file BEFORE it changes anything - the last
+#     "mutates state with no backup" gap in the script. The capture reads the
+#     registry, not localized "powercfg /query" text, or it would silently record
+#     nothing on a non-English Windows and hand back a file that restores less
+#     than it claims.
+# ===============================================================================
+Invoke-Test ':PowerBackup captures an undo file before either power half changes anything' {
+    $cmd = Read-Lines $CmdPath
+    $pbAll = Get-RoutineBody -Lines $cmd -Label 'PowerBackup'
+    $pbAll = @($pbAll)
+    Assert-True ($pbAll.Count -gt 0) ':PowerBackup is missing.'
+    # Strip rem/echo first: this routine's own comment explains WHY it avoids the localized
+    # "Current AC Power Setting Index" text, which would satisfy the negative assertion below.
+    $pb = @($pbAll | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+    Assert-True ($pb.Length -gt 0) ':PowerBackup has no code lines - only comments?'
+    Assert-True ($pb -match '(?i)PowerSchemes')            ':PowerBackup no longer reads the scheme values from the registry (regression).'
+    Assert-True ($pb -match '(?i)ACSettingIndex')          ':PowerBackup no longer captures the AC timeout values.'
+    Assert-True ($pb -match '(?i)DCSettingIndex')          ':PowerBackup no longer captures the DC timeout values.'
+    Assert-True ($pb -notmatch '(?i)Current AC Power Setting') ':PowerBackup parses localized powercfg text again - it would capture nothing on a non-English Windows (regression).'
+    Assert-True ($pb -match '(?i)powercfg -setacvalueindex') ':PowerBackup no longer emits restore commands into the undo file.'
+    Assert-True ($pb -match '(?i)powercfg -setactive')       ':PowerBackup undo file no longer re-activates the captured scheme.'
+    Assert-True ($pb -match '(?i)never explicitly set')      ':PowerBackup no longer honest-declines a setting the scheme never had - it would guess a value instead of leaving the default (regression).'
+    # PROCTHROTTLEMIN is reachable on its own (decline the plan switch AND the timeouts, then
+    # say yes to the minimum processor state), so leaving it out made the prompt promise an
+    # undo that did not exist.
+    Assert-True ($pb -match '(?i)893dee8e-2bef-41e0-89c6-b55d0929964c') ':PowerBackup no longer captures PROCTHROTTLEMIN - the minimum-processor-state prompt would imply an undo it does not have (regression).'
+    # A partial run is the realistic failure here: the machine crashed part-way through the
+    # restore and never reached -setactive, so the plan stayed switched. It goes back FIRST.
+    $first = $pb.IndexOf('powercfg -setactive')
+    $write = $pb.IndexOf('powercfg -setacvalueindex')
+    Assert-True ($first -ge 0 -and $write -ge 0) ':PowerBackup undo file lost its setactive / value writes (regression).'
+    Assert-True ($first -lt $write) ':PowerBackup undo file re-activates the scheme only AFTER the value writes - a run that stops part-way leaves the plan switched (regression).'
+    $reactivations = ([regex]::Matches($pb, '(?i)powercfg -setactive')).Count
+    Assert-True ($reactivations -ge 2) ':PowerBackup undo file no longer re-activates the scheme after the writes - powercfg needs that for changed values to take effect (regression).'
+
+    $smp = ((Get-RoutineBody -Lines $cmd -Label 'SetMinProcState') -join "`n")
+    Assert-True ($smp -match '(?i)call :PowerBackup') ':SetMinProcState no longer captures an undo file - it is reachable without the plan switch or the timeouts, so nothing else would have captured one (regression).'
+
+    foreach ($r in 'DoPowerPlanSwitch','DoPowerTimeouts') {
+        # Strip rem/echo before the ordering check: :DoPowerTimeouts' own comment quotes
+        # "powercfg -change" while explaining why the timeouts are plan-agnostic, which
+        # would otherwise be found as the first "change" and sit before the capture call.
+        $bAll = Get-RoutineBody -Lines $cmd -Label $r
+        $bAll = @($bAll)
+        Assert-True ($bAll.Count -gt 0) ":$r body empty."
+        $b = @($bAll | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+        $cap = $b.IndexOf('call :PowerBackup')
+        $chg = [regex]::Match($b, '(?i)powercfg [-/]')
+        Assert-True ($cap -ge 0) ":$r no longer captures a power undo file (regression)."
+        Assert-True ($chg.Success -and $cap -lt $chg.Index) ":$r changes power settings before capturing the undo file (regression)."
+    }
+}
+
+# ===============================================================================
+# 92. One undo file per action, not per routine (:DoPowerCore calls both halves),
+#     so every entry point clears the marker and :PowerBackup no-ops if it is set.
+# ===============================================================================
+Invoke-Test 'Power undo file is captured once per action' {
+    $cmd = Read-Lines $CmdPath
+    $pb = ((Get-RoutineBody -Lines $cmd -Label 'PowerBackup') -join "`n")
+    Assert-True ($pb -match '(?i)if defined _PWBAK_FILE goto :eof') ':PowerBackup lost its once-per-pass guard - :DoPowerCore would write two undo files for one action (regression).'
+    foreach ($r in 'Power','ApplyRecommended','PresetBegin') {
+        $b = Get-RoutineBody -Lines $cmd -Label $r
+        $b = @($b)
+        Assert-True ($b.Count -gt 0) (":$r body empty.")
+        $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+        Assert-True ($code -match '(?i)set "_PWBAK_FILE="') ":$r does not clear _PWBAK_FILE, so a later power change in the same session would reuse a stale undo file and capture nothing (regression)."
+    }
+}
+
+# ===============================================================================
+# 93. The undo file is reachable from the UI - a backup nobody can run is not an
+#     undo. Item 6 on Backups & status, with Manage moved to 7.
+# ===============================================================================
+Invoke-Test ':RestorePowerBackup is wired into the Backups menu' {
+    $cmd = Read-Lines $CmdPath
+    $mb = ((Get-RoutineBody -Lines $cmd -Label 'MenuBackups') -join "`n")
+    Assert-True ($mb -match '(?i)6\.\s+Revert power settings') ':MenuBackups no longer offers the power revert item (regression).'
+    Assert-True ($mb -match '(?i)7\.\s+Manage / open backup folder') ':MenuBackups lost the renumbered Manage item.'
+    $ask = ((Get-RoutineBody -Lines $cmd -Label 'MenuBackups_ask') -join "`n")
+    Assert-True ($ask -match '(?i)"%sel%"=="6" goto RestorePowerBackup') 'Backups menu item 6 no longer routes to :RestorePowerBackup (regression).'
+    Assert-True ($ask -match '(?i)"%sel%"=="7" goto ManageBackups')      'Backups menu item 7 no longer routes to :ManageBackups (renumbering broke).'
+
+    # :RestorePowerBackup_ask does not start with "_", so it ends the routine body - concatenate.
+    $r1 = Get-RoutineBody -Lines $cmd -Label 'RestorePowerBackup'
+    $r2 = Get-RoutineBody -Lines $cmd -Label 'RestorePowerBackup_ask'
+    $rb = (@($r1) + @($r2)) -join "`n"
+    Assert-True ($rb -match '(?i)PowerPlan_\*\.bat') ':RestorePowerBackup no longer lists the PowerPlan_*.bat undo files.'
+    Assert-True ($rb -match '(?i)call "%_pfile%" /q')  ':RestorePowerBackup no longer runs the chosen undo file with /q (its own pause would block the menu).'
+}
+
+# ===============================================================================
+# 94. Two disclosure fixes: AutoEndTasks is a data-loss trade-off sold as "faster
+#     shutdown", and :Status shows the hardware probes that drive the advisories -
+#     otherwise the user cannot see what sincript concluded about their machine.
+# ===============================================================================
+Invoke-Test 'AutoEndTasks trade-off and hardware probes are disclosed' {
+    $cmd = Read-Lines $CmdPath
+    $pf = Get-RoutineBody -Lines $cmd -Label 'Performance'
+    $pf = @($pf)
+    Assert-True ($pf.Count -gt 0) ':Performance body empty.'
+    $pfEcho = (@($pf | Where-Object { $_.Trim() -match '^(?i)echo\b' }) -join "`n")
+    Assert-True ($pfEcho -match '(?i)AutoEndTasks') ':Performance screen no longer discloses the AutoEndTasks trade-off - unsaved work is lost at shutdown and the screen only says "faster shutdown" (regression).'
+    $core = ((Get-RoutineBody -Lines $cmd -Label 'DoPerformanceCore') -join "`n")
+    Assert-True ($core -match '(?i)AutoEndTasks') ':DoPerformanceCore no longer writes AutoEndTasks - screen text and code disagree.'
+
+    $st = Get-RoutineBody -Lines $cmd -Label 'Status'
+    $st = @($st)
+    Assert-True ($st.Count -gt 0) ':Status body empty.'
+    $stCode = @($st | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    Assert-True ($stCode -match '(?i)%MACHINE%')        ':Status no longer shows the detected machine class (regression).'
+    Assert-True ($stCode -match '(?i)%SYSDISK%')        ':Status no longer shows the detected disk type (regression).'
+    Assert-True ($stCode -match '(?i)call :DetectSysDisk') ':Status shows SYSDISK without probing for it - it would read as empty on a run that never hit the SysMain prompt (regression).'
+}
+
+
+# ===============================================================================
+# 95. The main-menu header shows the detected disk type next to Build / Win11 /
+#     GPU / Machine, and probes for it FIRST - printing %SYSDISK% without calling
+#     :DetectSysDisk renders an empty slot on a fresh run.
+# ===============================================================================
+Invoke-Test 'Main menu header shows the detected disk type' {
+    $b = Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'MainMenu'
+    $b = @($b)
+    Assert-True ($b.Count -gt 0) ':MainMenu body empty.'
+    $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    $probe = $code.IndexOf('call :DetectSysDisk')
+    $show  = $code.IndexOf('Disk=%SYSDISK%')
+    Assert-True ($show -ge 0)      ':MainMenu header no longer shows the detected disk type (regression).'
+    Assert-True ($probe -ge 0)     ':MainMenu prints Disk= without probing for it - the slot renders empty on a fresh run (regression).'
+    Assert-True ($probe -lt $show) ':MainMenu probes the disk AFTER printing it (regression).'
+}
+
+# ===============================================================================
+# 96. Every menu separator renders the same width. Batch has no layout engine, so
+#     a ragged menu is a real defect and an invisible one in source - the widths
+#     only diverge on screen. A caret escapes the next character, so "^&" occupies
+#     one column but two source characters; count rendered width, not raw length.
+# ===============================================================================
+Invoke-Test 'Menu separators all render the same width' {
+    $cmd = Read-Lines $CmdPath
+    $bad = New-Object System.Collections.Generic.List[string]
+    $widths = @{}
+    foreach ($l in $cmd) {
+        $trimmed = $l.TrimStart()
+        if ($trimmed -notmatch '^echo [=-]{4,}') { continue }
+        $arg = $trimmed.Substring(5)
+        $r = [regex]::Replace($arg, '\^(.)', '$1')
+        $widths[$r.Length] = $true
+        if ($r.Length -ne 83) {
+            $bad.Add(("{0} wide: {1}" -f $r.Length, $arg.Substring(0, [Math]::Min(44, $arg.Length))))
+        }
+    }
+    Assert-True ($widths.Keys.Count -gt 0) 'No separator lines found - has the menu changed shape?'
+    Assert-True ($bad.Count -eq 0) ("Separators must all render 83 columns or the menus look ragged. Offenders: " + (($bad | Select-Object -First 4) -join ' | '))
+}
+
+
+# ===============================================================================
+# 97. :DetectSysDisk caches its answer per MACHINE, not per session. The probe is
+#     correct but costs a runtime C# compile (Add-Type), which became visible the
+#     moment the disk type moved onto the main-menu header. The cache must be
+#     keyed on hardware so it self-invalidates, must reject a value the prober
+#     could never emit, and must never persist a failed probe.
+# ===============================================================================
+Invoke-Test ':DetectSysDisk caches its answer, keyed on hardware, never caching a failure' {
+    $b = Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'DetectSysDisk'
+    $b = @($b)
+    Assert-True ($b.Count -gt 0) ':DetectSysDisk body empty.'
+    $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+
+    Assert-True ($code -match '(?i)sysdisk\.cache')  ':DetectSysDisk no longer caches its result - every session pays the Add-Type compile again (regression).'
+    Assert-True ($code -match '(?i)Services\\disk\\Enum') ':DetectSysDisk cache is no longer keyed on the disk hardware ID - it could not notice a drive swap (regression).'
+    Assert-True ($code -match '(?i)if /i "%SYSDISK%"=="unknown" goto :eof') ':DetectSysDisk would cache an "unknown" - one failed probe becomes permanent (regression).'
+    Assert-True ($code -match '(?i)if /i not "!_sdcv!"=="ssd" if /i not "!_sdcv!"=="hdd" goto _sdProbe') ':DetectSysDisk trusts a cached value the prober could never emit (regression).'
+    Assert-True ($code -match '(?i)if not "!_sdck!"=="!_sdkey!" goto _sdProbe') ':DetectSysDisk no longer compares the cached hardware key before using the cache (regression).'
+
+    # the cache read must precede the probe, or it saves nothing
+    $hit   = $code.IndexOf('set "SYSDISK=!_sdcv!"')
+    $probe = $code.IndexOf(':_sdProbe')
+    Assert-True ($hit -ge 0 -and $probe -ge 0) ':DetectSysDisk lost its cache-hit / probe split (regression).'
+    Assert-True ($hit -lt $probe) ':DetectSysDisk runs the probe before consulting the cache (regression).'
+
+    # the write must use delayed expansion: a device instance path contains & and \
+    Assert-True ($code -match '(?i)> "!_sdcache!" echo !_sdkey!\^\|!SYSDISK!') ':DetectSysDisk cache write no longer uses delayed expansion with an escaped separator - an & in the device path would be re-parsed as an operator (regression).'
+}
+
+
+# ===============================================================================
+# 98. The FILE'S BYTES. Pure ASCII, uniform CRLF, no BOM - all three are
+#     load-bearing and all three break silently. A BOM puts three invisible bytes
+#     in front of "@echo off", so line 1 stops being a command. A lone LF before a
+#     label can make `goto` miss it. Non-ASCII in an ASCII-only script renders as
+#     mojibake under the console code page. Nothing else in this harness looks at
+#     bytes, and an editor that "helpfully" normalises the file leaves no other
+#     trace - the diff looks empty.
+# ===============================================================================
+Invoke-Test 'Shipped text files stay ASCII-only, uniform CRLF, no BOM' {
+    # Every file that ships and is read on Windows, not just the script. example.preset was
+    # edited once with a literal "`n" and picked up two bare LF endings that nothing noticed,
+    # which is exactly the silent-damage case this test exists for.
+    $targets = @(@{ Path = $CmdPath; Name = 'PerfTweaks.cmd'; Min = 1000 },
+                 @{ Path = $PresetPath; Name = 'example.preset'; Min = 50 })
+    $checked = 0
+    foreach ($tgt in $targets) {
+        if (-not (Test-Path -LiteralPath $tgt.Path)) { continue }
+        $checked++
+        $n = $tgt.Name
+        $bytes = [System.IO.File]::ReadAllBytes($tgt.Path)
+        Assert-True ($bytes.Length -gt $tgt.Min) "$n is suspiciously small - wrong path?"
+
+        $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+        Assert-True (-not $hasBom) "$n has a UTF-8 BOM - three invisible bytes in front of the first line (regression)."
+
+        $nonAscii = 0; $firstNon = -1; $loneLf = 0; $firstLf = -1; $loneCr = 0
+        for ($i = 0; $i -lt $bytes.Length; $i++) {
+            $b = $bytes[$i]
+            if ($b -gt 127) { $nonAscii++; if ($firstNon -lt 0) { $firstNon = $i } }
+            if ($b -eq 10 -and ($i -eq 0 -or $bytes[$i-1] -ne 13)) { $loneLf++; if ($firstLf -lt 0) { $firstLf = $i } }
+            if ($b -eq 13 -and ($i -eq $bytes.Length-1 -or $bytes[$i+1] -ne 10)) { $loneCr++ }
+        }
+        Assert-True ($nonAscii -eq 0) ("{0} is no longer ASCII-pure: {1} byte(s), first at offset {2}. It renders as mojibake under the console code page (regression)." -f $n, $nonAscii, $firstNon)
+        Assert-True ($loneLf -eq 0)   ("{0} has {1} bare LF line ending(s), first at offset {2}. In the script a label after a lone LF can be missed by goto; in any shipped file it means an edit was written with the wrong newline (regression)." -f $n, $loneLf, $firstLf)
+        Assert-True ($loneCr -eq 0)   ("{0} has {1} bare CR(s) - line endings are not uniform CRLF (regression)." -f $n, $loneCr)
+    }
+    Assert-True ($checked -ge 2) "Only $checked file(s) were byte-checked - a target path broke and this test was passing on less than it claims."
+}
+
+# ===============================================================================
+# 99. Every number a menu PRINTS is a number it HANDLES, and vice versa. Renumber
+#     a menu (item 6 was inserted into Backups & status, pushing Manage to 7) and
+#     a stale branch leaves an option that silently does nothing, or a handler with
+#     nothing to reach it. Both look completely fine in source.
+#     Only statically-numbered menus are checked; pickers that build their list
+#     with `for /l` have no literal items and are skipped by the >=3 threshold.
+# ===============================================================================
+Invoke-Test 'Menu items and their dispatch branches match exactly' {
+    $cmd = Read-Lines $CmdPath
+    $askLabels = @()
+    foreach ($l in $cmd) { if ($l -match '^:(\w+)_ask\s*$') { $askLabels += $Matches[1] } }
+    Assert-True ($askLabels.Count -gt 0) 'No :X_ask labels found - menus changed shape?'
+
+    $checked = 0
+    foreach ($m in $askLabels) {
+        $menu = Get-RoutineBody -Lines $cmd -Label $m
+        $menu = @($menu)
+        $shown = @()
+        foreach ($l in $menu) { if ($l -match '^echo\s+([0-9]+)\.\s') { $shown += $Matches[1] } }
+        if ($shown.Count -lt 3) { continue }        # dynamic picker, not a static menu
+
+        # Dispatch does not always live in :X_ask, and the variable is not always %sel% -
+        # :PathEditor branches inline on %_pesc% before its list is even drawn. Scan the menu
+        # body and the _ask body, and accept any "%<var>%"=="<n>" comparison.
+        $ask = Get-RoutineBody -Lines $cmd -Label ($m + '_ask')
+        $ask = @($ask)
+        $handled = @()
+        foreach ($l in ($menu + $ask)) { if ($l -match 'if(?:\s+/i)?\s+"%\w+%"=="([0-9]+)"') { $handled += $Matches[1] } }
+
+        $missing = @($shown | Where-Object { $handled -notcontains $_ })
+        $orphan  = @($handled | Where-Object { $shown -notcontains $_ })
+        Assert-True ($missing.Count -eq 0) (":$m prints option(s) " + ($missing -join ',') + " with no dispatch branch - selecting them does nothing (regression).")
+        Assert-True ($orphan.Count -eq 0)  (":${m}_ask dispatches option(s) " + ($orphan -join ',') + " that the menu never prints - dead branch, or a renumbering half-applied (regression).")
+        $checked++
+    }
+    Assert-True ($checked -ge 8) ("Only $checked static menu(s) were checked - the detection broke and this test was passing vacuously.")
+}
+
+# ===============================================================================
+# 100. EVERY registry write goes through :SafeRegAdd / :SafeRegDelete. That pair is
+#      where the per-value .reg backup, the idempotent skip, the [FAIL] line and the
+#      _FAILS tally all live, so a bare `reg add` anywhere else is a change with no
+#      undo, no honesty and no record - it defeats the entire safety model in one
+#      line that looks completely ordinary. The two permitted writes are the apply
+#      tails themselves.
+# ===============================================================================
+Invoke-Test 'No registry write bypasses :SafeRegAdd / :SafeRegDelete' {
+    $cmd = Read-Lines $CmdPath
+    $offenders = New-Object System.Collections.Generic.List[string]
+    $total = 0
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        $l = $cmd[$i].Trim()
+        if ($l -match '^(?i)rem\b') { continue }                       # a comment naming reg add is not a call
+        if ($l -notmatch '^(?i)reg\s+(add|delete)\b') {
+            # also catch it smuggled through the :Run helpers
+            if ($l -match '(?i)call :Run(Live)?\s+"reg\s+(add|delete)\b') {
+                $offenders.Add(("L{0}: {1}" -f ($i+1), $l)); }
+            continue
+        }
+        $total++
+        # walk back to the owning label
+        $owner = '<none>'
+        for ($j = $i; $j -ge 0; $j--) { if ($cmd[$j] -match '^:(\w+)') { $owner = $Matches[1]; break } }
+        if ($owner -ne '_sraApply' -and $owner -ne '_srdApply') {
+            $offenders.Add(("L{0} in :{1}: {2}" -f ($i+1), $owner, $l))
+        }
+    }
+    Assert-True ($total -ge 2) "Expected at least the 2 wrapper writes, found $total - :SafeRegAdd / :SafeRegDelete changed shape and this test would pass vacuously."
+    Assert-True ($offenders.Count -eq 0) ("Registry write outside the backed-up wrappers - no undo file, no [FAIL], no _FAILS tally: " + (($offenders | Select-Object -First 3) -join ' | '))
 }
 
 # ---- summary ------------------------------------------------------------------
