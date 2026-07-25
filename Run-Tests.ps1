@@ -2453,6 +2453,61 @@ Invoke-Test 'No registry write bypasses :SafeRegAdd / :SafeRegDelete' {
     Assert-True ($offenders.Count -eq 0) ("Registry write outside the backed-up wrappers - no undo file, no [FAIL], no _FAILS tally: " + (($offenders | Select-Object -First 3) -join ' | '))
 }
 
+# ===============================================================================
+# 101. A typed DNS resolver is free text on its way to a command line - the shape
+#      that let & | < > be parsed as operators elsewhere. Two defences, both
+#      asserted: :_ip4_ok allows nothing but digits and dots and range-checks all
+#      four octets, and every use is late-expanded so even a value that got past
+#      it stays literal. The preset key runs the same validator or it becomes the
+#      way round the menu. Also: flushing the cache is its own action, and the
+#      current-resolver line is a registry read, never localized netsh output.
+# ===============================================================================
+Invoke-Test 'Custom DNS input is validated before it reaches a command line' {
+    $cmd = Read-Lines $CmdPath
+    $v = Get-RoutineBody -Lines $cmd -Label '_ip4_ok'
+    $v = @($v)
+    Assert-True ($v.Count -gt 0) ':_ip4_ok is missing.'
+    $vc = @($v | Where-Object { $_.Trim() -notmatch '^(?i)(echo\(|rem)\b' }) -join "`n"
+    Assert-True ($vc -match '(?i)findstr /r /x')  ':_ip4_ok no longer anchors its charset check - a value with & | < > could reach the command line (regression).'
+    # All four octets, not "at least one" - dropping a single check leaves the rest matching.
+    $oct = ([regex]::Matches($vc, '(?i)GTR 255')).Count
+    Assert-True ($oct -eq 4) "::_ip4_ok range-checks $oct octet(s), not 4 - the unchecked position accepts anything up to 999 (regression)."
+
+    $d = Get-RoutineBody -Lines $cmd -Label 'DnsCustom'
+    $d = @($d)
+    Assert-True ($d.Count -gt 0) ':DnsCustom is missing.'
+    $dc = @($d | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+    # both prompts validated, and every use late-expanded so a metacharacter stays literal
+    $checks = ([regex]::Matches($dc, '(?i)call :_ip4_ok')).Count
+    Assert-True ($checks -ge 2) "::DnsCustom validates fewer than both resolvers ($checks) - the unchecked one reaches PowerShell (regression)."
+    Assert-True ($dc -notmatch '%_dns1%' -and $dc -notmatch '%_dns2%') ':DnsCustom expands a typed resolver with %% instead of !! - cmd would parse & | < > in it as operators at parse time (regression).'
+    Assert-True ($dc -match "(?i)DNSSRV='!_dns1!'") ':DnsCustom no longer builds DNSSRV from the validated value (regression).'
+
+    # the preset door has to use the same validator, or it becomes the way round the menu
+    $pk = ((Get-RoutineBody -Lines $cmd -Label 'PChkDns') -join "`n")
+    Assert-True ($pk -match '(?i)call :_ip4_ok') 'Preset key dns accepts a literal address without the validator the menu uses (regression).'
+    $pn = ((Get-RoutineBody -Lines $cmd -Label 'PresetDnsByName') -join "`n")
+    Assert-True ($pn -match '(?i)set "DNSSRV="') ':PresetDnsByName does not clear DNSSRV first - a stale list from an earlier call would be applied instead (regression).'
+
+    # flushing the cache is its own action, not something only a full stack reset can do
+    $f = Get-RoutineBody -Lines $cmd -Label 'FlushDns'
+    $f = @($f)
+    Assert-True ($f.Count -gt 0) ':FlushDns is missing.'
+    $fc = @($f | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
+    Assert-True ($fc -match '(?i)call :Run "ipconfig /flushdns"') ':FlushDns no longer flushes (regression).'
+    Assert-True ($fc -match '(?i)call :Summary')                  ':FlushDns reports without :Summary, so a failure could print as success (regression).'
+
+    # the current-resolver line must stay a registry read, not localized netsh text
+    # Strip rem first: this routine's comment explains WHY it avoids "show dnsservers",
+    # which would satisfy the negative assertion below without any netsh call existing.
+    $sAll = Get-RoutineBody -Lines $cmd -Label 'ShowCurrentDns'
+    $sAll = @($sAll)
+    Assert-True ($sAll.Count -gt 0) ':ShowCurrentDns is missing.'
+    $s = @($sAll | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    Assert-True ($s -match '(?i)Tcpip\\Parameters\\Interfaces') ':ShowCurrentDns no longer reads the interface keys (regression).'
+    Assert-True ($s -notmatch '(?i)show dnsservers') ':ShowCurrentDns parses localized netsh output - it would show nothing on a translated Windows and read as "no DNS set" (pitfall 26 regression).'
+}
+
 # ---- summary ------------------------------------------------------------------
 Write-Host ""
 if ($script:Failures.Count -eq 0) {
