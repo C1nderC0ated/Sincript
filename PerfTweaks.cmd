@@ -170,6 +170,7 @@ echo =============================  NETWORK ^& DNS  ============================
 echo     1.  Apply TCP tweaks        (autotuning/heuristics/RSS/RSC, optional low-latency)
 echo     2.  Set DNS                 (Cloudflare / Google / Quad9 / automatic)
 echo     3.  Reset network stack     (winsock / ip / dns)
+echo     4.  Flush DNS cache          (just the resolver cache - no stack changes)
 echo     0.  Back
 echo ===================================================================================
 
@@ -180,6 +181,7 @@ if not defined sel goto MenuNetwork_ask
 if "%sel%"=="1" goto NetworkApply
 if "%sel%"=="2" goto MenuDns
 if "%sel%"=="3" goto NetReset
+if "%sel%"=="4" goto FlushDns
 if "%sel%"=="0" goto MainMenu
 goto MenuNetwork
 
@@ -188,10 +190,12 @@ cls
 call :Logo
 echo ===============================  SET DNS  =========================================
 echo  IPv4 + IPv6, applied to all active adapters, DNS cache flushed. Fully reversible.
+call :ShowCurrentDns
 echo     1.  Cloudflare   1.1.1.1 / 1.0.0.1
 echo     2.  Google       8.8.8.8 / 8.8.4.4
 echo     3.  Quad9        9.9.9.9 / 149.112.112.112   (blocks known-malicious domains)
 echo     4.  Revert to automatic (DHCP)
+echo     5.  Custom server            (enter your own resolver)
 echo     0.  Back
 echo ===================================================================================
 
@@ -203,6 +207,7 @@ if "%sel%"=="1" goto DnsCloudflare
 if "%sel%"=="2" goto DnsGoogle
 if "%sel%"=="3" goto DnsQuad9
 if "%sel%"=="4" goto DnsAuto
+if "%sel%"=="5" goto DnsCustom
 if "%sel%"=="0" goto MenuNetwork
 goto MenuDns
 rem =====================================================================================
@@ -981,6 +986,99 @@ goto MenuNetwork
 rem =====================================================================================
 rem  ACTION: DNS options
 rem =====================================================================================
+:FlushDns
+cls
+call :Logo
+echo ==========================  Flush DNS resolver cache  =============================
+echo  Clears cached name lookups only. No adapter, stack or DNS-server change - this is
+echo  the "a site moved and Windows is still using the old address" fix, and it is what
+echo  you want far more often than a full stack reset.
+echo ===================================================================================
+set "_FAILS=0" & set "_RUNTRACK=1"
+call :Run "ipconfig /flushdns"
+call :Summary "DNS resolver cache flushed."
+pause
+goto MenuNetwork
+
+:ShowCurrentDns
+rem  Reads the statically configured resolver straight out of the Tcpip interface keys.
+rem  Deliberately NOT "netsh interface ip show dnsservers": that output is localized, so a
+rem  parser built on its English wording would show nothing on a translated Windows and the
+rem  failure would look like "no DNS set" rather than an error (pitfall 26). REG_SZ value
+rem  names are identical in every language, and this is a plain reg query - no PowerShell.
+rem
+rem  NameServer is populated only when a resolver was set explicitly, which is exactly what
+rem  this menu does; an empty one means DHCP is supplying it. That makes the line honest in
+rem  both directions instead of guessing.
+set "_curdns="
+for /f "tokens=2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces" /s /v NameServer 2^>nul ^| findstr /I /C:"REG_SZ"') do if not "%%B"=="" set "_curdns=%%B"
+if defined _curdns echo  Currently set: !_curdns!
+if not defined _curdns echo  Currently set: ^(none - your adapters are taking DNS from DHCP^)
+goto :eof
+
+:_ip4_ok
+rem  Validates !_IPCHK! as a dotted-quad IPv4 address; errorlevel 1 if it is not one.
+rem
+rem  This is user-typed free text on its way into a command line, which is the shape that
+rem  bit the sibling project: a value expanded with %% before it was checked, so anything
+rem  containing ^& ^| ^< ^> was parsed as an operator instead of passed as data. Two defences,
+rem  both needed. The findstr pass allows nothing but digits and dots, so no metacharacter
+rem  can survive it; every use afterwards is delayed (!var!) so even that is literal.
+rem  The octet range check is the correctness half - 999.1.1.1 is not an injection risk but
+rem  it is not an address either, and failing here beats a confusing error from Windows.
+echo(!_IPCHK!| findstr /r /x /c:"[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*" >nul || exit /b 1
+for /f "tokens=1-4 delims=." %%a in ("!_IPCHK!") do (
+    if %%a GTR 255 exit /b 1
+    if %%b GTR 255 exit /b 1
+    if %%c GTR 255 exit /b 1
+    if %%d GTR 255 exit /b 1
+)
+exit /b 0
+
+:DnsCustom
+cls
+call :Logo
+echo ==============================  Custom DNS server  ================================
+echo  Enter an IPv4 resolver of your own - a router, a Pi-hole, NextDNS, a corporate
+echo  server, or a provider not listed on the previous screen.
+echo.
+echo  IPv4 only. Your IPv6 DNS is left exactly as it is, so if IPv6 is active the system
+echo  may still resolve through it - that is Windows' choice, not something this hides.
+echo  Option 4 on the previous screen puts everything back to DHCP.
+echo ===================================================================================
+call :ShowCurrentDns
+echo.
+set "_dns1="
+set /p "_dns1=Primary resolver (blank = cancel): "
+if not defined _dns1 goto MenuDns
+set "_IPCHK=!_dns1!"
+call :_ip4_ok || (
+    echo.
+    echo [FAIL] Not an IPv4 address. Four numbers 0-255 separated by dots, e.g. 192.168.1.1
+    pause
+    goto DnsCustom
+)
+set "_dns2="
+set /p "_dns2=Secondary resolver (optional, blank = none): "
+if not defined _dns2 goto _dnsCustGo
+set "_IPCHK=!_dns2!"
+call :_ip4_ok || (
+    echo.
+    echo [FAIL] Not an IPv4 address. Leave it blank if you only want one resolver.
+    pause
+    goto DnsCustom
+)
+
+:_dnsCustGo
+rem  Built from values that have passed :_ip4_ok, so DNSSRV can only ever contain digits,
+rem  dots, quotes and commas by the time :ApplyDns expands it into the PowerShell call.
+if defined _dns2 set "DNSSRV='!_dns1!','!_dns2!'"
+if not defined _dns2 set "DNSSRV='!_dns1!'"
+echo.
+call :ApplyDns "Custom (!_dns1!)"
+pause
+goto MenuDns
+
 :DnsCloudflare
 set "DNSSRV='1.1.1.1','1.0.0.1','2606:4700:4700::1111','2606:4700:4700::1001'"
 cls
@@ -3380,10 +3478,15 @@ call :ApplyDns "Quad9"
 goto :eof
 
 :PresetDnsByName
-rem %1 = cloudflare | google | quad9   (used by custom presets, no prompt)
+rem %1 = cloudflare | google | quad9 | a literal IPv4   (used by custom presets, no prompt)
+rem  Clear first: DNSSRV is global, so an address list left over from an earlier call would
+rem  survive the three name tests below and get applied instead of the value asked for.
+set "DNSSRV="
 if /i "%~1"=="cloudflare" set "DNSSRV='1.1.1.1','1.0.0.1','2606:4700:4700::1111','2606:4700:4700::1001'"
 if /i "%~1"=="google"     set "DNSSRV='8.8.8.8','8.8.4.4','2001:4860:4860::8888','2001:4860:4860::8844'"
 if /i "%~1"=="quad9"      set "DNSSRV='9.9.9.9','149.112.112.112','2620:fe::fe','2620:fe::9'"
+rem  Anything else reaching here is a literal IPv4 that :PChkDns already validated.
+if not defined DNSSRV set "DNSSRV='%~1'"
 call :ApplyDns "%~1"
 goto :eof
 rem ---------- returnable tweak wrappers (reused by heavy + custom presets) ----------
@@ -3844,7 +3947,12 @@ goto :eof
 if /i "%~1"=="cloudflare" ( set "_P_DNS=cloudflare" & set /a _pgood+=1 & goto :eof )
 if /i "%~1"=="google"     ( set "_P_DNS=google"     & set /a _pgood+=1 & goto :eof )
 if /i "%~1"=="quad9"      ( set "_P_DNS=quad9"      & set /a _pgood+=1 & goto :eof )
->>"%_perrfile%" echo   bad value "%~1" for key dns (use cloudflare, google or quad9)
+rem  Also accept a literal IPv4, so an unattended preset can point at a router or Pi-hole
+rem  instead of only the three bundled providers. Same validator the interactive screen
+rem  uses, so a preset cannot smuggle in something the menu would have rejected.
+set "_IPCHK=%~1"
+call :_ip4_ok && ( set "_P_DNS=%~1" & set /a _pgood+=1 & goto :eof )
+>>"%_perrfile%" echo   bad value "%~1" for key dns (use cloudflare, google, quad9 or an IPv4 address)
 set /a _perr+=1
 goto :eof
 rem =====================================================================================
