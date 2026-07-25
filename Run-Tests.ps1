@@ -115,6 +115,19 @@ Invoke-Test 'All goto/call targets resolve to a real label' {
         # skip comment lines so words inside :: / rem text are not read as references
         if ($trimmed -match '^(?i)(rem\b|::)') { continue }
 
+        # Blank the payload of `powershell -Command "..."` before scanning. Its contents are
+        # data for a child process, not this script's control flow - and :PowerBackup's
+        # payload literally assembles a DIFFERENT batch file, whose ":pt_do" / ":pt_bad"
+        # labels exist only in that generated output. Same class as pitfall 27's
+        # strip_echoed(): text this script emits is not text this script runs. Only the
+        # quoted payload is removed, so a real `& goto :typo` after the closing quote is
+        # still scanned.
+        $ci = $ln.IndexOf('-Command "')
+        if ($ci -ge 0) {
+            $close = $ln.LastIndexOf('"')
+            if ($close -gt $ci + 9) { $ln = $ln.Substring(0, $ci) + $ln.Substring($close + 1) }
+        }
+
         foreach ($m in [regex]::Matches($ln, '(?i)\bgoto\s+:?(\w+)')) {
             $t = $m.Groups[1].Value
             if ($t -ieq 'eof') { continue }
@@ -2155,6 +2168,25 @@ Invoke-Test ':PowerBackup captures an undo file before either power half changes
     Assert-True ($first -lt $write) ':PowerBackup undo file re-activates the scheme only AFTER the value writes - a run that stops part-way leaves the plan switched (regression).'
     $reactivations = ([regex]::Matches($pb, '(?i)powercfg -setactive')).Count
     Assert-True ($reactivations -ge 2) ':PowerBackup undo file no longer re-activates the scheme after the writes - powercfg needs that for changed values to take effect (regression).'
+
+    # The generated file is real cmd and gets the same honesty rule as the script that wrote
+    # it: every restore goes through a counting helper and the summary reflects the count.
+    # It used to print a flat "restored" line whatever happened, so a run that could write
+    # nothing still read as success - pitfall 18, living inside generated output.
+    # Assert EVERY emitted powercfg goes through the helper, not merely that one does -
+    # replacing a single call site would otherwise leave this green.
+    $emitPc  = ([regex]::Matches($pb, "'powercfg -set")).Count
+    $emitVia = ([regex]::Matches($pb, "'call :pt_do powercfg -set")).Count
+    Assert-True ($emitVia -ge 3)   ':PowerBackup emits fewer than three counted powercfg restores - the undo file lost commands (regression).'
+    Assert-True ($emitPc -eq 0)    ':PowerBackup emits a powercfg restore that bypasses its counting helper - that failure would go unrecorded (regression).'
+    Assert-True ($pb -match '(?i)\[OK\] Restored')         ':PowerBackup undo file lost its counted [OK] summary (regression).'
+    Assert-True ($pb -match '(?i)\[WARN\]')                ':PowerBackup undo file has no [WARN] branch - a partial restore would still report success (regression).'
+    # The DEFINITION, not the name - "call :pt_do" satisfies a bare name match, so deleting
+    # the helper body would have left the old assertion green while the file failed to run.
+    Assert-True ($pb -match "':pt_do','")                 ':PowerBackup undo file calls :pt_do but no longer emits its definition - the generated file would die on an unknown label (regression).'
+    Assert-True ($pb -match "':pt_bad','")                ':PowerBackup undo file no longer emits the :pt_bad failure branch (regression).'
+    # cmd-quoting: the payload lives inside powershell -Command "..." so a raw " truncates it
+    Assert-True ($pb -notmatch 'set \"PT_OK') ':PowerBackup embeds a raw double quote in a cmd-quoted PowerShell payload - cmd ends the argument at the first one. Build quotes with [char]34 (regression).'
 
     $smp = ((Get-RoutineBody -Lines $cmd -Label 'SetMinProcState') -join "`n")
     Assert-True ($smp -match '(?i)call :PowerBackup') ':SetMinProcState no longer captures an undo file - it is reachable without the plan switch or the timeouts, so nothing else would have captured one (regression).'
