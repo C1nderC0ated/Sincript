@@ -153,8 +153,7 @@ if it didn't exist before.
 
 ## Custom presets
 
-You can define your own preset as a small text file and have the script apply
-it.
+You can define your own preset as a small text file and have the script apply it.
 
 1. Create a folder named **`sincript_presets`** next to `PerfTweaks.cmd`.
 2. Put a text file in it ending in **`.preset`** (e.g. `mypreset.preset`). A ready-to-edit **`example.preset`** ships with Sincript.
@@ -219,8 +218,7 @@ They change nothing on their own — you read first, then decide.
 
 ### Edit PATH
 
-Edits the **System** (`HKLM`, all users, needs Administrator) or **User**
-(`HKCU`, just you) `PATH`.
+Edits the **System** (`HKLM`, all users, needs Administrator) or **User** (`HKCU`, just you) `PATH`.
 
 - Lists `PATH` as numbered entries and flags any folder that no longer exists as
   **`[missing]`** — the dead entries worth clearing out.
@@ -265,7 +263,7 @@ something, using the Windows **Restart Manager** — the same API installers use
 The script is built around being undoable.
 
 - **Per-value registry backups.** Before changing any registry value, the script saves a small `.reg` file with **only that one value's previous state** to `Documents\PerfTweaks_Backups` (~1 KB each). Double-click it to put the value back. Values containing quotes or empty `REG_SZ` data are backed up in a form that restores correctly; filenames use a wide random suffix so two values under the same key can't overwrite each other's undo file in one pass. Re-applying a value already at the target (`REG_DWORD` or `REG_SZ`) is skipped, so a redundant apply can't overwrite its original backup. If the `.reg` backup cannot be written, the live registry write is **refused**.
-- **Power settings are captured before they change.** The power action used to be the one place that mutated state with nothing saved — which is why the minimum-processor-state prompt admitted "no in-app undo". It now writes a runnable `PowerPlan_<random>.bat` into the backup folder first, holding the scheme that was active, its monitor / standby / disk idle timeouts in seconds, and the minimum processor state in percent — and **Backups & status → Revert power settings** runs it back. The file re-activates the saved plan as its **first** line and again at the end: the plan is the one thing you most need back, so a run that stops part-way still leaves you on it rather than stranded on the new one. Values are read from the registry rather than parsed out of `powercfg /query` output, because that output is localized — text parsing would quietly capture nothing on a non-English Windows. A timeout the scheme never had explicitly is written into the file as a comment instead of guessed at, so the scheme default keeps applying. A failed capture **warns rather than blocks**: unlike an overwritten file, power options stay reachable through Control Panel, so refusing the action would cost more than it protects.
+- **Power settings are captured before they change.** The power action used to be the one place that mutated state with nothing saved — which is why the minimum-processor-state prompt admitted "no in-app undo". It now writes a runnable `PowerPlan_<random>.bat` into the backup folder first, holding the scheme that was active, its monitor / standby / disk idle timeouts in seconds, and the minimum processor state in percent. Every restore line in that file runs through a small counting helper, so it ends with `[OK] Restored n` or `[WARN] n restored, m FAILED` rather than a flat success line - generated output is real cmd and gets the same honesty rule as the script that wrote it — and **Backups & status → Revert power settings** runs it back. The file re-activates the saved plan as its **first** line and again at the end: the plan is the one thing you most need back, so a run that stops part-way still leaves you on it rather than stranded on the new one. Values are read from the registry rather than parsed out of `powercfg /query` output, because that output is localized — text parsing would quietly capture nothing on a non-English Windows. A timeout the scheme never had explicitly is written into the file as a comment instead of guessed at, so the scheme default keeps applying. A failed capture **warns rather than blocks**: unlike an overwritten file, power options stay reachable through Control Panel, so refusing the action would cost more than it protects.
 - **File backups are write-once.** For the three actions that replace a *file* — apply/reset `hosts`, OpenAsar, and the Unity `boot.config` — the backup kept beside the original (`hosts.bak`, `app.asar.bak`, `boot.config.bak`) is written **once** and never overwritten afterwards. That matters because all three are meant to be re-run: the OpenAsar screen says so outright, since a Discord update reverts the patch. Copying unconditionally on every run meant the second run backed up *the already-applied file over the pristine original*, so "restore the `.bak`" restored the modification onto itself. A separate randomized snapshot (`hosts_<random>.bak`, `Discord_app.asar.bak`) goes to the backup folder each run, so re-runs accumulate rather than overwrite. If no backup lands at all, the write is **refused** rather than performed and apologised for afterwards.
 - **Full registry export** (optional) — exports all of `HKLM` and `HKCU` to `Documents\PerfTweaks_Backups`. It verifies both exports actually produced a file before reporting success, so a failed or partial backup (not elevated, or the folder isn't writable) is flagged `[ERROR]` instead of a misleading `[OK]`.
 - **System Restore Point** (optional) — created on demand; `Apply recommended safe set` also offers to make one first.
