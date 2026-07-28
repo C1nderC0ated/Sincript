@@ -2382,12 +2382,12 @@ Invoke-Test 'Menu separators all render the same width' {
         $arg = $trimmed.Substring(5)
         $r = [regex]::Replace($arg, '\^(.)', '$1')
         $widths[$r.Length] = $true
-        if ($r.Length -ne 83) {
+        if ($r.Length -ne 98) {
             $bad.Add(("{0} wide: {1}" -f $r.Length, $arg.Substring(0, [Math]::Min(44, $arg.Length))))
         }
     }
     Assert-True ($widths.Keys.Count -gt 0) 'No separator lines found - has the menu changed shape?'
-    Assert-True ($bad.Count -eq 0) ("Separators must all render 83 columns or the menus look ragged. Offenders: " + (($bad | Select-Object -First 4) -join ' | '))
+    Assert-True ($bad.Count -eq 0) ("Separators must all render 98 columns or the menus look ragged. Offenders: " + (($bad | Select-Object -First 4) -join ' | '))
 }
 
 
