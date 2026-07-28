@@ -196,7 +196,7 @@ rem ============================================================================
 :MainMenu
 cls
 call :Logo
-echo ================================  MAIN MENU  ======================================
+echo ==========================================  MAIN MENU  ===========================================
 rem  Cached after the first call, so this is one probe per session, not per menu draw.
 call :DetectSysDisk
 call :DetectUndervolt
@@ -204,7 +204,7 @@ set "_uvhdr=none found"
 if defined UVTOOL set "_uvhdr=!UVTOOL!"
 echo   Build %WIN_BUILD%   Win11=%IS_WIN11%   GPU=%GPU%   Machine=%MACHINE%   Disk=%SYSDISK%
 echo   Undervolt tool: !_uvhdr!
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 echo     1.  Cleanup ^& repair        (temp/logs, DISM/SFC, Windows Update, Store, WinSxS)
 echo     2.  Performance tweaks       (GameDVR off, priorities, snappier UI)
 echo     3.  Privacy ^& telemetry      (telemetry, ads, Cortana, location off)
@@ -213,13 +213,13 @@ echo     5.  Network ^& DNS            (TCP tweaks, DNS, reset stack)
 echo     6.  Apps ^& files            (OpenAsar, boot.config, hosts, SteamLight, startup)
 echo     7.  Advanced                 (at your own risk - mitigations, timers, IPv6, GPU)
 echo     8.  Backups ^& status        (restore point, registry backup, current status)
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 echo     9.  Apply recommended safe set  (one click: 1-5 core tweaks, no prompts)
 echo    10.  Presets (light / moderate / heavy / custom)  + restore preset backup
 echo    11.  What was excluded (info)
 echo    12.  System tools               (PATH editor, find what locks a file)
 echo     0.  Exit
-echo ===================================================================================
+echo ==================================================================================================
 
 :MainMenu_ask
 set "sel="
@@ -261,14 +261,14 @@ rem ============================================================================
 :MenuCleanup
 cls
 call :Logo
-echo ============================  CLEANUP ^& REPAIR  ===================================
+echo =======================================  CLEANUP ^& REPAIR  =======================================
 echo     1.  Clean temp / logs / caches (+ optional: shaders, Recycle Bin, Event Viewer, Disk Cleanup)
 echo     2.  DISM + SFC system integrity
 echo     3.  Reset Windows Update components
 echo     4.  Re-register Microsoft Store / apps
 echo     5.  Compact WinSxS (free disk space)
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 
 :MenuCleanup_ask
 set "sel="
@@ -288,13 +288,13 @@ rem ============================================================================
 :MenuNetwork
 cls
 call :Logo
-echo =============================  NETWORK ^& DNS  =====================================
+echo ========================================  NETWORK ^& DNS  =========================================
 echo     1.  Apply TCP tweaks        (autotuning/heuristics/RSS/RSC, optional low-latency)
 echo     2.  Set DNS                 (Cloudflare / Google / Quad9 / automatic)
 echo     3.  Reset network stack     (winsock / ip / dns)
 echo     4.  Flush DNS cache          (just the resolver cache - no stack changes)
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 
 :MenuNetwork_ask
 set "sel="
@@ -311,7 +311,7 @@ goto MenuNetwork
 :MenuDns
 cls
 call :Logo
-echo ===============================  SET DNS  =========================================
+echo ===========================================  SET DNS  ============================================
 echo  IPv4 + IPv6, applied to all active adapters, DNS cache flushed. Fully reversible.
 call :ShowCurrentDns
 echo     1.  Cloudflare   1.1.1.1 / 1.0.0.1
@@ -320,7 +320,7 @@ echo     3.  Quad9        9.9.9.9 / 149.112.112.112   (blocks known-malicious do
 echo     4.  Revert to automatic (DHCP)
 echo     5.  Custom server            (enter your own resolver)
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 
 :MenuDns_ask
 set "sel="
@@ -340,7 +340,7 @@ rem ============================================================================
 :MenuApps
 cls
 call :Logo
-echo =============================  APPS ^& FILES  ======================================
+echo =========================================  APPS ^& FILES  =========================================
 echo     1.  Install OpenAsar into Discord
 echo     2.  Place Unity boot.config into a game folder
 echo     3.  Apply custom hosts file (ad/telemetry blocklist)
@@ -351,7 +351,7 @@ echo     7.  Remove timer resolution
 echo     8.  Remove built-in apps (debloat)
 echo     9.  Manage startup programs (enable / disable, reversible)
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 
 :MenuApps_ask
 set "sel="
@@ -375,7 +375,7 @@ rem ============================================================================
 :MenuAdvanced
 cls
 call :Logo
-echo ====================  ADVANCED  -  AT YOUR OWN RISK  ==============================
+echo ================================  ADVANCED  -  AT YOUR OWN RISK  =================================
 echo  Reversible, never part of "Apply recommended". Most need a reboot.
 echo     1.  Disable CPU mitigations        (faster, LESS secure)
 echo     2.  Re-enable CPU mitigations      (secure default)
@@ -388,7 +388,7 @@ echo     8.  %GPU% telemetry / background tasks off
 echo     9.  GPU hardware scheduling (HAGS) on/off
 echo    10.  Set permanent process priority  (per .exe, e.g. a game)
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 
 :MenuAdvanced_ask
 set "sel="
@@ -413,7 +413,7 @@ rem ============================================================================
 :MenuBackups
 cls
 call :Logo
-echo ===========================  BACKUPS ^& STATUS  ====================================
+echo =======================================  BACKUPS ^& STATUS  =======================================
 echo     1.  Create System Restore Point
 echo     2.  Full registry backup (HKLM + HKCU export)
 echo     3.  Show current status / what's applied
@@ -422,7 +422,7 @@ echo     5.  Restore a single value backup (.reg)
 echo     6.  Revert power settings (from a power backup)
 echo     7.  Manage / open backup folder
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 
 :MenuBackups_ask
 set "sel="
@@ -444,12 +444,12 @@ rem ============================================================================
 :Cleanup
 cls
 call :Logo
-echo ================================  CLEANUP  ========================================
+echo ===========================================  CLEANUP  ============================================
 echo  Deletes temp files, Windows logs, thumbnail cache, crash dumps, Delivery Optimization
 echo  cache, and telemetry caches, then flushes DNS. Optional: shader caches, Recycle Bin,
 echo  Event Viewer, or launch Disk Cleanup / Storage Sense. Only files are removed; nothing
 echo  is changed in the registry. Prefetch is intentionally left alone.
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Proceed? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuCleanup
@@ -563,10 +563,10 @@ rem ============================================================================
 :SfcDism
 cls
 call :Logo
-echo =============================  DISM + SFC integrity  ==============================
+echo =====================================  DISM + SFC integrity  =====================================
 echo  Repairs the component store (DISM RestoreHealth) then verifies system files (SFC).
 echo  Takes several minutes; progress streams below - let it finish.
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Run DISM + SFC now? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuCleanup
@@ -581,13 +581,13 @@ rem ============================================================================
 :WUReset
 cls
 call :Logo
-echo =======================  Reset Windows Update components  =========================
+echo ===============================  Reset Windows Update components  ================================
 echo  Stops update services, renames SoftwareDistribution and catroot2, restarts them.
 echo  Fixes most stuck-update problems. Safe.
 echo  The renamed folders are kept as a rollback copy. They are NOT deleted automatically -
 echo  but sincript now offers to clear out the ones left by PREVIOUS resets first, because
 echo  SoftwareDistribution is routinely 1-5 GB and one copy accumulated per run.
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Reset Windows Update now? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuCleanup
@@ -659,9 +659,9 @@ rem ============================================================================
 :StoreRepair
 cls
 call :Logo
-echo =====================  Re-register Microsoft Store / apps  ========================
+echo ==============================  Re-register Microsoft Store / apps  ==============================
 echo  Re-registers the Store package for the current user. Fixes a broken Store.
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Re-register the Store now? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuCleanup
@@ -688,10 +688,10 @@ rem ============================================================================
 :CompactWinSxS
 cls
 call :Logo
-echo ===============================  Compact WinSxS  ==================================
+echo ========================================  Compact WinSxS  ========================================
 echo  Removes superseded component-store versions via the supported DISM method, then
 echo  optionally compresses system binaries (CompactOS). Frees disk space; reversible.
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Run component cleanup now? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuCleanup
@@ -708,7 +708,7 @@ rem ============================================================================
 :Performance
 cls
 call :Logo
-echo ==============================  PERFORMANCE TWEAKS  ===============================
+echo ======================================  PERFORMANCE TWEAKS  ======================================
 echo  GameDVR off, gaming MMCSS priorities, faster startup/menus/shutdown, best-performance
 echo  visuals, long-path support, Explorer opens "This PC", unhide core-parking options.
 echo  Legacy "memory optimization" values and CPU-mitigation changes are NOT here (Advanced).
@@ -716,7 +716,7 @@ echo  One trade-off worth knowing: "faster shutdown" here includes AutoEndTasks=
 echo  lets Windows force-close apps at shutdown instead of showing the prompt that names
 echo  which app is blocking it. Faster because it stops waiting - and unsaved work in
 echo  those apps goes with it. Undo it from the value backup like any other tweak.
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Apply performance tweaks? (Y/N): "
 if /i not "%_c%"=="Y" goto MainMenu
@@ -821,7 +821,7 @@ rem ============================================================================
 :Privacy
 cls
 call :Logo
-echo =============================  PRIVACY ^& TELEMETRY  ===============================
+echo =====================================  PRIVACY ^& TELEMETRY  ======================================
 echo  Disables diagnostic telemetry, advertising ID, suggested apps, Cortana/web search,
 echo  feedback prompts, activity feed and location; stops DiagTrack and CEIP tasks.
 echo  Also turns off Windows AI features by policy - Copilot, Recall snapshots and
@@ -830,7 +830,7 @@ echo  Quiets remaining Start/lock Content Delivery tips, search-box suggestions,
 echo  tailored experiences. Also turns off the Widgets / News and Interests feed and
 echo  Start app-launch tracking ("Most used"), and disables dmwappushservice alongside
 echo  DiagTrack.
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 echo  Honest notes: the telemetry policy is written as 0 (Security). Enterprise and
 echo  Education honor 0; Home/Pro clamp it to Basic (1) - the lowest those editions
 echo  allow. Stopping DiagTrack also stops Xbox achievement sync and the Feedback Hub.
@@ -840,7 +840,7 @@ echo  Content Delivery surface - they are not Defender or security changes.
 echo  dmwappushservice is the WAP-push telemetry transport, but it also carries MDM
 echo  enrolment - on a work or school managed PC, leave this action alone.
 echo  OneDrive is NOT touched by this core: it is the opt-in prompt below.
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Apply privacy / telemetry hardening? (Y/N): "
 if /i not "%_c%"=="Y" goto MainMenu
@@ -932,17 +932,17 @@ rem ============================================================================
 :Power
 cls
 call :Logo
-echo ================================  POWER PLAN  =====================================
+echo ==========================================  POWER PLAN  ==========================================
 echo  Pick a power plan below, then optionally set monitor/standby/disk sleep timeouts to
 echo  never. Ultimate Performance is the aggressive one and is best kept for a plugged-in
 echo  desktop; High Performance is the safer fast plan; Balanced undoes either.
 echo  Declining the plan switch does NOT end here: every other change on this screen
 echo  applies to whichever plan you are already on, so you can keep Balanced and still
 echo  turn off sleep, set the minimum CPU state, or disable power throttling.
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 echo  Your current plan:
 for /f "tokens=*" %%i in ('powercfg /getactivescheme') do echo    %%i
-echo ===================================================================================
+echo ==================================================================================================
 call :LaptopAdvisory
 rem  Machine-aware, still warning-only: it names the risk and changes no default. Windows
 rem  hides Ultimate Performance on battery-powered machines on purpose, and on a laptop
@@ -1117,11 +1117,11 @@ rem ============================================================================
 :NetworkApply
 cls
 call :Logo
-echo ==============================  APPLY TCP TWEAKS  =================================
+echo =======================================  APPLY TCP TWEAKS  =======================================
 echo  Receive-side autotuning = normal, heuristics off, RSS on, RSC on (sane defaults).
 echo  Optionally disable Nagle / delayed-ACK on current adapters (lower latency), and
 echo  stop Delivery Optimization uploading Windows Update files to other PCs.
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Apply TCP tweaks? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuNetwork
@@ -1152,9 +1152,9 @@ rem ============================================================================
 :NetReset
 cls
 call :Logo
-echo ============================  Reset network stack  ================================
+echo =====================================  Reset network stack  ======================================
 echo  Resets TCP/IP and Winsock, flushes DNS, releases/renews IP. Brief connectivity loss.
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Proceed? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuNetwork
@@ -1173,11 +1173,11 @@ rem ============================================================================
 :FlushDns
 cls
 call :Logo
-echo ==========================  Flush DNS resolver cache  =============================
+echo ===================================  Flush DNS resolver cache  ===================================
 echo  Clears cached name lookups only. No adapter, stack or DNS-server change - this is
 echo  the "a site moved and Windows is still using the old address" fix, and it is what
 echo  you want far more often than a full stack reset.
-echo ===================================================================================
+echo ==================================================================================================
 set "_FAILS=0" & set "_RUNTRACK=1"
 call :Run "ipconfig /flushdns"
 call :Summary "DNS resolver cache flushed."
@@ -1224,14 +1224,14 @@ exit /b 0
 :DnsCustom
 cls
 call :Logo
-echo ==============================  Custom DNS server  ================================
+echo ======================================  Custom DNS server  =======================================
 echo  Enter an IPv4 resolver of your own - a router, a Pi-hole, NextDNS, a corporate
 echo  server, or a provider not listed on the previous screen.
 echo.
 echo  IPv4 only. Your IPv6 DNS is left exactly as it is, so if IPv6 is active the system
 echo  may still resolve through it - that is Windows' choice, not something this hides.
 echo  Option 4 on the previous screen puts everything back to DHCP.
-echo ===================================================================================
+echo ==================================================================================================
 call :ShowCurrentDns
 echo.
 set "_dns1="
@@ -1310,12 +1310,12 @@ rem ============================================================================
 :OpenAsar
 cls
 call :Logo
-echo ==============================  Install OpenAsar  =================================
+echo =======================================  Install OpenAsar  =======================================
 echo  Replaces Discord's app.asar in app-VERSION\resources\. Uses the bundled app.asar
 echo  next to this script, or downloads the latest nightly. If a mod renamed the original
 echo  to _app.asar / app.orig.asar / app.asar.orig, THAT is replaced (OpenAsar loads under
 echo  the mod). Handles Discord / PTB / Canary. A Discord update can revert it - re-run.
-echo ===================================================================================
+echo ==================================================================================================
 set "_SRC="
 if exist "%SCRIPT_DIR%app.asar" set "_SRC=%SCRIPT_DIR%app.asar"
 if defined _SRC goto OA_HaveSrc
@@ -1388,10 +1388,10 @@ rem ============================================================================
 :UnityBoot
 cls
 call :Logo
-echo ============================  Unity boot.config  ==================================
+echo ======================================  Unity boot.config  =======================================
 echo  Copies the bundled boot.config into a Unity game's *_Data folder, tuned for your
 echo  CPU (job-worker-count). Per-game; restore boot.config.bak from that folder if needed.
-echo ===================================================================================
+echo ==================================================================================================
 call :RequireBundledFile boot.config "Unity engine boot configuration"
 if errorlevel 1 goto MenuApps
 call :DetectUnityJobWorkers
@@ -1482,11 +1482,11 @@ rem ============================================================================
 :SteamLight
 cls
 call :Logo
-echo ==============================  SteamLight  =======================================
+echo ==========================================  SteamLight  ==========================================
 echo  Finds your Steam folder, writes a "SteamLight.bat" launcher there, and adds a
 echo  Desktop shortcut. SteamLight starts Steam with flags that cut RAM/CPU use
 echo  (single process/core, no shaders, no Big Picture, etc.) for a lighter, faster Steam.
-echo ===================================================================================
+echo ==================================================================================================
 rem  --- locate the Steam install folder (machine-wide first, then per-user) ---
 set "_STEAMDIR="
 for /f "tokens=2,*" %%a in ('reg query "HKLM\SOFTWARE\WOW6432Node\Valve\Steam" /v InstallPath 2^>nul ^| findstr /I "InstallPath"') do set "_STEAMDIR=%%b"
@@ -1548,10 +1548,10 @@ rem ============================================================================
 :ApplyHosts
 cls
 call :Logo
-echo ============================  Apply custom hosts file  ============================
+echo ===================================  Apply custom hosts file  ====================================
 echo  Replaces the system hosts file with the bundled blocklist (entries point to 0.0.0.0).
 echo  The current hosts is backed up next to it AND into the backup folder. DNS is flushed.
-echo ===================================================================================
+echo ==================================================================================================
 set "_HOSTS=%SystemRoot%\System32\drivers\etc\hosts"
 call :RequireBundledFile hosts "ad/telemetry blocklist for the system hosts file"
 if errorlevel 1 goto MenuApps
@@ -1612,11 +1612,11 @@ rem ============================================================================
 :RestoreHosts
 cls
 call :Logo
-echo ===========================  Restore / reset hosts  ===============================
+echo ====================================  Restore / reset hosts  =====================================
 echo     1.  Restore from backup (hosts.bak, or Documents hosts_*.bak)
 echo     2.  Reset to a clean Windows default (un-blocks everything)
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 set "_HOSTS=%SystemRoot%\System32\drivers\etc\hosts"
 
 :RestoreHosts_ask
@@ -1707,14 +1707,14 @@ rem ============================================================================
 :DisableMitigations
 cls
 call :Logo
-echo =====================  Disable CPU mitigations (RISKY)  ===========================
+echo ===============================  Disable CPU mitigations (RISKY)  ================================
 echo  Disables Spectre/Meltdown/MDS/SSBD/L1TF ^(bits 0-1^) AND Downfall/GDS ^(bit 25^).
 echo  Can improve CPU performance but REDUCES security. Reversible (option 2).
 echo  Per Microsoft KB5029778 Downfall/GDS DOES have its own bit ^(0x2000000^); the older
 echo  "3" alone left it mitigated. Combined value is 0x2000003 ^(decimal 33554435^), and
 echo  the mask must cover the same bits or the extra bit is written but ignored.
 echo  Verify after reboot: PowerShell ^> Get-SpeculationControlSettings
-echo ===================================================================================
+echo ==================================================================================================
 set "_rp=Y"
 set /p "_rp=Create a restore point first? (Y/N): "
 if /i "%_rp%"=="Y" call :CreateRestorePoint
@@ -1736,7 +1736,7 @@ goto MenuAdvanced
 :EnableMitigations
 cls
 call :Logo
-echo =====================  Re-enable CPU mitigations (secure)  ========================
+echo ==============================  Re-enable CPU mitigations (secure)  ==============================
 set "_FAILS=0"
 :: Override=0 clears every override bit (all mitigations back ON). The mask must cover the
 :: Downfall bit too (0x2000003), otherwise re-enabling would leave bit25 outside the mask
@@ -1752,11 +1752,11 @@ rem ============================================================================
 :BcdTimers
 cls
 call :Logo
-echo ============================  BCDEdit timer tweaks  ===============================
+echo =====================================  BCDEdit timer tweaks  =====================================
 echo  Removes the forced platform clock, forces the platform tick, disables dynamic tick
 echo  and sets TSC sync = enhanced (the BCD timer combo from the optimization guide).
 echo  Can help timer-sensitive workloads. Reversible (option 4). REBOOT required.
-echo ===================================================================================
+echo ==================================================================================================
 call :LaptopAdvisory
 set "_c="
 set /p "_c=Apply timer tweaks? (Y/N): "
@@ -1773,7 +1773,7 @@ goto MenuAdvanced
 :BcdRevert
 cls
 call :Logo
-echo ============================  Revert BCDEdit timers  ==============================
+echo ====================================  Revert BCDEdit timers  =====================================
 set "_FAILS=0" & set "_RUNTRACK=1"
 call :Run "bcdedit /deletevalue useplatformclock"
 call :Run "bcdedit /deletevalue useplatformtick"
@@ -1788,11 +1788,11 @@ rem ============================================================================
 :NvmeFlags
 cls
 call :Logo
-echo ======================  Experimental NVMe driver flags  ===========================
+echo ================================  Experimental NVMe driver flags  ================================
 echo  Toggles feature flags for Microsoft's in-box NVMe driver (StorNVMe). NOTE: Microsoft
 echo  blocked these on fully-patched systems in 2026, so on an updated PC this likely does
 echo  nothing now. Only relevant if your SSD uses the in-box driver. Harmless + reversible.
-echo ===================================================================================
+echo ==================================================================================================
 set "_rp=Y"
 set /p "_rp=Create a restore point first? (Y/N): "
 if /i "%_rp%"=="Y" call :CreateRestorePoint
@@ -1813,10 +1813,10 @@ rem ============================================================================
 :DisableIPv6
 cls
 call :Logo
-echo ===============================  Disable IPv6  ====================================
+echo =========================================  Disable IPv6  =========================================
 echo  Sets DisabledComponents=0xFF (disables IPv6 on all interfaces). Do this only if you
 echo  know you don't need IPv6. To revert, delete that value or set it to 0. REBOOT needed.
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Disable IPv6? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuAdvanced
@@ -1831,10 +1831,10 @@ rem ============================================================================
 :MemCompress
 cls
 call :Logo
-echo =====================  Disable memory compression / combining  ====================
+echo ============================  Disable memory compression / combining  ============================
 echo  Turns off RAM compression and page combining. Frees a little CPU at the cost of more
 echo  RAM pressure on low-memory PCs. Re-enable: PowerShell ^> Enable-MMAgent -MemoryCompression
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Disable memory compression and page combining? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuAdvanced
@@ -1865,7 +1865,7 @@ rem ============================================================================
 :GpuTelemetry
 cls
 call :Logo
-echo =========================  GPU telemetry / tasks off  =============================
+echo ==================================  GPU telemetry / tasks off  ===================================
 rem  Flags, not the single GPU word, so a machine with both is offered both in turn rather
 rem  than only whichever probe wrote GPU last.
 if defined GPU_NV goto GpuNvidia
@@ -1920,7 +1920,7 @@ rem ============================================================================
 :HagsToggle
 cls
 call :Logo
-echo =====================  GPU hardware scheduling (HAGS)  ============================
+echo ================================  GPU hardware scheduling (HAGS)  ================================
 echo  HwSchMode in GraphicsDrivers: 2 = on (Windows default), 1 = off. Takes effect after a
 echo  REBOOT. Needs Windows 10 2004+ and a GPU/driver that supports it - on older GPUs the
 echo  setting is simply ignored. The on/off difference is usually small and system-specific;
@@ -1943,7 +1943,7 @@ echo.
 echo     1.  Turn HAGS OFF  (HwSchMode = 1)
 echo     2.  Turn HAGS ON   (HwSchMode = 2, default)
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 
 :HagsToggle_ask
 set "sel="
@@ -1972,13 +1972,13 @@ goto MenuAdvanced
 :ProcPriority
 cls
 call :Logo
-echo =====================  PERMANENT PROCESS PRIORITY (per .exe)  =====================
+echo ============================  PERMANENT PROCESS PRIORITY (per .exe)  =============================
 echo  Pins a CPU priority that Windows re-applies every time that program starts, via
 echo  Image File Execution Options (CpuPriorityClass). Backed up, so it stays reversible.
 echo  Use the .exe that ACTUALLY runs (Task Manager -^> Details tab), not a launcher -
 echo  High / Above-normal do NOT pass down to child processes. Realtime is not offered
 echo  (it can starve Windows and freeze the machine).
-echo ===================================================================================
+echo ==================================================================================================
 set "_exe="
 set /p "_exe=.exe name (e.g. game.exe), blank = cancel: "
 if not defined _exe goto MenuAdvanced
@@ -2029,7 +2029,7 @@ rem ============================================================================
 :DoRestorePoint
 cls
 call :Logo
-echo ===========================  Create restore point  ================================
+echo =====================================  Create restore point  =====================================
 call :CreateRestorePoint
 pause
 goto MenuBackups
@@ -2037,7 +2037,7 @@ goto MenuBackups
 :DoRegBackup
 cls
 call :Logo
-echo ===========================  Full registry backup  ================================
+echo =====================================  Full registry backup  =====================================
 call :CreateRegBackup
 pause
 goto MenuBackups
@@ -2045,7 +2045,7 @@ goto MenuBackups
 :Status
 cls
 call :Logo
-echo ===============================  CURRENT STATUS  ==================================
+echo ========================================  CURRENT STATUS  ========================================
 rem  Same header as the main menu, so the two screens never disagree about the machine.
 call :DetectSysDisk
 call :DetectUndervolt
@@ -2053,7 +2053,7 @@ set "_uvhdr=none found"
 if defined UVTOOL set "_uvhdr=!UVTOOL!"
 echo   Build %WIN_BUILD%   Win11=%IS_WIN11%   GPU=%GPU%   Machine=%MACHINE%   Disk=%SYSDISK%
 echo   Undervolt tool: !_uvhdr!
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 echo [Hardware probes]  (these drive the [ADVISORY] lines, and nothing else)
 echo   Machine class = %MACHINE%   ^(ACPI battery present = laptop^)
 echo   Windows disk  = %SYSDISK%   ^(seek-penalty probe; feeds the SysMain advisory^)
@@ -2122,7 +2122,7 @@ set "PT_ASARF=%_asarf%"
 start "" /min /wait powershell -NoProfile -Command "Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Discord\app-*\resources\app.asar') -ErrorAction SilentlyContinue | ForEach-Object { '  ' + [math]::Round($_.Length/1MB,2) + ' MB  ' + $_.FullName } | Out-File -FilePath $env:PT_ASARF -Encoding ASCII"
 set "PT_ASARF="
 if exist "%_asarf%" ( type "%_asarf%" & del "%_asarf%" >nul 2>&1 )
-echo ===================================================================================
+echo ==================================================================================================
 pause
 goto MenuBackups
 rem =====================================================================================
@@ -2131,10 +2131,10 @@ rem ============================================================================
 :ApplyRecommended
 cls
 call :Logo
-echo =========================  Apply recommended safe set  ============================
+echo ==================================  Apply recommended safe set  ==================================
 echo  Runs Cleanup + Privacy + Performance + Power + Network core tweaks with no prompts.
 echo  Optional/risky items are NOT included. A restore point first is strongly advised.
-echo ===================================================================================
+echo ==================================================================================================
 call :LaptopAdvisory
 set "_rp=Y"
 set /p "_rp=Create a System Restore Point now? (Y/N): "
@@ -2164,7 +2164,7 @@ rem ============================================================================
 :Excluded
 cls
 call :Logo
-echo =========================  What was left out (and why)  ===========================
+echo =================================  What was left out (and why)  ==================================
 echo  This script intentionally does NOT include, by category:
 echo.
 echo  Security-weakening (excluded):
@@ -2201,7 +2201,7 @@ echo    - Forcing MSI mode, and NIC edits (jumbo frames, offloads) - the guide a
 echo.
 echo  Note: disabling CPU mitigations and the large system cache ARE available, but only as
 echo  explicit opt-in choices (Advanced / Performance) - never in the recommended set.
-echo ===================================================================================
+echo ==================================================================================================
 pause
 goto MainMenu
 rem =====================================================================================
@@ -2214,11 +2214,11 @@ rem  prompt - so the count only ever accumulates while ONE prompt is being repea
 rem  navigating anywhere at all resets it.
 set "_NOIN=0"
 echo.
-echo                           SSSS   III   N   N
-echo                           S       I    NN  N
-echo                           SSSS    I    N N N
-echo                               S   I    N  NN
-echo                           SSSS   III   N   N
+echo                                         SSSS   III   N   N
+echo                                         S       I    NN  N
+echo                                         SSSS    I    N N N
+echo                                             S   I    N  NN
+echo                                         SSSS   III   N   N
 echo.
 goto :eof
 rem =====================================================================================
@@ -2488,12 +2488,12 @@ goto :eof
 :TimerResApply
 cls
 call :Logo
-echo =========================  Apply timer resolution  ================================
+echo ====================================  Apply timer resolution  ====================================
 echo  Installs SetTimerResolution to run hidden at every logon (Task Scheduler) and hold
 echo  a higher Windows timer resolution. On Windows 10 2004+ / 11 it also sets
 echo  GlobalTimerResolutionRequests=1 so the change is system-wide (this needs a REBOOT).
 echo  Reversible via option 7 (Remove timer resolution).
-echo ===================================================================================
+echo ==================================================================================================
 call :LaptopAdvisory
 call :RequireBundledFile SetTimerResolution.exe "raises the Windows timer resolution (autostart helper)"
 if errorlevel 1 goto MenuApps
@@ -2544,11 +2544,11 @@ goto MenuApps
 :TimerResRemove
 cls
 call :Logo
-echo ========================  Remove timer resolution  ================================
+echo ===================================  Remove timer resolution  ====================================
 echo  Removes the SetTimerResolution autostart: deletes the scheduled task, stops the
 echo  hidden helper and deletes the copied file. You can also revert the system-wide
 echo  registry switch (that revert needs a REBOOT).
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Remove the timer-resolution autostart? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuApps
@@ -2573,11 +2573,11 @@ goto MenuApps
 :Debloat
 cls
 call :Logo
-echo ===============================  Remove built-in apps  ============================
+echo =====================================  Remove built-in apps  =====================================
 echo  Removes built-in Microsoft Store apps (telemetry / ads / rarely-used). Each group
 echo  is opt-in below. This is NOT covered by the .reg backups: to get an app back you
 echo  reinstall it from the Microsoft Store. Apps you actually use, just answer N.
-echo ===================================================================================
+echo ==================================================================================================
 rem  Elevation is checked HERE rather than left to fail per-package. Get-AppxPackage -AllUsers
 rem  needs Administrator, so without it the enumeration returns nothing and every group would
 rem  report "none of these are installed" - a false SKIP that reads like good news. Same guard
@@ -2675,13 +2675,13 @@ rem ============================================================================
 :StartupMgr
 cls
 call :Logo
-echo =========================  MANAGE STARTUP PROGRAMS  ===============================
+echo ===================================  MANAGE STARTUP PROGRAMS  ====================================
 echo  Lists what starts with Windows - the Run registry keys (HKCU / HKLM / WOW64) and
 echo  both Startup folders - and lets you flip any entry between Enabled and Disabled.
 echo  This is the same reversible StartupApproved switch Task Manager uses: nothing is
 echo  deleted, and the entry's previous state is saved as a .reg backup before each
 echo  flip (restorable from Backups ^& status, or by double-clicking the file).
-echo ===================================================================================
+echo ==================================================================================================
 set "_sulist=%TEMP%\pt_startup_%RANDOM%%RANDOM%.txt"
 set "_sures=%TEMP%\pt_sures_%RANDOM%%RANDOM%.txt"
 set "_susigf=%TEMP%\pt_susig_%RANDOM%%RANDOM%.txt"
@@ -2716,9 +2716,9 @@ if "%_sn%"=="0" (
     goto MenuApps
 )
 echo   #    State      Source           Name
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 for /l %%I in (1,1,%_sn%) do call :_suShow %%I
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 echo  Names are shown ASCII-only ^(other characters appear as "?"^); a flip still
 echo  targets the exact entry. Disabled entries stay listed and can be re-enabled.
 
@@ -2920,12 +2920,12 @@ rem  for the rest of the session and was inherited by every child process sincri
 rem  Clearing it on the way IN to the menu means the PATH editor can only ever act on a scope
 rem  chosen this visit, rather than one left over from the last one.
 set "PT_PE_SCOPE="
-echo =============================  SYSTEM TOOLS  ======================================
+echo =========================================  SYSTEM TOOLS  =========================================
 echo  General-purpose tools, not tweaks. Both are read-first and reversible.
 echo     1.  Edit PATH (System / User environment variable)
 echo     2.  Find what is locking a file (and optionally close it)
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 
 :MenuTools_ask
 set "sel="
@@ -2942,13 +2942,13 @@ rem ============================================================================
 :PathEditor
 cls
 call :Logo
-echo ============================  EDIT PATH VARIABLE  =================================
+echo ======================================  EDIT PATH VARIABLE  ======================================
 echo  Reads the RAW value straight from the registry, so %%VAR%% references stay intact,
 echo  and writes it back as REG_EXPAND_SZ - the type PATH must keep. It never uses
 echo  setx (which silently crops at 1024 chars and freezes %%VAR%% into literal paths).
 echo  Adding or removing an entry backs up the whole PATH value first, then broadcasts
 echo  the change so new programs see it without a sign-out.
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 echo  Which PATH?
 echo     1.  System  (HKLM - affects all users, needs Administrator)
 echo     2.  User    (HKCU - just you)
@@ -2990,9 +2990,9 @@ del "%_pelist%" >nul 2>&1
 echo.
 if /i "%PT_PE_SCOPE%"=="machine" ( echo  System PATH - %_pen% entry^(ies^): ) else ( echo  User PATH - %_pen% entry^(ies^): )
 echo   #   State    Folder
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 for /l %%I in (1,1,%_pen%) do call :_peShow %%I
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 echo  [missing] = the folder does not exist on disk ^(a dead PATH entry^).
 echo  Folders are shown ASCII-only ^("?"^ for other characters^); an edit still targets
 echo  the exact entry.
@@ -3116,12 +3116,12 @@ rem ============================================================================
 :LockFinder
 cls
 call :Logo
-echo =======================  FIND WHAT IS LOCKING A FILE  =============================
+echo =================================  FIND WHAT IS LOCKING A FILE  ==================================
 echo  Uses the Windows Restart Manager - the same API installers use to find what
 echo  has a file open. It lists every process holding the file, and marks the ones
 echo  Windows flags as critical system processes ^(which must never be force-closed^).
 echo  Listing is always safe; closing a process is opt-in, one at a time, and confirmed.
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 echo  Type or paste the full path to the file ^(e.g. a DLL or document you cannot delete^).
 set "_lfpath="
 set /p "_lfpath=File path (blank = back): "
@@ -3169,9 +3169,9 @@ if "%_lfn%"=="0" (
 )
 echo  %_lfn% process^(es^) holding this file:
 echo   #    PID     Type        Process
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 for /l %%I in (1,1,%_lfn%) do call :_lfShow %%I
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 echo  [critical] = a core Windows process. Sincript will NOT close these - a reboot is
 echo  the only safe way to release a file they hold.
 
@@ -4095,18 +4095,18 @@ rem ============================================================================
 :MenuPresets
 cls
 call :Logo
-echo ==============================  AUTO-APPLY PRESETS  ===============================
+echo ======================================  AUTO-APPLY PRESETS  ======================================
 echo  A preset applies a defined group of tweaks at once and saves ONE JSON backup of the
 echo  registry values it changes (manual menu actions still save individual .reg files).
 echo  Power-plan / DNS / BCD / service changes revert from their own menu items.
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 echo     1.  Light     (temp cleanup, privacy, TCP tweaks, DNS)
 echo     2.  Moderate  (recommended safe set + power plan + OpenAsar)
 echo     3.  Heavy     (most tweaks; NO repair / NO stack reset / NO debloat / NO mitigations)
 echo     4.  Custom    (load a user preset from the sincript_presets folder)
 echo     5.  Restore from a preset backup (JSON)
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 
 :MenuPresets_ask
 set "sel="
@@ -4405,10 +4405,10 @@ rem ============================================================================
 :PresetLight
 cls
 call :Logo
-echo ==============================  PRESET: LIGHT  ====================================
+echo ========================================  PRESET: LIGHT  =========================================
 echo  Applies: temp/log cleanup, privacy ^& telemetry hardening, TCP tuning, and a DNS
 echo  choice. All registry changes go into ONE JSON backup. Reversible.
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Apply the LIGHT preset? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuPresets
@@ -4429,11 +4429,11 @@ rem ============================================================================
 :PresetModerate
 cls
 call :Logo
-echo =============================  PRESET: MODERATE  ==================================
+echo =======================================  PRESET: MODERATE  =======================================
 echo  Applies the recommended safe set - cleanup, privacy, performance, power and network
 echo  core tweaks - then offers to install OpenAsar. Registry changes go into ONE JSON
 echo  backup. This is the same set as "Apply recommended safe set", plus OpenAsar.
-echo ===================================================================================
+echo ==================================================================================================
 call :LaptopAdvisory
 set "_rp=Y"
 set /p "_rp=Create a System Restore Point first? (Y/N): "
@@ -4462,7 +4462,7 @@ rem ============================================================================
 :PresetHeavy
 cls
 call :Logo
-echo ==============================  PRESET: HEAVY  ====================================
+echo ========================================  PRESET: HEAVY  =========================================
 echo  Aggressive but reversible. Applies the safe set PLUS: SystemResponsiveness=0,
 echo  network throttling off, Win32PrioritySeparation=42, Game Mode off, Nagle/ACK off,
 echo  IPv6 off, NVMe flags, GPU telemetry off (if applicable), BCD timer tweaks and
@@ -4470,7 +4470,7 @@ echo  memory compression off. It does NOT touch CPU mitigations, system repair, 
 echo  network-stack reset, or debloat. Registry changes go into ONE JSON backup; the
 echo  non-registry parts (DNS / BCD / memory compression) revert from their own menus.
 echo  A REBOOT is required afterwards.
-echo ===================================================================================
+echo ==================================================================================================
 call :LaptopAdvisory
 set "_rp=Y"
 set /p "_rp=Create a System Restore Point first? (strongly recommended) (Y/N): "
@@ -4498,7 +4498,7 @@ rem ============================================================================
 :PresetCustom
 cls
 call :Logo
-echo ===============================  CUSTOM PRESET  ===================================
+echo ========================================  CUSTOM PRESET  =========================================
 set "_pdir=%SCRIPT_DIR%sincript_presets"
 if not exist "%_pdir%\" (
     echo  No "sincript_presets" folder was found next to the script.
@@ -4527,7 +4527,7 @@ if "%_pn%"=="0" (
 echo  Available preset files in sincript_presets\:
 for /l %%I in (1,1,%_pn%) do echo     %%I.  !_pnm[%%I]!
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 
 :PresetCustom_ask
 set "sel="
@@ -4562,16 +4562,16 @@ for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%_pfile%") do (
 )
 cls
 call :Logo
-echo ===============================  CUSTOM PRESET  ===================================
+echo ========================================  CUSTOM PRESET  =========================================
 echo  Preset file:            %_pshow%
 echo  Recognized directives:  %_pgood%
 echo  Problems:               %_perr%
 if %_perr% gtr 0 (
-    echo -----------------------------------------------------------------------------------
+    echo --------------------------------------------------------------------------------------------------
     type "%_perrfile%"
 )
 del "%_perrfile%" >nul 2>&1
-echo ===================================================================================
+echo ==================================================================================================
 if %_pgood% geq 1 goto _pcHaveValid
 echo [ABORT] No valid directives found - nothing to apply.
 echo         Check the file against the key list in the README.
@@ -4729,10 +4729,10 @@ rem ============================================================================
 :RestorePresetJson
 cls
 call :Logo
-echo =====================  Restore from a preset backup (JSON)  =======================
+echo =============================  Restore from a preset backup (JSON)  ==============================
 echo  Restores the registry values a preset changed, from one of its JSON backups.
 echo  Power-plan, DNS, BCD and service changes are reverted from their own menu items.
-echo ===================================================================================
+echo ==================================================================================================
 set "_rn=0"
 for /f "delims=" %%F in ('dir /b /o-d "%BACKUP_DIR%\Preset_*.json" 2^>nul') do (
     set /a _rn+=1
@@ -4749,7 +4749,7 @@ if "%_rn%"=="0" (
 echo  Preset backups (newest first):
 for /l %%I in (1,1,%_rn%) do echo     %%I.  !_rnm[%%I]!
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 
 :RestorePresetJson_ask
 set "sel="
@@ -4800,11 +4800,11 @@ rem ============================================================================
 :RestoreRegBackup
 cls
 call :Logo
-echo ====================  Restore a single value backup (.reg)  =======================
+echo =============================  Restore a single value backup (.reg)  =============================
 echo  Re-imports one of the small per-value .reg backups this script writes before each
 echo  registry tweak - the same files you can also double-click in the backup folder.
 echo  Full-registry exports (FullReg_*.reg) are not listed here; import those manually.
-echo ===================================================================================
+echo ==================================================================================================
 set "_qn=0"
 for /f "delims=" %%F in ('dir /b /a-d /o-d "%BACKUP_DIR%\*.reg" 2^>nul ^| findstr /I /V /B "FullReg_"') do (
     set /a _qn+=1
@@ -4821,7 +4821,7 @@ if "%_qn%"=="0" (
 echo  Value backups (newest first):
 for /l %%I in (1,1,%_qn%) do echo     %%I.  !_qnm[%%I]!
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 
 :RestoreRegBackup_ask
 set "sel="
@@ -4836,9 +4836,9 @@ for /l %%I in (1,1,%_qn%) do if "%sel%"=="%%I" set "_qshow=!_qnm[%%I]!"
 if not defined _qfile goto RestoreRegBackup_ask
 echo.
 echo  This backup will put the following value(s) back to their saved state:
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 type "%_qfile%"
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 echo  A line like  "Name"=-  means the value did not exist before and will be removed.
 set "_cc="
 set /p "_cc=Import this .reg backup now? (Y/N): "
@@ -4861,13 +4861,13 @@ rem ============================================================================
 :RestorePowerBackup
 cls
 call :Logo
-echo ======================  Revert power settings (undo file)  ========================
+echo ==============================  Revert power settings (undo file)  ===============================
 echo  Runs one of the PowerPlan_*.bat undo files sincript writes before it changes your
 echo  power scheme or its sleep / disk timeouts. Each one re-activates the scheme that
 echo  was current at the time and puts that scheme's timeouts back, in seconds.
 echo  Hibernation, minimum processor state and CPU power throttling are separate items -
 echo  see "Reverting changes" in the README.
-echo ===================================================================================
+echo ==================================================================================================
 set "_pn=0"
 for /f "delims=" %%F in ('dir /b /a-d /o-d "%BACKUP_DIR%\PowerPlan_*.bat" 2^>nul') do (
     set /a _pn+=1
@@ -4885,7 +4885,7 @@ if "%_pn%"=="0" (
 echo  Power backups (newest first):
 for /l %%I in (1,1,%_pn%) do echo     %%I.  !_pnm[%%I]!
 echo     0.  Back
-echo ===================================================================================
+echo ==================================================================================================
 
 :RestorePowerBackup_ask
 set "sel="
@@ -4928,12 +4928,12 @@ goto MenuBackups
 :ManageBackups
 cls
 call :Logo
-echo ==========================  Manage backup folder  =================================
+echo =====================================  Manage backup folder  =====================================
 echo  Everything this script backs up lives in one folder. The small per-value .reg files
 echo  and preset .json files are the precise undo data and are left untouched here; only
 echo  the large full-registry exports - which pile up each time you run a full registry
 echo  backup - can be pruned, and even then the newest pair is always kept.
-echo ===================================================================================
+echo ==================================================================================================
 set "_cntAllReg=0"
 for %%Z in ("!BACKUP_DIR!\*.reg") do set /a _cntAllReg+=1
 set "_cntFull=0" & set "_kbFull=0"
@@ -4953,13 +4953,13 @@ set "_cntLog=0"
 for %%Z in ("!BACKUP_DIR!\PerfTweaks_*.log") do set /a _cntLog+=1
 echo  Folder:  !BACKUP_DIR!
 echo  Log now: !LOGFILE!
-echo -----------------------------------------------------------------------------------
+echo --------------------------------------------------------------------------------------------------
 echo   Per-value .reg backups ^(single-value undo^) : !_cntVal!
 echo   Full registry exports  ^(HKLM/HKCU^)         : !_cntFull!   ^(~!_mbFull! MB^)
 echo   Preset backups ^(.json^)                     : !_cntJson!
 echo   hosts backups  ^(.bak^)                      : !_cntHosts!
 echo   Logs ^(.log^)                                : !_cntLog!
-echo ===================================================================================
+echo ==================================================================================================
 set "_c="
 set /p "_c=Open this folder in Explorer now? (Y/N): "
 if /i "%_c%"=="Y" start "" "!BACKUP_DIR!"
