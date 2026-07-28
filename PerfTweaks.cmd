@@ -46,7 +46,6 @@ if /i "!_a:~0,5!"=="/dns:"    goto _argDns
 if /i "!_a:~0,6!"=="/plan:"   goto _argPlan
 set "_CLIBAD=!_a!"
 goto _argLoop
-
 rem  Each value gets its own label rather than a one-liner: the "did it parse to nothing"
 rem  test needs a second statement, and chaining "& if ... & goto" would make the goto
 rem  conditional on that if, silently dropping the rest of the command line.
@@ -200,7 +199,11 @@ call :Logo
 echo ================================  MAIN MENU  ======================================
 rem  Cached after the first call, so this is one probe per session, not per menu draw.
 call :DetectSysDisk
+call :DetectUndervolt
+set "_uvhdr=none found"
+if defined UVTOOL set "_uvhdr=!UVTOOL!"
 echo   Build %WIN_BUILD%   Win11=%IS_WIN11%   GPU=%GPU%   Machine=%MACHINE%   Disk=%SYSDISK%
+echo   Undervolt tool: !_uvhdr!
 echo -----------------------------------------------------------------------------------
 echo     1.  Cleanup ^& repair        (temp/logs, DISM/SFC, Windows Update, Store, WinSxS)
 echo     2.  Performance tweaks       (GameDVR off, priorities, snappier UI)
@@ -1924,6 +1927,19 @@ echo  setting is simply ignored. The on/off difference is usually small and syst
 echo  turning it OFF can help some capture/overlay stutter, but DISABLES features that need
 echo  it ON - notably NVIDIA Frame Generation (DLSS 3). Backed up, so it stays reversible.
 echo.
+rem  Read the live value and say what it is, so the choice below is informed rather than a
+rem  guess. Plain reg query + a token grab, no PowerShell: this screen should draw instantly.
+rem  An absent value is the Windows default (on) on 2004+, so it is reported as such rather
+rem  than as "unknown" - but it is labelled "not set" so a reader can tell the two apart.
+set "_hags="
+for /f "tokens=3" %%H in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v HwSchMode 2^>nul ^| findstr /I "HwSchMode"') do set "_hags=%%H"
+if not defined _hags        echo   Currently: HAGS is ON  ^(HwSchMode not set - the Windows default on 2004+^)
+if /i "!_hags!"=="0x2"      echo   Currently: HAGS is ON   ^(HwSchMode = 2, the Windows default^)
+if /i "!_hags!"=="0x1"      echo   Currently: HAGS is OFF  ^(HwSchMode = 1^)
+if defined _hags if /i not "!_hags!"=="0x1" if /i not "!_hags!"=="0x2" echo   Currently: HwSchMode = !_hags! ^(not a value Windows documents^)
+echo   A change here only takes effect after a REBOOT, so this line shows what is stored,
+echo   not necessarily what the GPU is doing right now.
+echo.
 echo     1.  Turn HAGS OFF  (HwSchMode = 1)
 echo     2.  Turn HAGS ON   (HwSchMode = 2, default)
 echo     0.  Back
@@ -2030,12 +2046,22 @@ goto MenuBackups
 cls
 call :Logo
 echo ===============================  CURRENT STATUS  ==================================
-echo   OS build %WIN_BUILD%   Win11=%IS_WIN11%   GPU=%GPU%
+rem  Same header as the main menu, so the two screens never disagree about the machine.
+call :DetectSysDisk
+call :DetectUndervolt
+set "_uvhdr=none found"
+if defined UVTOOL set "_uvhdr=!UVTOOL!"
+echo   Build %WIN_BUILD%   Win11=%IS_WIN11%   GPU=%GPU%   Machine=%MACHINE%   Disk=%SYSDISK%
+echo   Undervolt tool: !_uvhdr!
 echo -----------------------------------------------------------------------------------
 echo [Hardware probes]  (these drive the [ADVISORY] lines, and nothing else)
-call :DetectSysDisk
 echo   Machine class = %MACHINE%   ^(ACPI battery present = laptop^)
 echo   Windows disk  = %SYSDISK%   ^(seek-penalty probe; feeds the SysMain advisory^)
+if defined UVTOOL echo   Undervolt    = !UVTOOL! found - a tool that CAN undervolt is installed.
+if defined UVTOOL echo                  This cannot read the actual offset, only that the tool is here.
+if not defined UVTOOL echo   Undervolt    = no known tool found ^(ThrottleStop / Intel XTU / Ryzen Master^)
+if not defined UVTOOL echo                  That is NOT proof you are not undervolted - a BIOS/EFI offset
+if not defined UVTOOL echo                  leaves no trace this can see. Treat it as "unknown", not "no".
 echo [Disk]  system drive free space
 call :FreeSpaceSnap
 if defined _FREE_HUMAN ( echo   !_FREE_HUMAN! ) else ( echo   could not measure )
@@ -2195,7 +2221,6 @@ echo                               S   I    N  NN
 echo                           SSSS   III   N   N
 echo.
 goto :eof
-
 rem =====================================================================================
 rem  COMMAND LINE:  PerfTweaks.cmd /preset:NAME [/dns:VALUE] [/norestore]
 rem =====================================================================================
@@ -2659,9 +2684,9 @@ echo  flip (restorable from Backups ^& status, or by double-clicking the file).
 echo ===================================================================================
 set "_sulist=%TEMP%\pt_startup_%RANDOM%%RANDOM%.txt"
 set "_sures=%TEMP%\pt_sures_%RANDOM%%RANDOM%.txt"
-set "_susig=%TEMP%\pt_susig_%RANDOM%%RANDOM%.txt"
+set "_susigf=%TEMP%\pt_susig_%RANDOM%%RANDOM%.txt"
 del "%_sulist%" >nul 2>&1
-set "_SUSIG="
+set "_susigv="
 call :StartupWorker list 0
 if not exist "%_sulist%" (
     echo [ERROR] Could not enumerate startup entries ^(PowerShell blocked or unavailable^).
@@ -2670,8 +2695,13 @@ if not exist "%_sulist%" (
 )
 rem  Fingerprint of the enumeration this screen is about to show. The toggle pass compares
 rem  its own against it and refuses if the set changed in between - see :StartupWorker.
-if exist "%_susig%" for /f "usebackq delims=" %%S in ("%_susig%") do set "_SUSIG=%%S"
-del "%_susig%" >nul 2>&1
+rem  _susigf (the file) and _susigv (the value it holds) must not differ only by case:
+rem  cmd variable names are case-INSENSITIVE, so an earlier "_susig" / "_SUSIG" pair was one
+rem  variable, and clearing the value blanked the path. PT_SU_SIG then reached PowerShell
+rem  empty, Out-File prompted for the missing -FilePath in the minimized window, and the
+rem  whole screen sat waiting for input that could not arrive.
+if exist "%_susigf%" for /f "usebackq delims=" %%S in ("%_susigf%") do set "_susigv=%%S"
+del "%_susigf%" >nul 2>&1
 set "_sn=0"
 for /f "usebackq tokens=1,2,3,* delims=|" %%a in ("%_sulist%") do (
     set /a _sn+=1
@@ -2756,9 +2786,9 @@ set "PT_SU_IDX=%~2"
 set "PT_SU_LIST=%_sulist%"
 set "PT_SU_RES=%_sures%"
 set "PT_SU_BAK=%BACKUP_DIR%"
-set "PT_SU_SIG=%_susig%"
-set "PT_SU_SIGIN=%_SUSIG%"
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $srcs=@(@('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run','HKCU-Run'),@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run','HKLM-Run'),@('HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32','HKLM-Run32')); $E=@(); foreach($s in $srcs){ $k=Get-Item -LiteralPath $s[0] -ErrorAction SilentlyContinue; if($k){ foreach($n in ($k.GetValueNames() | Sort-Object)){ if($n -ne ''){ $E+=,@($s[2],$s[1],$n) } } } }; $dirs=@(@([Environment]::GetFolderPath('Startup'),'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder','User-Startup'),@([Environment]::GetFolderPath('CommonStartup'),'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder','Common-Startup')); foreach($s in $dirs){ if($s[0] -and (Test-Path -LiteralPath $s[0])){ foreach($f in (Get-ChildItem -LiteralPath $s[0] -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' } | Sort-Object Name)){ $E+=,@($s[2],$s[1],$f.Name) } } }; function S($a,$n){ $k=Get-Item -LiteralPath $a -ErrorAction SilentlyContinue; if($k){ $v=$k.GetValue($n); if($v -and $v.Length -ge 1 -and (($v[0] -band 1) -eq 1)){ return 'Disabled' } }; return 'Enabled' }; $sg=[BitConverter]::ToString([Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::Unicode.GetBytes((($E | ForEach-Object { $_[0]+'\'+$_[2] }) -join ';')))).Replace('-',''); if($env:PT_SU_MODE -eq 'list'){ $i=0; $o=@(); foreach($x in $E){ $i++; $dn=$x[2] -replace '[^\x20-\x7e]','?' -replace '[\x21\x22\x25\x26\x3c\x3e\x5e\x7c]','?'; $o+=(''+$i+'|'+(S $x[1] $x[2])+'|'+$x[0]+'|'+$dn) }; $o | Out-File -FilePath $env:PT_SU_LIST -Encoding ASCII; $sg | Out-File -FilePath $env:PT_SU_SIG -Encoding ASCII; exit 0 }; if($env:PT_SU_SIGIN -and $env:PT_SU_SIGIN -ne $sg){ 'The startup list changed since it was displayed - something added or removed an entry. Nothing was modified. The refreshed list is shown below; pick again.' | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; $n=0; try{ $n=[int]$env:PT_SU_IDX }catch{ $n=0 }; if($n -lt 1 -or $n -gt $E.Count){ 'Entry not found - the startup list changed. Nothing was modified.' | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; $x=$E[$n-1]; $appr=$x[1]; $name=$x[2]; $cur=S $appr $name; $had=$false; $raw=$null; $k=Get-Item -LiteralPath $appr -ErrorAction SilentlyContinue; if($k){ $raw=$k.GetValue($name); if($null -ne $raw){ $had=$true } }; $rk=$appr.Replace('HKCU:','HKEY_CURRENT_USER').Replace('HKLM:','HKEY_LOCAL_MACHINE'); $q=[char]34; $en=$name.Replace('\','\\').Replace([string]$q,'\'+$q); $bak=Join-Path $env:PT_SU_BAK ('StartupApproved_'+(Get-Random)+'.reg'); $body=@('Windows Registry Editor Version 5.00','','['+$rk+']'); if($had -and ($raw -is [byte[]])){ $hex=(($raw | ForEach-Object { $_.ToString('x2') }) -join ','); $body+=($q+$en+$q+'=hex:'+$hex) } elseif($had){ $body+=('; original value was not REG_BINARY - not auto-restorable from this file') } else { $body+=($q+$en+$q+'=-') }; $body | Out-File -FilePath $bak -Encoding Unicode; if(-not (Test-Path -LiteralPath $bak)){ 'Could not write the undo backup - antivirus or Controlled Folder Access may be blocking the backup folder. The startup entry was NOT changed.' | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; if($cur -eq 'Enabled'){ $new=[byte[]](3,0,0,0)+[BitConverter]::GetBytes([DateTime]::Now.ToFileTime()); $ns='Disabled' } else { $new=[byte[]](2,0,0,0,0,0,0,0,0,0,0,0); $ns='Enabled' }; try{ [Microsoft.Win32.Registry]::SetValue($rk,$name,[byte[]]$new,[Microsoft.Win32.RegistryValueKind]::Binary) }catch{ Remove-Item -LiteralPath $bak -ErrorAction SilentlyContinue; ('Could not write the new state: '+$_.Exception.Message) | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; $dn=$name -replace '[^\x20-\x7e]','?'; ((''+$dn+' : '+$cur+' -> '+$ns),('Backup of the previous state: '+$bak)) | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 0"
+set "PT_SU_SIG=%_susigf%"
+set "PT_SU_SIGIN=%_susigv%"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $srcs=@(@('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run','HKCU-Run'),@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run','HKLM-Run'),@('HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32','HKLM-Run32')); $E=@(); foreach($s in $srcs){ $k=Get-Item -LiteralPath $s[0] -ErrorAction SilentlyContinue; if($k){ foreach($n in ($k.GetValueNames() | Sort-Object)){ if($n -ne ''){ $E+=,@($s[2],$s[1],$n) } } } }; $dirs=@(@([Environment]::GetFolderPath('Startup'),'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder','User-Startup'),@([Environment]::GetFolderPath('CommonStartup'),'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder','Common-Startup')); foreach($s in $dirs){ if($s[0] -and (Test-Path -LiteralPath $s[0])){ foreach($f in (Get-ChildItem -LiteralPath $s[0] -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' } | Sort-Object Name)){ $E+=,@($s[2],$s[1],$f.Name) } } }; function S($a,$n){ $k=Get-Item -LiteralPath $a -ErrorAction SilentlyContinue; if($k){ $v=$k.GetValue($n); if($v -and $v.Length -ge 1 -and (($v[0] -band 1) -eq 1)){ return 'Disabled' } }; return 'Enabled' }; $sg=[BitConverter]::ToString([Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::Unicode.GetBytes((($E | ForEach-Object { $_[0]+'\'+$_[2] }) -join ';')))).Replace('-',''); if($env:PT_SU_MODE -eq 'list'){ $i=0; $o=@(); foreach($x in $E){ $i++; $dn=$x[2] -replace '[^\x20-\x7e]','?' -replace '[\x21\x22\x25\x26\x3c\x3e\x5e\x7c]','?'; $o+=(''+$i+'|'+(S $x[1] $x[2])+'|'+$x[0]+'|'+$dn) }; $o | Out-File -FilePath $env:PT_SU_LIST -Encoding ASCII; if($env:PT_SU_SIG){ $sg | Out-File -FilePath $env:PT_SU_SIG -Encoding ASCII }; exit 0 }; if($env:PT_SU_SIGIN -and $env:PT_SU_SIGIN -ne $sg){ 'The startup list changed since it was displayed - something added or removed an entry. Nothing was modified. The refreshed list is shown below; pick again.' | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; $n=0; try{ $n=[int]$env:PT_SU_IDX }catch{ $n=0 }; if($n -lt 1 -or $n -gt $E.Count){ 'Entry not found - the startup list changed. Nothing was modified.' | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; $x=$E[$n-1]; $appr=$x[1]; $name=$x[2]; $cur=S $appr $name; $had=$false; $raw=$null; $k=Get-Item -LiteralPath $appr -ErrorAction SilentlyContinue; if($k){ $raw=$k.GetValue($name); if($null -ne $raw){ $had=$true } }; $rk=$appr.Replace('HKCU:','HKEY_CURRENT_USER').Replace('HKLM:','HKEY_LOCAL_MACHINE'); $q=[char]34; $en=$name.Replace('\','\\').Replace([string]$q,'\'+$q); $bak=Join-Path $env:PT_SU_BAK ('StartupApproved_'+(Get-Random)+'.reg'); $body=@('Windows Registry Editor Version 5.00','','['+$rk+']'); if($had -and ($raw -is [byte[]])){ $hex=(($raw | ForEach-Object { $_.ToString('x2') }) -join ','); $body+=($q+$en+$q+'=hex:'+$hex) } elseif($had){ $body+=('; original value was not REG_BINARY - not auto-restorable from this file') } else { $body+=($q+$en+$q+'=-') }; $body | Out-File -FilePath $bak -Encoding Unicode; if(-not (Test-Path -LiteralPath $bak)){ 'Could not write the undo backup - antivirus or Controlled Folder Access may be blocking the backup folder. The startup entry was NOT changed.' | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; if($cur -eq 'Enabled'){ $new=[byte[]](3,0,0,0)+[BitConverter]::GetBytes([DateTime]::Now.ToFileTime()); $ns='Disabled' } else { $new=[byte[]](2,0,0,0,0,0,0,0,0,0,0,0); $ns='Enabled' }; try{ [Microsoft.Win32.Registry]::SetValue($rk,$name,[byte[]]$new,[Microsoft.Win32.RegistryValueKind]::Binary) }catch{ Remove-Item -LiteralPath $bak -ErrorAction SilentlyContinue; ('Could not write the new state: '+$_.Exception.Message) | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; $dn=$name -replace '[^\x20-\x7e]','?'; ((''+$dn+' : '+$cur+' -> '+$ns),('Backup of the previous state: '+$bak)) | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 0"
 set "_swrc=%errorlevel%"
 set "PT_SU_MODE=" & set "PT_SU_IDX=" & set "PT_SU_LIST=" & set "PT_SU_RES=" & set "PT_SU_BAK="
 set "PT_SU_SIG=" & set "PT_SU_SIGIN="
@@ -3344,6 +3374,53 @@ if not exist "!_sddir!\" goto :eof
 call :Log "System disk media type cached -> !_sdcache!"
 goto :eof
 
+:DetectUndervolt
+rem  Sets UVTOOL to the name of a CPU voltage/tuning tool found on this machine, or leaves it
+rem  empty. Cached for the session by the UVPROBED guard, like :DetectSysDisk.
+rem
+rem  It reports a TOOL, never a voltage. Nothing here can read the actual offset - that lives
+rem  in the tool's own config or in an MSR - so the honest claim is "something that can
+rem  undervolt is installed". A "none found" is NOT "not undervolted": a BIOS/EFI undervolt
+rem  or a vendor utility leaves no signature this can see. That asymmetry is the whole design
+rem  rule here - the probe may only ever STRENGTHEN the Ultimate Performance warning, never
+rem  soften it, because a false "no" is exactly how someone gets talked into the plan that
+rem  produced a WHEA 0x124 on real hardware.
+rem
+rem  Pure reg queries, no PowerShell: this runs at startup and the script should stay fast.
+rem  Each is a direct key probe (instant), not a /s search of a whole hive.
+rem  Every tool found is listed, not just the first: two of these on one machine is normal
+rem  (XTU installed, ThrottleStop actually driving the offset), and naming only one would
+rem  under-report what is tuning the CPU.
+if defined UVPROBED goto :eof
+set "UVPROBED=1"
+set "UVTOOL="
+rem  Intel XTU installs a driver service under one of these names.
+set "_uvhit="
+reg query "HKLM\SYSTEM\CurrentControlSet\Services\XTU3SERVICE" >nul 2>&1 && set "_uvhit=1"
+if not defined _uvhit reg query "HKLM\SYSTEM\CurrentControlSet\Services\XtuAcpiDriver" >nul 2>&1 && set "_uvhit=1"
+if defined _uvhit call :_uvAdd "Intel XTU"
+rem  AMD Ryzen Master ships a versioned driver service; probe the two long-lived names.
+set "_uvhit="
+reg query "HKLM\SYSTEM\CurrentControlSet\Services\AMDRyzenMasterDriverV20" >nul 2>&1 && set "_uvhit=1"
+if not defined _uvhit reg query "HKLM\SYSTEM\CurrentControlSet\Services\AMDRyzenMasterDriverV19" >nul 2>&1 && set "_uvhit=1"
+if defined _uvhit call :_uvAdd "AMD Ryzen Master"
+rem  ThrottleStop is portable - no installer, no service of its own - so the signal is its
+rem  autostart: a Run entry, or the Startup-folder shortcut its docs suggest.
+set "_uvhit="
+reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" 2>nul | findstr /I "ThrottleStop" >nul && set "_uvhit=1"
+if not defined _uvhit reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" 2>nul | findstr /I "ThrottleStop" >nul && set "_uvhit=1"
+if not defined _uvhit if exist "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\ThrottleStop.lnk" set "_uvhit=1"
+if not defined _uvhit if exist "%ProgramData%\Microsoft\Windows\Start Menu\Programs\Startup\ThrottleStop.lnk" set "_uvhit=1"
+if defined _uvhit call :_uvAdd "ThrottleStop"
+set "_uvhit="
+if defined UVTOOL call :Log "Undervolt tool(s) detected: !UVTOOL!"
+if not defined UVTOOL call :Log "Undervolt tool: none of the known ones found"
+goto :eof
+
+:_uvAdd
+if not defined UVTOOL ( set "UVTOOL=%~1" ) else ( set "UVTOOL=!UVTOOL! + %~1" )
+goto :eof
+
 :DiskAdvisory
 rem  Hardware advisory for the SysMain knob - same contract as :LaptopAdvisory: it warns
 rem  and nothing else. Never blocks, never changes a prompt default, never alters what a
@@ -3636,9 +3713,21 @@ rem  Hardware advisory: shown before the confirm prompt of actions that typicall
 rem  battery life / thermals on portables (power core, hibernate off, BCD dynamic-tick
 rem  off, held timer resolution). Warning-only BY DESIGN: it never blocks, never changes
 rem  a prompt default, never alters what a preset applies. The C# port shares this rule.
-if /i not "%MACHINE%"=="laptop" goto :eof
+rem  The undervolt line is added when a tool is FOUND, and nothing is said when none is -
+rem  a missing tool is not evidence of a missing undervolt (BIOS offsets leave no trace),
+rem  so silence there is the honest option. Warning-only in both directions.
+call :DetectUndervolt
+if /i not "%MACHINE%"=="laptop" goto _lapUv
 echo   [ADVISORY] This machine looks like a laptop - this action typically costs battery
 echo              life / heat there for little gain. It stays your call, and stays reversible.
+
+:_lapUv
+if not defined UVTOOL goto :eof
+echo   [ADVISORY] !UVTOOL! is installed, so this machine may be UNDERVOLTED. Pushing the CPU
+echo              to sustained maximum clocks is where an otherwise-stable undervolt fails,
+echo              and the CPU reports it as an uncorrectable machine check ^(bugcheck 0x124^),
+echo              not as something that looks like a software crash. If you are undervolted,
+echo              prefer High Performance or Balanced over Ultimate.
 goto :eof
 
 :DesktopAdvisory
@@ -3922,7 +4011,10 @@ rem %1 = base dir (e.g. %LocalAppData%\Discord) ; %2 = flavor label ; %3 = sourc
 setlocal EnableDelayedExpansion
 set "_base=%~1"
 set "_flav=%~2"
-set "_src=%~3"
+rem  _asrc, not _src: the callers hold the same path in _SRC, and cmd variable names are
+rem  case-insensitive - so "_src" here IS "_SRC". The setlocal above happens to shadow it
+rem  harmlessly today, but the two names read like separate slots and are not.
+set "_asrc=%~3"
 set "_res="
 rem  Pick the HIGHEST-version app-* folder that has a resources\ dir. A plain ASCII "dir /o-n"
 rem  sort is wrong at a version digit-rollover (app-1.0.9500 sorts ABOVE app-1.0.10015), which
@@ -3976,7 +4068,7 @@ if "!_hadorig!"=="1" if not defined _bakloc (
     call :Log "ABORT: OpenAsar %_flav% - no backup landed, asar left intact"
     endlocal & set /a _OAFAIL+=1 & goto :eof
 )
-copy /y "%_src%" "%_res%\!_target!" >nul
+copy /y "%_asrc%" "%_res%\!_target!" >nul
 if errorlevel 1 (
     echo [WARN] %_flav%: copy failed ^(file in use? quit Discord fully and re-run^).
     endlocal & set /a _OAFAIL+=1
