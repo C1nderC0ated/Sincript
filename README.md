@@ -117,6 +117,36 @@ harness — see [Release contents](#release-contents).
 
 ---
 
+## Command line
+
+sincript is an interactive menu by default. One preset can also be applied unattended:
+
+```
+PerfTweaks.cmd /preset:NAME [/dns:VALUE] [/plan:VALUE] [/norestore]
+```
+
+| Option | Values | Meaning |
+|---|---|---|
+| `/preset:` | `light` · `moderate` · `heavy` | The built-in presets, exactly as the menu applies them — the two paths share one definition of each, so they cannot drift |
+| `/preset:` | any `NAME` | Applies `sincript_presets\NAME.preset`, parsed by the same validator the menu uses. A bare file name only: separators, wildcards and `..` are refused, so it cannot reach outside that folder |
+| `/dns:` | `cloudflare` · `google` · `quad9` · an IPv4 | Omit it and DNS is left alone. The interactive presets *ask*; an unattended run must not guess. Overrides a `dns=` key in a custom preset |
+| `/plan:` | `ultimate` · `high` · `balanced` | Which scheme a preset containing `power=1` activates. Unset means `ultimate`. Overrides a `power_plan=` key |
+| `/norestore` | — | Skip the System Restore Point, which is otherwise created first |
+| `/?` | — | Help |
+
+**On a laptop, pass `/plan:high` or `/plan:balanced`.** Unset means Ultimate Performance — the plan Windows *hides* on battery-powered machines, which pins sustained maximum clocks. If the machine runs an undervolt (ThrottleStop, XTU, vendor tuning) that step change is where a stable undervolt stops being stable, and the CPU reports it as an uncorrectable machine check, bugcheck `0x124`. Interactively there is an advisory and a prompt to reconsider at; unattended there is only this option, so the advisory is printed and logged before anything is applied. See [Notes & caveats](#notes--caveats).
+
+**It requires an already-elevated window and will not relaunch itself.** The menu self-elevates and exits immediately, which is right for a person and useless for automation — the caller would get an exit code describing the *relaunch* rather than the work. Start it from an elevated prompt, or from a scheduled task set to run with highest privileges.
+
+Everything is validated before anything is changed: a bad option, an invalid `/dns:`/`/plan:`, an unknown preset or a preset file with no valid directives all abort having touched nothing — not even the restore point. Argument errors are reported before environment errors, so a typo does not hide behind *"not elevated"*.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Applied, no failures |
+| `1` | Applied, but at least one change failed (see the `[FAIL]` lines and the log) |
+| `2` | Bad usage — unknown option, invalid value, no such preset, or no writable backup folder |
+| `3` | Not elevated; nothing was attempted |
+
 ## Presets
 
 **`10. Presets`** applies a whole bundle of tweaks in one go, with **no
@@ -326,6 +356,16 @@ Steam is on another drive. To change the flags, edit the single `_SLFLAGS=` line
 
 Newest first. Feature details live in the sections above — this is just what changed.
 
+- **Validators could have been bypassed *and* executed what they rejected.** `cmd` runs each side of a pipe in a child and re-parses the expanded text there, so `echo(!value!| findstr …` never showed the value to `findstr`: `1.1.1.1&cmd` ran `cmd` and got approved. Affected `:_ip4_ok` (typed resolvers, and `dns=` in a preset), the Unity job-worker prompt, and the non-ASCII test in both backup writers. All now validate in-shell or through a file — no child process, nothing re-parsed. **Tests 101, 116.**
+- **Startup flips could have hit the wrong entry.** Entries are addressed by number and the toggle pass re-enumerates, so an entry added or removed in between shifted the target; only the bounds were checked. The list pass now fingerprints the enumeration and the toggle pass refuses on a mismatch. **Test 117.**
+- **Session state leaked between actions.** Custom-preset directives, the `_PWPLAN` power-plan choice and the `_RUNTRACK` failure tally all survived into later actions — so a preset could apply keys its own file never contained, and menu 4 could decide which plan a later preset activated. **Tests 88, 102–104.**
+- **"Exit" could have stopped meaning exit.** `:RequireBundledFile` aborted by jumping to a menu from inside a `call`, leaving the frame pending; the next `exit /b` returned into it instead of ending the script. It returns a status now, and no `call`ed routine may jump to a menu. **Test 105.**
+- **Silence where there should have been a message.** An uncreatable backup folder went unreported while `:Log` spewed a path error per call; debloat printed `[OK]` whatever happened, and unelevated found nothing while saying so cheerfully; a declined UAC prompt just closed the window. All now report, and debloat refuses unelevated. **Tests 106–108.**
+- **Disk and environment used to be untidied.** Each Windows Update reset orphaned another 1–5 GB in `%SystemRoot%` with nothing to remove or even mention it; eight worker temp files used fixed names two windows would share; one handoff variable was never cleared. **Tests 109–110.**
+- **A menu with no input spun at 100% CPU forever.** `set /p` cannot tell an exhausted stdin from a bare Enter, so a redirected or closed stdin left every prompt looping with no exit. Bounded now, with a clear message. **Test 113.**
+- **Small correctness fixes.** A hybrid AMD+NVIDIA machine got only the AMD half; a malformed preset file could abort the run; the OpenAsar download guard could never fire because `del` clears errorlevel; the backup-folder size total counted every export under 1 MB as zero. **Tests 111–112, 115.**
+- **New: a `/preset:` command line.** `PerfTweaks.cmd /preset:light|moderate|heavy|NAME [/dns:…] [/plan:…] [/norestore]`, with real exit codes — see [Command line](#command-line). It shares one definition of each preset with the menu rather than a second copy, validates everything before changing anything, and does **not** self-elevate (a relaunch would return an exit code for the relaunch, not the work). `/plan:` exists because unattended there is no prompt to reconsider at and `power=1` otherwise means Ultimate Performance — on an undervolted laptop a real bugcheck `0x124`. **Test 114.**
+- **Known, not fixed — the per-value `.reg` backup mangles data containing `!`.** `:SafeRegAdd` captures `reg query` output while delayed expansion is on, which eats `!` and substitutes environment variables: `pre!PATH!post` is backed up with the entire PATH inside it. Unreachable in practice — every `REG_SZ` value sincript touches holds a number or one word — but it is a silent corruption of an undo, so it is recorded rather than left implicit. The fix means restructuring the script's most safety-critical routine; the full registry export (**Backups & status → 2**) is exact for every type and is the fallback.
 - **Network & DNS: your own resolver, and flushing the cache on its own.** *Set DNS* was three providers or nothing; there is now a **Custom server** option for a router, a Pi-hole, NextDNS or a corporate resolver, and the preset key `dns` accepts a literal IPv4 as well as the three names. A typed address is free text on its way to a command line, so it is charset-checked (digits and dots only, which is what stops `&`/`|`/`<`/`>` being read as operators), range-checked per octet, and every use is late-expanded so even a value that got through would stay literal — the preset door runs the same validator, or it would just be the way round the menu. **Flush DNS cache** is its own item on menu 5 now instead of being reachable only inside *Reset network stack*: flushing is the fix you actually want when a site moved and Windows is still using the old address, and it should not cost you a winsock reset to get it. The DNS screen also prints what is currently set before offering to change it, read from the Tcpip interface keys rather than `netsh` output — that output is localized, so parsing it would show nothing on a non-English Windows and the failure would read as *no DNS set* rather than as an error. Custom-DNS input is guarded by **test 101**.
 - **The power-settings undo file reports what actually happened.** `PowerPlan_*.bat` used to end with a flat *Power settings restored.* whatever the outcome, so a run that could write nothing — not elevated, or the scheme since deleted — still read as success. Every restore line now goes through a small counting helper and the file ends with `[OK] Restored n` or `[WARN] n restored, m FAILED`, carrying the failure count as its exit code. Generated output is real `cmd` and gets the same honesty rule as the script that wrote it; **test 91** now checks the generated file the way the rest of the suite checks this one.
 - **The power plan is a choice now, and Ultimate carries a real warning.** Menu 4 used to ask a yes/no where "yes" silently meant **Ultimate Performance** — a workstation plan Windows *hides* on battery-powered machines, which pins the minimum processor state at 100% and disables both core parking and PCIe link power management. On a laptop running an undervolt (ThrottleStop, XTU, vendor tuning) that step change to sustained maximum clocks is exactly where a stable undervolt stops being stable: the core computes wrong and the CPU reports it as an uncorrectable machine check. Not theoretical — it produced a **WHEA 0x124** on real hardware during testing, `MCi_STATUS` decoding to *internal parity error* with *processor context corrupt*, no memory address attached. The plan is now picked from a list with the trade-offs written out, laptops get an advisory naming the undervolt interaction specifically, and Balanced is reachable so there is an in-app way back to the Windows default. New preset key **`power_plan=ultimate|high|balanced`**; `power=1` alone still means Ultimate. Guarded by **tests 88-90**.
@@ -337,7 +377,7 @@ Newest first. Feature details live in the sections above — this is just what c
 - **Cleanup expansion.** Core cleanup (presets too) now also clears crash dumps, minidumps, and the Delivery Optimization cache — still Prefetch-free and CleanRoot-gated. Interactive Cleanup adds optional shader / NVIDIA Downloader caches, Recycle Bin empty, Disk Cleanup (`cleanmgr`) and Storage Sense settings launches, plus a free-space before/after report. Status shows system-drive free space, `AppCaptureEnabled`, and search-box suggestions. Guarded by **tests 72–75**.
 - **TimerRes remove honesty.** Optional `GlobalTimerResolutionRequests` revert now resets `_FAILS` and finishes via `:Summary` (same bargain as Apply) — no more blind `[OK] Reverted` after a failed HKLM write. Guarded by **test 65**.
 - **Win11 quiet surface + Game Bar residual.** Privacy core now also quiets the remaining Start/lock Content Delivery tips, search-box suggestions, and tailored experiences (still reversible via `:SafeRegAdd`). Performance optionally disables Game Bar / Xbox overlay chrome (`AppCaptureEnabled`, Nexus, startup panel) without uninstalling Xbox — recording stays off in the performance core. Privacy optionally applies documented Edge policies (hide first-run, hubs sidebar off, shopping assistant off). Custom preset keys: `gamebar_off=1`, `edge_nudges_off=1`. Guarded by **tests 69–71**.
-- **Reliability pass (backup / restore / honesty).** Registry writes now refuse to proceed if the per-value `.reg` (or preset JSON temp) did not land — the same bargain PATH and hosts apply already had. Idempotent skip covers **REG_SZ** as well as DWORD, so a re-apply cannot bury the true-original undo. Hosts **reset** aborts without a landed `hosts.bak`; hosts **restore** falls back to Documents `hosts_*.bak` when the local `.bak` is missing. Presets abort if the JSON temp cannot be created. Timer-resolution install reports via `:Summary` / `_FAILS`; Store re-register is elevation-gated with an exit-code check. SteamLight verifies the Desktop `.lnk` before claiming it; memory-compression disable no longer swallows failures (preset path bumps `_FAILS`); NVIDIA telemetry tasks are found by name prefix (`NvTmRep_` / `NvTmMon_` / `NvDriverUpdateCheckDaily_`) instead of hardcoded GUID `\TN` paths. Guarded by **tests 60–68** (plus Store on **test 28**). Static harness is now **101** checks.
+- **Reliability pass (backup / restore / honesty).** Registry writes now refuse to proceed if the per-value `.reg` (or preset JSON temp) did not land — the same bargain PATH and hosts apply already had. Idempotent skip covers **REG_SZ** as well as DWORD, so a re-apply cannot bury the true-original undo. Hosts **reset** aborts without a landed `hosts.bak`; hosts **restore** falls back to Documents `hosts_*.bak` when the local `.bak` is missing. Presets abort if the JSON temp cannot be created. Timer-resolution install reports via `:Summary` / `_FAILS`; Store re-register is elevation-gated with an exit-code check. SteamLight verifies the Desktop `.lnk` before claiming it; memory-compression disable no longer swallows failures (preset path bumps `_FAILS`); NVIDIA telemetry tasks are found by name prefix (`NvTmRep_` / `NvTmMon_` / `NvDriverUpdateCheckDaily_`) instead of hardcoded GUID `\TN` paths. Guarded by **tests 60–68** (plus Store on **test 28**). Static harness is now **117** checks.
 - **VerboseStatus (optional):** Added an opt-in boot/logon diagnostic tweak (`verbosestatus=1`) with honest reporting explaining when `DisableStatusMessages` suppresses it. Guarded by **test 59**.
 - **Disable Widgets / News & Interests, and Windows Spotlight on the lock screen:** Included in the Privacy Core, and presets. Guarded by **test 59**.
 - **Fixed: parentheses in a status message crashed the tool (mitigations).**  `:Summary` printed its message inside a one-line `if ( ) else ( )` block, so the first `)` in the text — e.g. the mitigations line's `(incl. Downfall/GDS)`, or an empty `()` — closed the block early and aborted the script (*"was unexpected at this time"*). `:Summary` is now written with `goto` branching so the message is never inside `( )`; any caller text is safe. Guarded by **test 58**, which fails if the routine is ever put back into a parenthesised block.
@@ -467,7 +507,7 @@ Microsoft's own documentation and left out on the evidence:
 
 Sincript ships with a **static-analysis** harness in `tests/`. `PerfTweaks.cmd`
 is interactive and changes the system, so it can't be safely unit-tested by
-*running* it; instead `tests/Run-Tests.ps1` (101 checks on stock Windows
+*running* it; instead `tests/Run-Tests.ps1` (117 checks on stock Windows
 PowerShell 5.1 — no Pester) parses the script text for invariants that tend to
 break silently, including:
 
@@ -504,7 +544,7 @@ Run from the repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1
 ```
 
-Exit code `0` means all 101 checks passed; `1` means at least one failed, with
+Exit code `0` means all 117 checks passed; `1` means at least one failed, with
 the offending detail printed. See `tests/tests_README.md` for the full numbered list.
 
 ---
