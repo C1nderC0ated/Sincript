@@ -170,8 +170,8 @@ Invoke-Test 'example.preset keys are all recognized by the validator' {
 
     $recognized = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($ln in $checkBody) {
-        # matches:  if /i "%_k%"=="cleanup" ( ...
-        $m = [regex]::Match($ln, '(?i)"%_k%"=="([^"]+)"')
+        # matches:  if /i "[%!]_k[%!]"=="cleanup" ( ...
+        $m = [regex]::Match($ln, '(?i)"[%!]_k[%!]"=="([^"]+)"')
         if ($m.Success) { [void]$recognized.Add($m.Groups[1].Value) }
     }
     Assert-True ($recognized.Count -ge 10) ("Parsed too few recognized keys ({0}) - parser drift?" -f $recognized.Count)
@@ -359,9 +359,24 @@ Invoke-Test ':DoPowerPlanSwitch duplicates Ultimate onto its canonical GUID' {
 Invoke-Test 'OpenAsar download failure is detected and the partial file removed' {
     $cmd = Read-Lines $CmdPath
     foreach ($r in 'OpenAsar', 'DoOpenAsarSilent') {
-        $t = ((Get-RoutineBody -Lines $cmd -Label $r) -join "`n")
-        if ($t -notmatch '(?i)Invoke-WebRequest') { continue }
-        Assert-True ($t -match '(?i)if\s+errorlevel\s+1\s+del\b') (":$r ignores the download exit code / keeps a partial file on failure (regression).")
+        # rem-stripped: the routines carry a comment QUOTING the old broken shape to explain
+        # why it was wrong, and the negative assertion below would match that comment.
+        $tAll = Get-RoutineBody -Lines $cmd -Label $r
+        $tAll = @($tAll)
+        Assert-True ($tAll.Count -gt 5) ":$r body did not unroll - two-step Get-RoutineBody, or every assertion below is skipped."
+        $t = @($tAll | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+        # Both routines download, so neither may take the skip path - without this the whole
+        # test could `continue` past every assertion and still report PASS.
+        Assert-True ($t -match '(?i)Invoke-WebRequest') ":$r no longer downloads the nightly - or its body was not read (regression)."
+        # The exit code must be CAPTURED before anything else runs. "del" always resets
+        # errorlevel to 0, so the old shape - "if errorlevel 1 del ..." followed by
+        # "if errorlevel 1 goto fail" - had a dead second line: the del between them had
+        # already cleared the code being tested. Only file existence was doing any work,
+        # which is exactly the case that fails when the download half-succeeds AND the del
+        # is blocked (antivirus holding the fresh file): a partial .asar then installs.
+        Assert-True ($t -match '(?i)set "_dlrc=%errorlevel%"') (":$r no longer captures the download exit code before anything can clobber it (regression of F-E4).")
+        Assert-True ($t -match '(?i)if not "%_dlrc%"=="0" del') (":$r no longer removes the partial file when the download failed (regression of F-E4).")
+        Assert-True ($t -notmatch '(?i)if\s+errorlevel\s+1\s+del\b[\s\S]{0,120}?if\s+errorlevel\s+1') (":$r tests errorlevel again AFTER a del has already reset it - that second test can never fire (regression of F-E4).")
     }
 }
 
@@ -600,7 +615,20 @@ Invoke-Test 'Apostrophe-safe path hand-off via env vars (SteamLight + elevation)
     Assert-True ($b -match '(?i)\$env:PT_SLDIR')  ':SteamLight no longer reads the Steam path from $env:PT_SLDIR - it interpolates it into the PS string, which an apostrophe in the path would break (regression).'
 
     # Elevation relaunch lives above the first label - pin the invocation line itself.
-    Assert-True (($cmd -join "`n") -match '(?im)^\s*set "PT_SELF=%~f0"') 'UAC relaunch no longer stages %~f0 in PT_SELF - an apostrophe in the script path would break Start-Process (regression).'
+    # The path is captured into _SELFPATH at the very top (before the argument loop shifts,
+    # which renumbers %0 too) and staged into PT_SELF for the child. Both halves matter:
+    # the early capture keeps it pointing at THIS script, the env var keeps an apostrophe in
+    # the path from breaking the single-quoted PowerShell literals.
+    $joinedCmd = $cmd -join "`n"
+    Assert-True ($joinedCmd -match '(?im)^\s*set "_SELFPATH=%~f0"') 'The script path is no longer captured before the argument loop - after a shift, %~f0 names an argument rather than this file (regression of F-G1).'
+    Assert-True ($joinedCmd -match '(?im)^\s*set "PT_SELF=%_SELFPATH%"') 'UAC relaunch no longer stages the captured path in PT_SELF - an apostrophe in the script path would break Start-Process (regression).'
+    # nothing may re-derive %~dp0 / %~f0 after the argument loop has shifted
+    $shiftAt = ($cmd | Select-String -Pattern '^\s*shift\s*$' | Select-Object -First 1)
+    if ($shiftAt) {
+        $after = @($cmd[$shiftAt.LineNumber..($cmd.Count-1)] | Select-String -Pattern '%~[df]*0' -AllMatches)
+        $bad = @($after | Where-Object { $_.Line -notmatch '^\s*rem\b' })
+        Assert-True ($bad.Count -eq 0) ("%~0-derived path(s) used AFTER the argument loop shifts, where %0 is no longer this script: '$(($bad | ForEach-Object { $_.Line.Trim() }) -join ' | ')' (regression of F-G1).")
+    }
     $elevPs = @($cmd | Where-Object { $_ -match '(?i)Start-Process\b' -and $_ -match '(?i)-Verb\s+RunAs' })
     Assert-True ($elevPs.Count -ge 1) 'UAC relaunch Start-Process -Verb RunAs line missing - elevation path is gone.'
     Assert-True ($elevPs[0] -match '(?i)-FilePath\s+\$env:PT_SELF\b') 'UAC relaunch no longer passes -FilePath $env:PT_SELF - embedding the path in the PS string breaks on an apostrophe (regression).'
@@ -1229,13 +1257,15 @@ Invoke-Test 'Multi-step runs never depend on a bundled file' {
         $rBody = Get-RoutineBody -Lines $cmd -Label $r
         $b = @($rBody | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
         Assert-True ($b.Length -gt 0) ("Could not read the body of :$r - this check would pass vacuously.")
-        Assert-True ($b -notmatch '(?i)call :RequireBundledFile') (":$r calls :RequireBundledFile, which aborts with 'goto MenuApps'. That would abandon a multi-step run part-way, skip :Summary and land the user on an unrelated menu with the machine half configured. Make :RequireBundledFile return a status before depending on it here.")
+        Assert-True ($b -notmatch '(?i)call :RequireBundledFile') (":$r depends on a bundled file. A multi-step run must not hinge on an OPTIONAL file being present - it would abandon the run part-way and skip :Summary. The guard returns a status now, so if this ever becomes deliberate the caller must check errorlevel and carry on rather than abort.")
     }
 
-    # and the guard must still actually abort rather than fall through
+    # and the guard must still actually abort rather than fall through - but as a RETURN,
+    # not a jump. See test 105 for why the old "goto MenuApps" was a call-stack leak.
     $rbBody = Get-RoutineBody -Lines $cmd -Label 'RequireBundledFile'
     $rb = @($rbBody | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
-    Assert-True ($rb -match '(?i)goto MenuApps') ':RequireBundledFile no longer aborts on a missing file - the caller would run on without it.'
+    Assert-True ($rb -match '(?i)exit /b 1') ':RequireBundledFile no longer aborts on a missing file - the caller would run on without it.'
+    Assert-True ($rb -match '(?i)exit /b 0') ':RequireBundledFile no longer returns success explicitly - the caller would read a stale errorlevel from whatever ran last (regression of F-B1).'
 }
 
 # ===============================================================================
@@ -1502,8 +1532,11 @@ Invoke-Test ':SafeRegAdd / :SafeRegDelete abort when the per-value backup did no
         Assert-True ($joined -match 'if not exist "!_bkp!"') ":$r no longer checks that the .reg backup landed before writing - CFA/disk-full would leave no undo (regression)."
         Assert-True ($joined -match 'FAIL backup') ":$r lost its abort/log path when the .reg backup is missing (regression)."
         Assert-True ($joined -match 'if not exist "!PRESET_JSON_TMP!"') ":$r no longer checks the preset JSON temp before writing in PRESET_MODE (regression)."
-        $gateAt = $joined.IndexOf('if not exist "!_bkp!"')
-        $writeAt = if ($r -eq 'SafeRegAdd') { $joined.IndexOf('reg add') } else { $joined.IndexOf('reg delete') }
+        # Order is measured on the rem-stripped view. These routines are heavily commented and
+        # a comment mentioning "reg add" (there is one, explaining why large DWORDs are written
+        # as hex) would otherwise be found first and read as the write happening before the gate.
+        $gateAt = $code.IndexOf('if not exist "!_bkp!"')
+        $writeAt = if ($r -eq 'SafeRegAdd') { $code.IndexOf('reg add') } else { $code.IndexOf('reg delete') }
         Assert-True ($gateAt -ge 0 -and $writeAt -gt $gateAt) ":$r backup-existence gate is not before the live registry write (regression)."
         Assert-True ($code.Length -gt 0) ":$r code view empty after stripping echo/rem."
     }
@@ -1707,7 +1740,7 @@ Invoke-Test 'Game Bar residual is prompt-gated via :DoGameBarOff (not in :DoPerf
     Assert-True ($gb -match '(?i)"ShowStartupPanel"\s+REG_DWORD\s+0') ':DoGameBarOff missing ShowStartupPanel=0.'
 
     $check = (Get-RoutineBody -Lines $cmd -Label 'PresetCheckLine') -join "`n"
-    Assert-True ($check -match '(?i)"%_k%"=="gamebar_off"') 'Preset validator lost gamebar_off.'
+    Assert-True ($check -match '(?i)"[%!]_k[%!]"=="gamebar_off"') 'Preset validator lost gamebar_off.'
 }
 
 # ===============================================================================
@@ -1731,7 +1764,7 @@ Invoke-Test 'Edge nudges are opt-in via :DoEdgeNudgesOff (Privacy prompt + edge_
     Assert-True ($edge -match '(?i)SOFTWARE\\Policies\\Microsoft\\Edge') ':DoEdgeNudgesOff not writing under Policies\\Microsoft\\Edge.'
 
     $check = (Get-RoutineBody -Lines $cmd -Label 'PresetCheckLine') -join "`n"
-    Assert-True ($check -match '(?i)"%_k%"=="edge_nudges_off"') 'Preset validator lost edge_nudges_off.'
+    Assert-True ($check -match '(?i)"[%!]_k[%!]"=="edge_nudges_off"') 'Preset validator lost edge_nudges_off.'
 }
 
 # ===============================================================================
@@ -1937,7 +1970,7 @@ Invoke-Test 'OneDrive sync block is opt-in, not in :DoPrivacyCore' {
     Assert-True ($priv -match '(?i)call :DoOneDriveSyncOff') ':Privacy no longer offers OneDrive as an opt-in prompt (regression of F3).'
 
     $chk = (Get-RoutineBody -Lines $cmd -Label 'PresetCheckLine') -join "`n"
-    Assert-True ($chk -match '(?i)"%_k%"=="onedrive_off"') 'Preset validator lost the onedrive_off key.'
+    Assert-True ($chk -match '(?i)"[%!]_k[%!]"=="onedrive_off"') 'Preset validator lost the onedrive_off key.'
     $all = ($cmd -join "`n")
     Assert-True ($all -match '(?i)if defined _P_ONEDRIVE\s+call :DoOneDriveSyncOff') 'Custom presets no longer apply onedrive_off.'
 }
@@ -2008,7 +2041,7 @@ Invoke-Test 'OpenAsar counts per-flavor failures and cleans up the downloaded ni
         $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
         Assert-True ($code -match '(?i)set "_OAFAIL=0"')  ":$r does not reset _OAFAIL before the install loop - a stale tally would carry over (regression of F6)."
         Assert-True ($code -match '(?i)_OAFAIL%"=="0"')   ":$r never reports the failure tally, so a partial install still reads as success (regression of F6)."
-        Assert-True ($code -match '(?i)del /f /q "%TEMP%\\openasar_nightly\.asar"') ":$r leaves the downloaded nightly behind in %TEMP% (regression of F7)."
+        Assert-True ($code -match '(?i)del /f /q "%_OADL%"') ":$r leaves the downloaded nightly behind in %TEMP% (regression of F7)."
     }
 }
 
@@ -2077,9 +2110,16 @@ Invoke-Test 'Power action splits plan switch from plan-agnostic timeouts' {
     Assert-True ($co -match '(?i)call :DoPowerTimeouts')   ':DoPowerCore no longer applies the timeouts - preset "power=1" would quietly stop doing what it always did.'
     # Ultimate Performance is a workstation plan Windows hides on battery-powered machines,
     # so which plan gets activated is now an explicit choice rather than a hidden yes/no.
-    Assert-True ($sw -match '(?i)if not defined _PWPLAN set "_PWPLAN=ultimate"') ':DoPowerPlanSwitch no longer defaults an unset request to ultimate - preset "power=1" and Apply-recommended would silently change meaning (regression).'
-    Assert-True ($sw -match '(?i)"%_PWPLAN%"=="high"')     ':DoPowerPlanSwitch lost the High Performance branch (regression).'
-    Assert-True ($sw -match '(?i)"%_PWPLAN%"=="balanced"') ':DoPowerPlanSwitch lost the Balanced branch - there would be no in-app way back to the Windows default plan (regression).'
+    Assert-True ($sw -match '(?i)if not defined _pwsel set "_pwsel=ultimate"') ':DoPowerPlanSwitch no longer defaults an unset request to ultimate - preset "power=1" and Apply-recommended would silently change meaning (regression).'
+    Assert-True ($sw -match '(?i)"%_pwsel%"=="high"')     ':DoPowerPlanSwitch lost the High Performance branch (regression).'
+    Assert-True ($sw -match '(?i)"%_pwsel%"=="balanced"') ':DoPowerPlanSwitch lost the Balanced branch - there would be no in-app way back to the Windows default plan (regression).'
+    # _PWPLAN is an INPUT to this routine. It used to apply its own "ultimate" fallback by
+    # WRITING the global, which made the fallback stick for the whole session: one pass
+    # through here and every later caller inherited a plan choice nobody made on its screen.
+    # Resolving into _pwsel keeps the default while leaving the caller's variable alone.
+    $swCode = @((Get-RoutineBody -Lines $cmd -Label 'DoPowerPlanSwitch') | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    Assert-True ($swCode -notmatch '(?i)set "_PWPLAN=') ':DoPowerPlanSwitch writes back to _PWPLAN - the fallback would persist for the rest of the session and steer later actions that never asked for a plan (regression of F-A2).'
+    Assert-True ($swCode -match '(?i)set "_pwsel=%_PWPLAN%"') ':DoPowerPlanSwitch no longer reads the requested plan into a local (regression of F-A2).'
     Assert-True ($sw -match '(?i)381b4222-f694-41f0-9685-ff5bb260df2e') ':DoPowerPlanSwitch no longer knows the Balanced GUID (regression).'
     Assert-True ($sw -match '(?i)8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c') ':DoPowerPlanSwitch no longer knows the High Performance GUID (regression).'
 }
@@ -2119,14 +2159,16 @@ Invoke-Test ':Power offers a current-plan path when the switch is declined' {
 Invoke-Test 'Preset key power_timeouts applies timeouts without switching plans' {
     $cmd = Read-Lines $CmdPath
     $chk = ((Get-RoutineBody -Lines $cmd -Label 'PresetCheckLine') -join "`n")
-    Assert-True ($chk -match '(?i)"%_k%"=="power_timeouts"') 'Preset validator lost the power_timeouts key.'
+    Assert-True ($chk -match '(?i)"[%!]_k[%!]"=="power_timeouts"') 'Preset validator lost the power_timeouts key.'
     $all = ($cmd -join "`n")
     Assert-True ($all -match '(?i)if not defined _P_POWER if defined _P_PWTIMEOUTS call :DoPowerTimeouts') 'Custom presets no longer apply power_timeouts, or lost the guard that stops it running twice alongside power=1.'
-    Assert-True ($chk -match '(?i)"%_k%"=="power_plan"') 'Preset validator lost the power_plan key - a preset could only ever get the hidden Ultimate default.'
+    Assert-True ($chk -match '(?i)"[%!]_k[%!]"=="power_plan"') 'Preset validator lost the power_plan key - a preset could only ever get the hidden Ultimate default.'
     $pk = ((Get-RoutineBody -Lines $cmd -Label 'PChkPlan') -join "`n")
     Assert-True ($pk.Length -gt 0) ':PChkPlan is missing.'
     foreach ($v in 'ultimate','high','balanced') {
-        Assert-True ($pk -match ('(?i)"%~1"=="' + $v + '"')) ":PChkPlan no longer accepts $v (regression)."
+        # accepts either the old argument form or the delayed-expansion one the validator
+        # moved to, so user text never reaches parse-time expansion
+        Assert-True ($pk -match ('(?i)"(?:%~1|!_v!)"=="' + $v + '"')) ":PChkPlan no longer accepts $v (regression)."
     }
     Assert-True ($pk -match '(?i)_perr\+=1') ':PChkPlan accepts an unrecognised plan name instead of reporting it (regression).'
     Assert-True ($all -match '(?i)if defined _P_PWPLAN\s+set "_PWPLAN=%_P_PWPLAN%"') 'Custom presets parse power_plan but never hand it to :DoPowerPlanSwitch (regression).'
@@ -2468,9 +2510,17 @@ Invoke-Test 'Custom DNS input is validated before it reaches a command line' {
     $v = @($v)
     Assert-True ($v.Count -gt 0) ':_ip4_ok is missing.'
     $vc = @($v | Where-Object { $_.Trim() -notmatch '^(?i)(echo\(|rem)\b' }) -join "`n"
-    Assert-True ($vc -match '(?i)findstr /r /x')  ':_ip4_ok no longer anchors its charset check - a value with & | < > could reach the command line (regression).'
+    # The charset check must not go through a PIPE. cmd runs each side of a pipe in a child
+    # and builds that child's command line from the already-expanded text, so the old
+    # "echo(!_IPCHK!| findstr ..." split on "&" in the child: it RAN the injected remainder
+    # and then handed findstr a clean "1.1.1.1", answering "valid". Verified both ways.
+    Assert-True ($vc -notmatch '(?i)echo\(?!_IPCHK!\s*\|') ':_ip4_ok pipes the value into findstr again - the piped child re-parses it, so "1.1.1.1&command" executes the command and still validates (regression of F-J1).'
+    Assert-True ($vc -match '(?i)for /f "delims=0123456789\." %%X in \("!_IPCHK!"\)') ':_ip4_ok lost its pipe-free charset check (regression of F-J1).'
+    Assert-True ($vc -match '(?i)if not "%%d"==""') ':_ip4_ok no longer requires a fourth octet - a missing token expands to empty, so "1.2.3." rebuilds to itself and passes (regression of F-J1).'
     # All four octets, not "at least one" - dropping a single check leaves the rest matching.
-    $oct = ([regex]::Matches($vc, '(?i)GTR 255')).Count
+    # LEQ 255, not GTR 255: the checks are chained onto the four-part rebuild now, so they
+    # only run once the shape is known good and never see a missing token.
+    $oct = ([regex]::Matches($vc, '(?i)LEQ 255')).Count
     Assert-True ($oct -eq 4) "::_ip4_ok range-checks $oct octet(s), not 4 - the unchecked position accepts anything up to 999 (regression)."
 
     $d = Get-RoutineBody -Lines $cmd -Label 'DnsCustom'
@@ -2506,6 +2556,672 @@ Invoke-Test 'Custom DNS input is validated before it reaches a command line' {
     $s = @($sAll | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
     Assert-True ($s -match '(?i)Tcpip\\Parameters\\Interfaces') ':ShowCurrentDns no longer reads the interface keys (regression).'
     Assert-True ($s -notmatch '(?i)show dnsservers') ':ShowCurrentDns parses localized netsh output - it would show nothing on a translated Windows and read as "no DNS set" (pitfall 26 regression).'
+}
+
+# ===============================================================================
+# 102. Custom-preset directives are plain globals, so applying one preset and then
+#      another in the SAME session must not carry the first one's keys into the
+#      second. :PresetCustom clears them up front from a hardcoded list, and that
+#      list drifted: PWTIMEOUTS / ONEDRIVE / PWPLAN were validated and applied but
+#      never cleared, so a preset with onedrive_off=1 poisoned every later preset
+#      with a policy that STOPS OneDrive syncing - while the "Recognized directives"
+#      count on screen honestly described the file that never asked for it.
+#      Derived from the validators rather than restated, so it cannot drift again.
+# ===============================================================================
+Invoke-Test 'Every preset directive the validators set is cleared before a preset runs' {
+    $cmd = Read-Lines $CmdPath
+    $all = $cmd -join "`n"
+
+    # names the validators can define: `call :PVok NAME`, plus literal _P_NAME writes
+    # (:PChkWin32 / :PChkPlan / :PChkDns). The dynamic `set "_P_%~1=1"` inside :PVok and
+    # the reset loop's own `set "_P_%%K="` cannot match - % is outside the character class.
+    $settable = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($m in [regex]::Matches($all, '(?i)\bcall :PVok\s+([A-Za-z0-9_]+)')) { [void]$settable.Add($m.Groups[1].Value) }
+    foreach ($m in [regex]::Matches($all, '(?i)set "_P_([A-Za-z0-9_]+)='))       { [void]$settable.Add($m.Groups[1].Value) }
+    Assert-True ($settable.Count -gt 0) 'Found no preset directive names at all - the validator shape changed.'
+
+    $resetLine = $null
+    foreach ($ln in $cmd) {
+        if ($ln -match '(?i)^\s*for %%K in \(([^)]*)\) do set "_P_%%K="') { $resetLine = $Matches[1] }
+    }
+    Assert-True ($null -ne $resetLine) ':PresetCustom no longer clears the _P_* directives up front - every preset would inherit the previous one (regression of F-A1).'
+
+    $cleared = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in ($resetLine -split '\s+')) { if ($n) { [void]$cleared.Add($n) } }
+
+    $missing = @($settable | Where-Object { -not $cleared.Contains($_) } | Sort-Object)
+    Assert-True ($missing.Count -eq 0) ("Preset directive(s) set by a validator but never cleared: {0}. Applying two presets in one session would silently apply the first one's keys to the second (regression of F-A1)." -f ($missing -join ', '))
+
+    # and the reverse, so the list cannot rot into naming keys that no longer exist
+    $stale = @($cleared | Where-Object { -not $settable.Contains($_) } | Sort-Object)
+    Assert-True ($stale.Count -eq 0) ("Reset list clears _P_* name(s) no validator sets: {0} - the list has drifted from :PresetCheckLine." -f ($stale -join ', '))
+}
+
+# ===============================================================================
+# 103. _PWPLAN decides WHICH power scheme :DoPowerPlanSwitch activates, and it is a
+#      session global the Power menu writes. Any path that documents its own plan
+#      must therefore clear it first, or menu history decides what a preset does:
+#      pick Balanced on menu 4, run MODERATE, and the "recommended safe set" the
+#      README documents as Ultimate quietly stayed on Balanced.
+# ===============================================================================
+Invoke-Test 'Power-plan choice cannot leak from the menu into presets or the safe set' {
+    $cmd = Read-Lines $CmdPath
+
+    foreach ($r in 'ApplyRecommended','PresetBegin') {
+        # two steps on purpose: Get-RoutineBody returns `,$array`, so @(f) in ONE step wraps
+        # the array instead of unrolling it and the whole body arrives as a single element.
+        $body = Get-RoutineBody -Lines $cmd -Label $r
+        $body = @($body)
+        Assert-True ($body.Count -gt 0) (":$r is missing.")
+        $code = @($body | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+        Assert-True ($code -match '(?i)set "_PWPLAN="') ":$r does not clear _PWPLAN - a plan picked on menu 4 earlier in the session would decide which scheme it activates (regression of F-A2)."
+    }
+
+    # every preset routes its power core through :PresetBegin, so the clear covers all four
+    foreach ($p in 'PresetLight','PresetModerate','PresetHeavy') {
+        $b = ((Get-RoutineBody -Lines $cmd -Label $p) -join "`n")
+        Assert-True ($b -match '(?i)call :PresetBegin') ":$p no longer opens with :PresetBegin - it would skip the _PWPLAN reset (regression of F-A2)."
+    }
+
+    # :PresetCustom is the exception: its flow runs on through :PresetCustom_ask / :_pcHaveValid
+    # / :_pcReady before it applies anything, and :PresetCustom_ask is a real (non-underscore)
+    # label, so Get-RoutineBody stops before the apply block - correctly. Slice the whole flow
+    # by file position instead, from :PresetCustom to the next real routine.
+    $mS = @($cmd | Select-String -Pattern '^:PresetCustom\b')
+    $mE = @($cmd | Select-String -Pattern '^:PresetCheckLine\b')
+    Assert-True ($mS.Count -gt 0 -and $mE.Count -gt 0) 'Custom-preset flow labels not found - the preset section was restructured.'
+    $pcBody = @($cmd[($mS[0].LineNumber - 1)..($mE[0].LineNumber - 2)])
+    Assert-True ((($pcBody -join "`n") -match '(?i)call :PresetBegin')) ':PresetCustom no longer opens with :PresetBegin - it would skip the _PWPLAN reset (regression of F-A2).'
+
+    # an explicit power_plan= key must still win, which means it is applied AFTER the reset
+    $mBegin = @($pcBody | Select-String -SimpleMatch 'call :PresetBegin')
+    $mPlan  = @($pcBody | Select-String -SimpleMatch 'set "_PWPLAN=%_P_PWPLAN%"')
+    Assert-True ($mBegin.Count -gt 0) ':PresetCustom no longer calls :PresetBegin (regression).'
+    Assert-True ($mPlan.Count  -gt 0) ':PresetCustom no longer applies the power_plan= key (regression).'
+    Assert-True ($mPlan[0].LineNumber -gt $mBegin[0].LineNumber) ':PresetCustom applies power_plan= BEFORE :PresetBegin clears _PWPLAN, so the key is wiped and the preset silently falls back to ultimate (regression of F-A2).'
+}
+
+# ===============================================================================
+# 104. _RUNTRACK is what lets :Run count a failed sc/schtasks/powercfg call, and
+#      :Summary is the ONLY place it is cleared. So an action that turns it on and
+#      never reports through :Summary leaves it on for the rest of the session, and
+#      the next non-elevated cleanup counts its benign "del" failures as real ones -
+#      the exact cry-wolf the :Run tally is written to avoid.
+# ===============================================================================
+Invoke-Test 'Tracking is turned off again: every _RUNTRACK=1 action reports via :Summary' {
+    $cmd = Read-Lines $CmdPath
+
+    $sum = ((Get-RoutineBody -Lines $cmd -Label 'Summary') -join "`n")
+    Assert-True ($sum -match '(?i)set "_RUNTRACK="') ':Summary no longer clears _RUNTRACK - tracking would leak into every later action (regression).'
+
+    $labels = @()
+    foreach ($ln in $cmd) { if ($ln -match '^:(\w+)' -and $Matches[1] -notmatch '^_') { $labels += $Matches[1] } }
+    $offenders = @()
+    foreach ($L in ($labels | Select-Object -Unique)) {
+        $b = ((Get-RoutineBody -Lines $cmd -Label $L) -join "`n")
+        if ($b -match '(?i)set "_RUNTRACK=1"' -and $b -notmatch '(?i)call :Summary') { $offenders += $L }
+    }
+    Assert-True ($offenders.Count -eq 0) ("Routine(s) set _RUNTRACK=1 without reporting through :Summary, so tracking stays on for the rest of the session: {0} (regression of F-A3)." -f ($offenders -join ', '))
+
+    # the action this was found in: it calls the undo .bat directly, never through :Run,
+    # so tracking bought nothing there and only ever leaked
+    $rp = Get-RoutineBody -Lines $cmd -Label 'RestorePowerBackup'
+    $rp = @($rp)
+    Assert-True ($rp.Count -gt 1) ':RestorePowerBackup is missing (or the body did not unroll).'
+    $rpc = @($rp | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    Assert-True ($rpc -notmatch '(?i)set "_RUNTRACK=1"') ':RestorePowerBackup turns tracking on again but never calls :Summary, so nothing turns it off (regression of F-A3).'
+}
+
+# ===============================================================================
+# 105. A `call`ed routine must RETURN, never jump to a menu. cmd pops a call frame
+#      on "goto :eof" / "exit /b" and never on a bare goto, so a subroutine that
+#      ends with "goto MenuApps" leaves the frame its caller pushed pending for the
+#      rest of the session. The next "exit /b" then returns INTO that frame instead
+#      of ending the script - :ExitScript stops meaning exit, and the user lands
+#      back inside the action they aborted. :RequireBundledFile did exactly this;
+#      the guard is general because the shape is easy to reintroduce.
+# ===============================================================================
+Invoke-Test 'A called routine returns - it never jumps to a menu (call-stack integrity)' {
+    $cmd = Read-Lines $CmdPath
+
+    # menu labels = the screens an action can legitimately goto, but a SUBROUTINE cannot
+    $menu = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($ln in $cmd) {
+        if ($ln -match '^:((?:Main)?Menu\w*|ExitScript)\s*$') { [void]$menu.Add($Matches[1]) }
+    }
+    Assert-True ($menu.Count -ge 8) "Found only $($menu.Count) menu labels - this test would barely check anything."
+
+    # every label reached by `call` anywhere in the script, restricted to labels this file
+    # actually defines. :PowerBackup builds a PowerPlan_*.bat whose text contains
+    # "call :pt_do" - that is generated output for another file, not a subroutine here, and
+    # test 91 checks it separately. A call target with no label in this file is never ours.
+    $defined = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($ln in $cmd) { if ($ln -match '^:(\w+)') { [void]$defined.Add($Matches[1]) } }
+    $called = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($ln in $cmd) {
+        foreach ($m in [regex]::Matches($ln, '(?i)\bcall\s+:(\w+)')) {
+            $t = $m.Groups[1].Value
+            if ($t -ne 'eof' -and $defined.Contains($t)) { [void]$called.Add($t) }
+        }
+    }
+    Assert-True ($called.Count -gt 20) 'Found suspiciously few call targets - the call convention changed.'
+
+    $offenders = @()
+    foreach ($L in $called) {
+        $body = Get-RoutineBody -Lines $cmd -Label $L
+        $body = @($body)
+        foreach ($ln in $body) {
+            if ($ln.Trim() -match '^(?i)rem\b') { continue }
+            foreach ($g in [regex]::Matches($ln, '(?i)(?<![:\w])goto\s+:?(\w+)')) {
+                if ($menu.Contains($g.Groups[1].Value)) { $offenders += ("{0} -> goto {1}" -f $L, $g.Groups[1].Value) }
+            }
+        }
+    }
+    Assert-True ($offenders.Count -eq 0) ("Called routine(s) jump to a menu instead of returning, leaving cmd's call stack one frame deep so a later 'exit /b' resumes the aborted caller instead of exiting: {0}. Return a status (exit /b 1) and let the caller own the goto (regression of F-B1)." -f ($offenders -join '; '))
+
+    # the caller side of that contract: a status nobody reads is not a guard
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        if ($cmd[$i] -notmatch '(?i)^\s*call :RequireBundledFile\b') { continue }
+        $next = ''
+        for ($j = $i + 1; $j -lt $cmd.Count; $j++) {
+            if ($cmd[$j].Trim() -eq '' -or $cmd[$j].Trim() -match '^(?i)rem\b') { continue }
+            $next = $cmd[$j]; break
+        }
+        Assert-True ($next -match '(?i)^\s*if errorlevel 1 goto \w+') ("Line $($i+1) calls :RequireBundledFile but the next statement does not check errorlevel - the action would carry on with the file missing. Found: '$($next.Trim())' (regression of F-B1).")
+    }
+}
+
+# ===============================================================================
+# 106. The backup folder is the whole tool's safety net: :SafeRegAdd refuses to
+#      write a tweak whose per-value .reg did not land, and :Log writes into the
+#      same folder. If `md` failed, every action reported [FAIL] for no visible
+#      reason while ~100 log calls per session each printed "The system cannot
+#      find the path specified." to the console, burying the real output.
+# ===============================================================================
+Invoke-Test 'A missing backup folder is reported once, not shouted on every log line' {
+    $cmd = Read-Lines $CmdPath
+    $all = $cmd -join "`n"
+
+    Assert-True ($all -match '(?i)set "_BAKOK=0"') 'Startup no longer verifies that the backup folder was actually created - the md result was never checked (regression of F-C1).'
+    $warnIdx = ($cmd | Select-String -SimpleMatch 'The backup folder could not be created')
+    Assert-True (@($warnIdx).Count -ge 1) 'The unwritable-backup-folder warning is gone - actions would fail with no stated reason (regression of F-C1).'
+
+    # the warning block prints a path that can legitimately contain ")", so it must be
+    # late-expanded or the if-block closes early at parse time and the script dies
+    Assert-True ($all -notmatch '(?m)^\s*echo\s+%BACKUP_DIR%\s*$') 'The warning echoes %BACKUP_DIR% percent-expanded - a Documents path containing ")" would close the if-block and crash the script at startup.'
+
+    # :Log must not be able to spew. The redirection failure is emitted by the command
+    # processor as it sets the redirect up, so "2>nul" on the echo does NOT suppress it -
+    # it has to sit on a CALL. Keep the write in its own routine, reached that way.
+    $logBody = Get-RoutineBody -Lines $cmd -Label 'Log'
+    $logBody = @($logBody)
+    $logCode = @($logBody | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    Assert-True ($logCode -match '(?i)call :_LogWrite 2>nul') ':Log no longer routes its write through a redirected call, so a missing backup folder prints an error for every log line (regression of F-C1).'
+
+    # and nothing else may redirect into the log directly, or it reopens the same hole
+    $bad = @()
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        if ($cmd[$i] -match '(?i)>>\s*"%LOGFILE%"') {
+            $inWriter = $false
+            for ($j = $i; $j -ge 0; $j--) { if ($cmd[$j] -match '^:(\w+)') { $inWriter = ($Matches[1] -eq '_LogWrite'); break } }
+            if (-not $inWriter) { $bad += ($i + 1) }
+        }
+    }
+    Assert-True ($bad.Count -eq 0) ("Line(s) $($bad -join ', ') redirect into %LOGFILE% outside :_LogWrite - that write cannot be silenced and will spew when the folder is missing (regression of F-C1).")
+}
+
+# ===============================================================================
+# 107. Debloat is the ONE action with no undo - the README says so, you reinstall
+#      from the Store. It used to pipe Get-AppxPackage into Remove-AppxPackage with
+#      -ErrorAction SilentlyContinue and then print an unconditional "[OK] ...
+#      removed where present.", so a run that removed nothing - because it was not
+#      elevated, or every removal threw - read exactly like a run that worked.
+# ===============================================================================
+Invoke-Test 'Debloat reports what it actually removed, and refuses when not elevated' {
+    $cmd = Read-Lines $CmdPath
+    $all = $cmd -join "`n"
+
+    # the whole debloat flow spans several labels; slice it by file position
+    $mS = @($cmd | Select-String -Pattern '^:Debloat\b')
+    $mE = @($cmd | Select-String -Pattern '^:StartupMgr\b')
+    Assert-True ($mS.Count -gt 0 -and $mE.Count -gt 0) 'Debloat flow labels not found - the section was restructured.'
+    $flow = @($cmd[($mS[0].LineNumber - 1)..($mE[0].LineNumber - 2)])
+    $code = @($flow | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+
+    Assert-True ($code -match '(?i)if "%_ELEV%"=="0"') 'Debloat has no elevation guard - Get-AppxPackage -AllUsers needs Administrator, so unelevated it finds nothing and every group reports "none installed", a false SKIP that reads like good news (regression of F-C2).'
+    Assert-True ($code -notmatch '(?i)removed where present') 'Debloat prints its old unconditional "[OK] ... removed where present." line again - that is the false success this fix removed (regression of F-C2).'
+
+    # both package groups must go through the counting helper
+    $runs = ([regex]::Matches($code, '(?i)call :DebloatRun')).Count
+    Assert-True ($runs -ge 2) "Only $runs debloat group(s) go through :DebloatRun - a group removing packages without counting them cannot report honestly (regression of F-C2)."
+
+    $rb = ((Get-RoutineBody -Lines $cmd -Label 'DebloatRun') -join "`n")
+    Assert-True ($rb.Length -gt 0) ':DebloatRun is missing.'
+    foreach ($tag in '\[OK\]','\[SKIP\]','\[FAIL\]') {
+        Assert-True ($rb -match "(?i)$tag") ":DebloatRun lost its $tag branch - removed / not-installed / failed must stay distinguishable (regression of F-C2)."
+    }
+    Assert-True ($rb -match '(?i)Remove-AppxPackage -ErrorAction Stop') ':DebloatRun swallows removal errors again (-ErrorAction Stop is what makes a failure countable) (regression of F-C2).'
+
+    # OneDrive: the uninstaller is 32-bit on many machines and lives only in SysWOW64
+    Assert-True ($code -match '(?i)SysWOW64\\OneDriveSetup\.exe') 'The OneDrive uninstall only looks in System32 - on a 64-bit Windows the shipped OneDriveSetup.exe is commonly the 32-bit one in SysWOW64, so it silently did nothing while printing [OK] (regression of F-C2).'
+    Assert-True ($code -match '(?i)\[WARN\] OneDrive') 'The OneDrive path no longer warns when the uninstaller could not be found (regression of F-C2).'
+}
+
+# ===============================================================================
+# 108. A failed elevation must say so. The relaunch used to be a bare Start-Process
+#      with its output discarded, followed by an unconditional "exit /b" - so a
+#      declined UAC prompt or a blocked PowerShell just closed the window after
+#      printing "Requesting Administrator privileges...", which is indistinguishable
+#      from the script crashing.
+# ===============================================================================
+Invoke-Test 'A failed self-elevation is reported, not a silently closing window' {
+    $cmd = Read-Lines $CmdPath
+    # window sized from the file, not a fixed 80 lines - the argument loop grew and pushed
+    # the elevation block past a hardcoded bound, which read as "the relaunch is gone"
+    $adminAt = ($cmd | Select-String -Pattern '^:AdminOK$' | Select-Object -First 1)
+    Assert-True ($null -ne $adminAt) ':AdminOK is missing - the startup section was restructured.'
+    $head = @($cmd[0..($adminAt.LineNumber - 1)]) -join "`n"
+
+    Assert-True ($head -match '(?i)Start-Process') 'The self-elevation relaunch is gone.'
+    Assert-True ($head -match '(?i)-Verb RunAs')   'The relaunch no longer requests elevation.'
+    Assert-True ($head -match '(?i)-ErrorAction Stop') 'Start-Process no longer uses -ErrorAction Stop, so a declined UAC prompt does not surface as a nonzero exit code (regression of F-C3).'
+    Assert-True ($head -match '(?i)catch\{ exit 1 \}') 'The relaunch no longer converts a failure into an exit code (regression of F-C3).'
+    Assert-True ($head -match '(?i)if not errorlevel 1 exit /b') 'The script exits unconditionally after attempting elevation, so the failure path is unreachable and stays silent (regression of F-C3).'
+    Assert-True ($head -match '(?i)\[WARN\] The elevation prompt did not go through') 'A failed elevation no longer tells the user why the window is about to change behaviour (regression of F-C3).'
+    Assert-True ($head -match '(?i)goto AdminWarn') 'A failed elevation no longer offers the limited-mode path that :AdminWarn already implements (regression of F-C3).'
+}
+
+# ===============================================================================
+# 109. Resetting Windows Update renames SoftwareDistribution and catroot2 rather
+#      than deleting them, which is correct - it keeps a rollback. What was wrong
+#      is that nothing ever removed or even mentioned them, and SoftwareDistribution
+#      is routinely 1-5 GB, so repeated resets quietly ate tens of GB inside
+#      %SystemRoot%. Pruning is opt-in, runs BEFORE the rename so the newest
+#      rollback always survives, and must never be able to match a LIVE folder.
+# ===============================================================================
+Invoke-Test 'Windows Update reset prunes only OLD leftovers, opt-in, never the live folders' {
+    $cmd = Read-Lines $CmdPath
+
+    $wr = Get-RoutineBody -Lines $cmd -Label 'WUReset'
+    $wr = @($wr)
+    Assert-True ($wr.Count -gt 0) ':WUReset is missing.'
+    $iPrune = ($wr | Select-String -SimpleMatch 'call :WUPruneOld' | Select-Object -First 1)
+    $iRen   = ($wr | Select-String -SimpleMatch 'SoftwareDistribution.bak_' | Select-Object -First 1)
+    Assert-True ($null -ne $iPrune) ':WUReset never offers to clear earlier leftovers - each run adds another 1-5 GB folder that nothing removes (regression of F-D1).'
+    Assert-True ($null -ne $iRen)   ':WUReset no longer renames SoftwareDistribution (regression).'
+    Assert-True ($iPrune.LineNumber -lt $iRen.LineNumber) ':WUReset prunes AFTER creating this run''s rollback copy, so it would delete the very backup it just made (regression of F-D1).'
+
+    $po = ((Get-RoutineBody -Lines $cmd -Label 'WUPruneOld') -join "`n")
+    Assert-True ($po.Length -gt 0) ':WUPruneOld is missing.'
+    Assert-True ($po -match '(?i)set /p') 'Leftover deletion is no longer opt-in - it must ask before removing anything (regression of F-D1).'
+
+    # the safety property: every folder filter must be anchored on the ".bak_" suffix this
+    # script itself creates, or a prune could match the LIVE SoftwareDistribution / catroot2
+    $pw = ((Get-RoutineBody -Lines $cmd -Label 'WUPruneWorker') -join "`n")
+    Assert-True ($pw.Length -gt 0) ':WUPruneWorker is missing.'
+    $filters = @([regex]::Matches($pw, "(?i)-Filter\s+'([^']+)'") | ForEach-Object { $_.Groups[1].Value })
+    Assert-True ($filters.Count -ge 2) "Expected at least two folder filters in :WUPruneWorker; found $($filters.Count)."
+    foreach ($f in $filters) {
+        Assert-True ($f -like '*.bak_*') "Folder filter '$f' is not anchored on the '.bak_' suffix sincript creates - it could match the LIVE SoftwareDistribution or catroot2 and delete a working component store (regression of F-D1)."
+    }
+    Assert-True ($pw -match '(?i)if\(\$del\)') ':WUPruneWorker no longer gates removal on delete mode - the counting pass would delete (regression of F-D1).'
+    Assert-True ($pw -match '(?i)Remove-Item -LiteralPath') ':WUPruneWorker no longer removes by literal path - a wildcard removal here targets %SystemRoot% (regression of F-D1).'
+}
+
+# ===============================================================================
+# 110. Two hygiene invariants, both derived rather than restated so they cannot
+#      rot: every temp file a worker writes carries %RANDOM%, and every PT_*
+#      variable handed to a PowerShell child is cleared again afterwards. Fixed
+#      names meant two sincript windows read each other's results - and the first
+#      to finish deleted the file the second was about to read.
+# ===============================================================================
+Invoke-Test 'Worker temp files are per-call, and every PT_* handoff variable is cleared' {
+    $cmd = Read-Lines $CmdPath
+
+    $fixed = @()
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        foreach ($m in [regex]::Matches($cmd[$i], "(?i)(?:%TEMP%\\|\`$env:TEMP\s+')pt_[a-z0-9_]+\.txt")) {
+            if ($m.Value -notmatch '%RANDOM%') { $fixed += ("line {0}: {1}" -f ($i + 1), $m.Value) }
+        }
+    }
+    Assert-True ($fixed.Count -eq 0) ("Fixed-name worker temp file(s): {0}. Two sincript windows would share them, and whichever finishes first deletes the file the other is about to read (regression of F-D2)." -f ($fixed -join '; '))
+
+    $assigned = @{}; $cleared = @{}
+    foreach ($l in $cmd) {
+        foreach ($m in [regex]::Matches($l, 'set "(PT_[A-Za-z0-9_]+)=([^"]*)"')) {
+            if ($m.Groups[2].Value -eq '') { $cleared[$m.Groups[1].Value] = $true }
+            else { $assigned[$m.Groups[1].Value] = $true }
+        }
+    }
+    Assert-True ($assigned.Count -gt 20) "Only $($assigned.Count) PT_* handoff variables found - the worker convention changed."
+    $leaked = @($assigned.Keys | Where-Object { -not $cleared.ContainsKey($_) } | Sort-Object)
+    Assert-True ($leaked.Count -eq 0) ("PT_* variable(s) set but never cleared: {0}. They stay in the environment for the rest of the session and are inherited by every child process sincript spawns (regression of F-D3)." -f ($leaked -join ', '))
+}
+
+# ===============================================================================
+# 111. A machine can have two GPU vendors, and many do - an AMD APU with an NVIDIA
+#      discrete card is an ordinary gaming laptop. Detection used to run two
+#      unconditional probes writing the SAME variable, so the second one won and
+#      such a machine always came out "amd": the Advanced menu offered the AMD
+#      opt-out and the NVIDIA telemetry TASKS - the ones that actually run there -
+#      were skipped entirely. Both vendors are now tracked separately.
+# ===============================================================================
+Invoke-Test 'GPU detection tracks both vendors independently, so a hybrid machine gets both' {
+    $cmd = Read-Lines $CmdPath
+    $all = $cmd -join "`n"
+
+    Assert-True ($all -match '(?i)set "GPU_NV=1"')  'NVIDIA is no longer tracked in its own flag - a second probe would overwrite it (regression of F-E1).'
+    Assert-True ($all -match '(?i)set "GPU_AMD=1"') 'AMD is no longer tracked in its own flag (regression of F-E1).'
+    Assert-True ($all -match '(?i)set "GPU=nvidia\+amd"') 'The both-vendors case no longer has its own label for the menu header (regression of F-E1).'
+    # each vendor word must be written CONDITIONALLY, or "unknown" is clobbered on a machine
+    # with neither and the header reports a GPU that is not there
+    Assert-True ($all -match '(?i)if defined GPU_NV set "GPU=nvidia"')  'GPU=nvidia is assigned unconditionally, so a machine with no NVIDIA adapter still reports one (regression of F-E1).'
+    Assert-True ($all -match '(?i)if defined GPU_AMD set "GPU=amd"')    'GPU=amd is assigned unconditionally (regression of F-E1).'
+
+    # the recursive class-key query is the slowest probe at startup; it must run once
+    $probes = ([regex]::Matches($all, '(?i)reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Class\\\{4d36e968')).Count
+    Assert-True ($probes -eq 1) "The display-class registry tree is queried $probes times at startup; it should be read once into a file and scanned twice (regression of F-E1)."
+
+    # both the menu and the preset path must branch on the flags, not the single word
+    foreach ($r in 'GpuTelemetry','DoGpuTelemetryOff') {
+        $b = Get-RoutineBody -Lines $cmd -Label $r
+        $b = @($b)
+        $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+        Assert-True ($code -match '(?i)defined GPU_(NV|AMD)') ":$r still branches on %GPU% alone, so a machine with both vendors only gets whichever probe wrote it last (regression of F-E1)."
+        Assert-True ($code -notmatch '(?i)"%GPU%"=="nvidia"') ":$r still compares %GPU% to a single vendor - that is the test that fails on a hybrid machine (regression of F-E1)."
+    }
+    # and declining NVIDIA must not skip the AMD half
+    $nv = ((Get-RoutineBody -Lines $cmd -Label 'GpuNvidia') -join "`n")
+    Assert-True ($nv -match '(?i)goto GpuAmd') ':GpuNvidia never continues to the AMD opt-out, so on a hybrid machine one screen silently swallows the other (regression of F-E1).'
+    # ...and DECLINING NVIDIA must reach that continuation too, not jump straight to the menu -
+    # otherwise one "no" throws away an unrelated vendor's opt-out
+    Assert-True ($nv -notmatch '(?i)if /i not "%_c%"=="Y" goto MenuAdvanced') ':GpuNvidia sends a declined NVIDIA prompt straight back to the menu, so on a hybrid machine it skips the AMD opt-out entirely (regression of F-E1).'
+    Assert-True ($nv -match '(?i)if /i not "%_c%"=="Y" goto _gpuNvDone') ':GpuNvidia no longer routes a declined prompt through the shared continuation point (regression of F-E1).'
+}
+
+# ===============================================================================
+# 112. Two input-robustness invariants. The preset file is the only untrusted
+#      input this script parses, and its validator was the last place that
+#      percent-expanded user text inside ( ) blocks - cmd resolves that at PARSE
+#      time, so an unpaired " in a key or value aborted the whole run with "was
+#      unexpected at this time" (verified against the old shape: exit code 255,
+#      before it printed anything). And set /a saturates above 2^31, which made
+#      any two large DWORDs compare equal.
+# ===============================================================================
+Invoke-Test 'Untrusted preset text and large DWORDs never reach parse-time expansion' {
+    $cmd = Read-Lines $CmdPath
+
+    $b = Get-RoutineBody -Lines $cmd -Label 'PresetCheckLine'
+    $b = @($b)
+    $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    Assert-True ($b.Count -gt 5) ':PresetCheckLine body did not unroll - use the two-step Get-RoutineBody idiom.'
+    Assert-True ($code.Length -gt 0) ':PresetCheckLine body empty.'
+    Assert-True ($code -notmatch '%_k%') ':PresetCheckLine percent-expands the preset KEY again - inside an ( ) block cmd resolves that before the block structure is known, so an unpaired " aborts the run (regression of F-E2).'
+    Assert-True ($code -notmatch '%_v%') ':PresetCheckLine percent-expands the preset VALUE again (regression of F-E2).'
+    Assert-True ($code -match '(?i)"!_k!"==') ':PresetCheckLine no longer compares the key with delayed expansion (regression of F-E2).'
+
+    # the value must not travel as a call argument either - that is parse-time expansion
+    # one level down, and it is how an embedded " unbalanced the call itself
+    $callsites = @($cmd | Select-String -Pattern '(?i)call :PresetCheckLine')
+    Assert-True ($callsites.Count -ge 1) 'Nothing calls :PresetCheckLine.'
+    foreach ($c in $callsites) {
+        Assert-True ($c.Line -notmatch '(?i)call :PresetCheckLine\s+\S') ':PresetCheckLine is called with arguments again - the key/value must be assigned from the for-variables, which are substituted after parsing (regression of F-E2).'
+    }
+    foreach ($h in 'PVok','PChkWin32','PChkPlan','PChkDns') {
+        $hb = Get-RoutineBody -Lines $cmd -Label $h
+        $hb = @($hb)
+        $hc = @($hb | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+        Assert-True ($hc -match '!_v!') ":$h no longer reads the value with delayed expansion from the caller's scope (regression of F-E2)."
+    }
+
+    # set /a is 32-bit signed and SATURATES when it dereferences an out-of-range variable,
+    # so without this guard any two values >= 2^31 compare equal and a real difference
+    # would be skipped as "already set"
+    $idem = ((Get-RoutineBody -Lines $cmd -Label 'SafeRegAdd') -join "`n")
+    Assert-True ($idem -match '(?i)"!_curdec!"=="2147483647"') 'The DWORD idempotence check no longer detects set /a saturation, so two different values at or above 2^31 compare equal and the write is silently skipped (regression of F-E3).'
+    Assert-True ($idem -match '(?i)if /i not "!_curtok!"=="!_data!" goto _sraDoWrite') 'The saturation fallback no longer compares the raw tokens as text (regression of F-E3).'
+    # ...which only works if large values are written as hex, matching what reg query returns
+    $all = $cmd -join "`n"
+    Assert-True ($all -notmatch '(?i)REG_DWORD 4294967295') 'A large DWORD is written as decimal again; reg query returns hex, so the saturation fallback cannot match it and the value is re-written every run (regression of F-E3).'
+}
+
+# ===============================================================================
+# 113. Every menu prompt that re-asks itself needs a way out. set /p cannot tell an
+#      exhausted stdin from a bare Enter - both leave the variable unset and both
+#      return errorlevel 1 - so "if not defined sel goto MenuX_ask" had no exit at
+#      all once stdin was redirected or closed, and spun at 100% CPU forever.
+#      Verified: the real script under "< nul" now exits in ~5s instead of hanging.
+# ===============================================================================
+Invoke-Test 'Every self-repeating prompt can give up when stdin is exhausted' {
+    $cmd = Read-Lines $CmdPath
+
+    $niAll = Get-RoutineBody -Lines $cmd -Label 'NoInput'
+    $niAll = @($niAll)
+    Assert-True ($niAll.Count -gt 5) ':NoInput body did not unroll - two-step Get-RoutineBody.'
+    # rem-stripped: the routine's comment QUOTES the broken loop shape it exists to fix, and
+    # the negative assertion below would match that prose rather than any real code.
+    $ni = @($niAll | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    Assert-True ($ni.Length -gt 0) ':NoInput is missing - nothing bounds the menu prompt loops (regression of F-F1).'
+    Assert-True ($ni -match '(?i)set /a _NOIN\+=1') ':NoInput no longer counts consecutive empty reads (regression of F-F1).'
+    Assert-True ($ni -match '(?i)exit /b 1') ':NoInput never reports "give up", so the loops it guards can still spin forever (regression of F-F1).'
+    Assert-True ($ni -match '(?i)exit /b 0') ':NoInput no longer reports "ask again" (regression of F-F1).'
+    # the limit must actually be REACHABLE - an "exit /b 1" behind a threshold nothing can
+    # hit is the same unbounded loop with extra steps
+    $lim = [regex]::Match($ni, '(?i)if !_NOIN! lss (\d+) exit /b 0')
+    Assert-True ($lim.Success) ':NoInput no longer bounds the retry count with a literal limit (regression of F-F1).'
+    $n = [int]$lim.Groups[1].Value
+    Assert-True ($n -ge 10 -and $n -le 1000) ":NoInput's give-up threshold is $n - outside 10..1000 it is either hair-trigger for a person pressing Enter, or so high that an exhausted stdin still spins effectively forever (regression of F-F1)."
+    # it is CALLED, so it must return rather than jump - see test 105
+    Assert-True ($ni -notmatch '(?i)(?<![:\w])goto\s+:?(MainMenu|Menu\w+|ExitScript)\b') ':NoInput jumps to a menu instead of returning a status, unbalancing the call stack (regression of F-B1).'
+
+    # the counter has to be cleared somewhere reachable, or one stray Enter per screen
+    # eventually accumulates to the limit over a long session
+    $logo = ((Get-RoutineBody -Lines $cmd -Label 'Logo') -join "`n")
+    Assert-True ($logo -match '(?i)set "_NOIN=0"') ':Logo no longer clears the empty-read counter, so it accumulates across unrelated screens (regression of F-F1).'
+
+    # EVERY prompt that loops back to its own label must consult the guard first
+    $unguarded = @()
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        if ($cmd[$i] -notmatch '^\s*if not defined (\w+) goto (\w+)\s*$') { continue }
+        $var = $Matches[1]; $tgt = $Matches[2]
+        $lbl = @($cmd | Select-String -Pattern ("^:" + [regex]::Escape($tgt) + "$") | Select-Object -First 1)
+        if ($lbl.Count -eq 0 -or $lbl[0].LineNumber -gt ($i + 1)) { continue }   # forward jump = not a loop
+        # What matters is that the CYCLE is bounded, not that every line carries a guard.
+        # Walking from the target label down to this jump, the path must pass through either
+        # :NoInput (a guarded prompt) or :Logo (a screen redraw, which re-enters a guarded
+        # prompt and resets the counter). A secondary "that number is not in the list" check
+        # loops back to its own already-guarded prompt, so its cycle is bounded too.
+        $seg = $cmd[($lbl[0].LineNumber - 1)..$i] -join "`n"
+        if ($seg -match '(?i)call :(Logo|NoInput)\b') { continue }
+        $unguarded += ("line {0}: if not defined {1} goto {2}" -f ($i+1), $var, $tgt)
+    }
+    Assert-True ($unguarded.Count -eq 0) ("Self-repeating prompt(s) with no way out when stdin is empty - these spin at 100% CPU forever under redirected or closed stdin: {0} (regression of F-F1)." -f ($unguarded -join '; '))
+
+    # and the courtesy pause must not announce its own failure on a non-interactive exit
+    $bad = @($cmd | Select-String -Pattern '(?i)timeout /t \d+ >nul\s*$')
+    Assert-True ($bad.Count -eq 0) ("timeout call(s) suppress stdout but not stderr, so a redirected stdin prints 'Input redirection is not supported' as the last line of an otherwise clean exit: line(s) $(($bad | ForEach-Object { $_.LineNumber }) -join ', ') (regression of F-F1).")
+}
+
+# ===============================================================================
+# 114. The /preset: command line must apply EXACTLY what the menu applies, and it
+#      must warn about the one change that can take a machine down. The preset
+#      bodies are shared routines for the first reason; :LaptopAdvisory and the
+#      /plan: option exist for the second - unattended there is no prompt to
+#      reconsider at, and Ultimate Performance on an undervolted laptop is a real
+#      bugcheck 0x124, not a theoretical caveat.
+# ===============================================================================
+Invoke-Test 'The /preset: command line shares the menu bodies and warns before the power plan' {
+    $cmd = Read-Lines $CmdPath
+    $all = $cmd -join "`n"
+
+    # ---- one definition of each preset, used by both paths ----
+    foreach ($b in 'PresetBodyLight','PresetBodyModerate','PresetBodyHeavy') {
+        $body = ((Get-RoutineBody -Lines $cmd -Label $b) -join "`n")
+        Assert-True ($body.Length -gt 0) ":$b is missing - the menu and the command line would each need their own copy of the tweak list (regression of F-H1)."
+        $n = ([regex]::Matches($body, '(?i)call :Do\w+')).Count
+        Assert-True ($n -ge 3) ":$b calls only $n Do* routines - it looks emptied out (regression of F-H1)."
+    }
+    foreach ($p in 'PresetLight','PresetModerate','PresetHeavy') {
+        $menu = ((Get-RoutineBody -Lines $cmd -Label $p) -join "`n")
+        $expected = 'call :PresetBody' + $p.Substring(6)
+        Assert-True ($menu -match ('(?i)' + [regex]::Escape($expected))) ":$p no longer calls $expected - the menu has its own copy of the list again and the two paths will drift (regression of F-H1)."
+    }
+    $cliBody = ((Get-RoutineBody -Lines $cmd -Label 'CliRun') -join "`n")
+    Assert-True ($cliBody.Length -gt 0) ':CliRun is missing.'
+    foreach ($b in 'PresetBodyLight','PresetBodyModerate','PresetBodyHeavy','PresetApplyDirectives') {
+        Assert-True ($cliBody -match ('(?i)call :' + $b + '\b')) ":CliRun does not go through :$b - the command line would apply a different set than the menu (regression of F-H1)."
+    }
+
+    # ---- the safety half ----
+    $cliCode = @((Get-RoutineBody -Lines $cmd -Label 'CliRun') | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    Assert-True ($cliCode -match '(?i)call :LaptopAdvisory') ':CliRun never shows the laptop advisory. Unattended there is no prompt to reconsider at, so this line is the only warning that a portable machine is about to be pinned at sustained max clocks (regression of F-H2).'
+    Assert-True ($cliCode -match '(?i)/plan:') ':CliRun lost the /plan: option, so an unattended run cannot choose anything but the hidden Ultimate default (regression of F-H2).'
+    Assert-True ($all -match '(?i)set "_CLIPLAN=!_a:~6!"') 'The argument loop no longer parses /plan: (regression of F-H2).'
+    # /plan: must be applied AFTER :PresetBegin, which deliberately clears _PWPLAN
+    $iBegin = ($cliBody -split "`n" | Select-String -SimpleMatch 'call :PresetBegin' | Select-Object -First 1)
+    $iPlan  = ($cliBody -split "`n" | Select-String -SimpleMatch 'set "_PWPLAN=!_CLIPLAN!"' | Select-Object -First 1)
+    Assert-True ($null -ne $iBegin -and $null -ne $iPlan) ':CliRun no longer wires /plan: into _PWPLAN (regression of F-H2).'
+    Assert-True ($iPlan.LineNumber -gt $iBegin.LineNumber) ':CliRun sets _PWPLAN before :PresetBegin, which clears it - the /plan: choice would be silently discarded and the run would fall back to Ultimate (regression of F-H2).'
+    Assert-True ($cliCode -match '(?i)set "_P_PWPLAN=!_CLIPLAN!"') ':CliRun does not override a custom preset''s power_plan= with /plan: - the more specific instruction must win (regression of F-H2).'
+
+    # ---- validation before side effects ----
+    $iRp = ($cliBody -split "`n" | Select-String -SimpleMatch 'call :CreateRestorePoint' | Select-Object -First 1)
+    Assert-True ($null -ne $iRp) ':CliRun no longer offers a restore point.'
+    foreach ($guard in 'exit /b 3','No such preset') {
+        $g = ($cliBody -split "`n" | Select-String -SimpleMatch $guard | Select-Object -First 1)
+        Assert-True ($null -ne $g -and $g.LineNumber -lt $iRp.LineNumber) "':CliRun' does its '$guard' check after creating a System Restore Point - a run that was always going to abort must not change anything first (regression of F-H3)."
+    }
+    # a preset name becomes a path, so it must be constrained to a bare file name
+    # A whitelist, and not through a pipe. The first version blacklisted path separators and
+    # wildcards but not "&", and the piped child re-parsed the name and ran the remainder.
+    Assert-True ($cliCode -match '(?i)for /f "delims=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_\.-" %%X in \("!_CLIPRESET!"\)') ':CliRun no longer holds the preset name to a whitelist without a pipe, so /preset:..\..\x or a name containing "&" gets through (regression of F-H3).'
+    Assert-True ($cliCode -notmatch '(?i)echo\(?!_CLIPRESET!\s*\|') ':CliRun pipes the preset name into findstr again - the piped child re-parses it and an "&" in the name executes (regression of F-J1).'
+    # and the name must never reach :Summary, whose "echo [OK] %~1" re-parses its argument
+    Assert-True ($cliCode -notmatch '(?i)call :Summary "Preset !_CLIPRESET!') ':CliRun passes the preset name to :Summary again - it ends in "echo [OK] %~1", and %~1 is substituted during parsing, so an "&" in the text splits the line (regression of F-J2).'
+    Assert-True ($cliCode -match '(?i)_CLIPRESET:\.\.=') ':CliRun no longer rejects ".." in a preset name (regression of F-H3).'
+
+    # ---- an option that parses to nothing must not fall through to the menu ----
+    # "/preset:" with no name, or a typo like /bogus, used to leave every _CLI* variable
+    # empty, and the script then quietly opened the interactive menu. For an unattended
+    # caller that is the worst outcome available: it neither works nor reports a problem,
+    # it just sits at a prompt until something kills it.
+    $argStart = ($cmd | Select-String -Pattern '^:_argLoop$' | Select-Object -First 1)
+    $argEnd   = ($cmd | Select-String -Pattern '^:_argDone$' | Select-Object -First 1)
+    Assert-True ($null -ne $argStart -and $null -ne $argEnd) 'The argument loop is missing.'
+    $argBody = @($cmd[($argStart.LineNumber - 1)..($argEnd.LineNumber - 2)])
+    $iElev = ($argBody | Select-String -SimpleMatch '"/elevated"' | Select-Object -First 1)
+    $iAny  = ($argBody | Select-String -SimpleMatch 'set "_CLIANY=1"' | Select-Object -First 1)
+    Assert-True ($null -ne $iAny) 'The argument loop no longer records that a command-line option was seen, so an option that parses to nothing opens the interactive menu instead of failing (regression of F-H5).'
+    Assert-True ($null -ne $iElev -and $iAny.LineNumber -gt $iElev.LineNumber) '/elevated is counted as a command-line request - it is the interactive relaunch marker, so it must not put the script into command-line mode (regression of F-H5).'
+    Assert-True ($all -match '(?i)if defined _CLIANY goto CliRun') 'The startup dispatches on _CLIPRESET rather than "any option given", so a typo or an empty value silently opens the menu (regression of F-H5).'
+    foreach ($v in '_CLIPRESET','_CLIDNS','_CLIPLAN') {
+        Assert-True (($argBody -join "`n") -match ('(?i)if not defined ' + $v + ' set "_CLIBAD=!_a!"')) "An empty value for the option behind $v is accepted silently instead of being reported as bad usage (regression of F-H5)."
+    }
+    Assert-True ($cliCode -match '(?i)if not defined _CLIPRESET \(') ':CliRun does not refuse a command line with no /preset: - options like /norestore alone have nothing to apply (regression of F-H5).'
+
+    # ---- a path from the user's Documents folder can contain & or ) ----
+    Assert-True ($all -notmatch '(?i)Registry backup: %PRESET_LAST%') 'The "Registry backup:" line percent-expands PRESET_LAST - it is built from the Documents folder, so "C:\Users\Bob & Alice\..." would be re-parsed as a command separator (regression of F-H4).'
+}
+
+# ===============================================================================
+# 115. The backup-folder size total divided each file by 1 MB and added THAT, so
+#      integer division discarded the remainder per file: every export under a
+#      megabyte counted as zero, and ten 900 KB exports totalled "0 MB" on a line
+#      that also said there were ten of them. Sum KB, convert once at the end.
+# ===============================================================================
+Invoke-Test 'Backup size total sums kilobytes, so sub-megabyte exports are not lost' {
+    $cmd = Read-Lines $CmdPath
+
+    # no @() on the first line - Get-RoutineBody returns `,$array` and wrapping it there
+    # keeps the whole body as ONE element, which makes every assertion below vacuous
+    $add = Get-RoutineBody -Lines $cmd -Label '_mbAddFull'
+    $add = @($add)
+    Assert-True ($add.Count -gt 3) ':_mbAddFull body did not unroll.'
+    $code = @($add | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+
+    Assert-True ($code -notmatch '1048576') ':_mbAddFull divides each file by 1 MB again - integer division drops the remainder per file, so anything under a megabyte counts as zero (regression of F-I1).'
+    Assert-True ($code -match '(?i)_kbFull\+=') ':_mbAddFull no longer accumulates kilobytes (regression of F-I1).'
+    # the size must go through a variable: set /a saturates an out-of-range VARIABLE at
+    # INT_MAX but ERRORS on an out-of-range literal, and an error drops the file entirely
+    Assert-True ($code -match '(?i)set "_fsz=%~1"') ':_mbAddFull no longer stages the byte count in a variable - an oversized file would error out of set /a and vanish from the total rather than being capped (regression of F-I1).'
+    Assert-True ($code -notmatch '(?i)\+=%~1') ':_mbAddFull puts the raw argument straight into the set /a expression again (regression of F-I1).'
+
+    # and the caller converts once, keeping a tenth so a small folder does not read "0 MB"
+    $all = $cmd -join "`n"
+    Assert-True ($all -match '(?i)set /a _mbW=_kbFull/1024') 'The KB total is no longer converted to whole MB by the caller (regression of F-I1).'
+    Assert-True ($all -match '(?i)set /a _mbF=\(_kbFull\*10/1024\)%%10') 'The MB total lost its tenths, so a few hundred KB of exports reads as a flat "0 MB" beside a nonzero count (regression of F-I1).'
+    Assert-True ($all -match '(?i)set "_mbFull=!_mbW!\.!_mbF!"') 'The displayed MB total is no longer assembled from the whole and fractional parts (regression of F-I1).'
+}
+
+# ===============================================================================
+# 116. No value may be VALIDATED by piping it into findstr. cmd runs each side of a
+#      pipe in a child process and builds that child's command line from the
+#      already-expanded text - which is then parsed again, operators and all. So
+#          echo(!v!| findstr ...
+#      with v = "1.1.1.1&some-command" ran some-command and handed findstr a clean
+#      "1.1.1.1", answering "valid". Three routines did this, including :_ip4_ok,
+#      whose comment claimed no metacharacter could survive it. The value never
+#      reached findstr at all. Use "for /f delims=" (no child) or a file.
+# ===============================================================================
+Invoke-Test 'No validator pipes a variable into findstr - the piped child re-parses it' {
+    $cmd = Read-Lines $CmdPath
+
+    $piped = @()
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        $ln = $cmd[$i]
+        if ($ln.Trim() -match '^(?i)rem\b') { continue }
+        # echo of a delayed-expanded variable feeding a pipe
+        if ($ln -match '(?i)echo\(?\s*![A-Za-z0-9_]+!\s*\|') { $piped += ("line {0}: {1}" -f ($i+1), $ln.Trim()) }
+    }
+    Assert-True ($piped.Count -eq 0) ("Value(s) piped into a command for validation - the piped child re-parses the expanded text, so a '&' in the value executes and the checker judges the wrong string: {0}. Use `"for /f delims=`" or redirect through a file (regression of F-J1)." -f ($piped -join '; '))
+
+    # the three that had it must each still validate, by the safe route
+    $ip4 = ((Get-RoutineBody -Lines $cmd -Label '_ip4_ok') -join "`n")
+    Assert-True ($ip4 -match '(?i)for /f "delims=0123456789\."') ':_ip4_ok lost its pipe-free charset check (regression of F-J1).'
+    $na = ((Get-RoutineBody -Lines $cmd -Label 'NonAsciiCheck') -join "`n")
+    Assert-True ($na.Length -gt 0) ':NonAsciiCheck is missing - the non-ASCII test went back inline through a pipe (regression of F-J1).'
+    Assert-True ($na -match '(?i)>"!_naf!" echo\(!_rd!') ':NonAsciiCheck no longer writes the value to a file before scanning it (regression of F-J1).'
+    $all = $cmd -join "`n"
+    Assert-True ($all -match '(?i)for /f "delims=0123456789" %%X in \("!_in!"\)') 'The Unity job-worker prompt pipes typed input into findstr again (regression of F-J1).'
+}
+
+# ===============================================================================
+# 117. The startup manager addresses entries by NUMBER, and the toggle pass
+#      re-enumerates from scratch. If anything added or removed a Run entry
+#      between drawing the list and confirming the flip, number N pointed at a
+#      different entry than the confirm prompt had just named - and the wrong
+#      program got disabled. Only the bounds were checked, which catches a list
+#      that got shorter and nothing else. The list pass now fingerprints the whole
+#      enumeration and the toggle pass refuses on a mismatch.
+# ===============================================================================
+Invoke-Test 'Flipping a startup entry refuses if the list changed since it was shown' {
+    $cmd = Read-Lines $CmdPath
+
+    $w = Get-RoutineBody -Lines $cmd -Label 'StartupWorker'
+    $w = @($w)
+    Assert-True ($w.Count -gt 3) ':StartupWorker body did not unroll.'
+    $code = @($w | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+
+    Assert-True ($code -match '(?i)\$sg=\[BitConverter\]::ToString') ':StartupWorker no longer fingerprints the enumeration, so a list that changed between display and flip is undetectable (regression of F-K1).'
+    Assert-True ($code -match '(?i)\$sg \| Out-File -FilePath \$env:PT_SU_SIG') 'The list pass no longer publishes the fingerprint (regression of F-K1).'
+    Assert-True ($code -match '(?i)if\(\$env:PT_SU_SIGIN -and \$env:PT_SU_SIGIN -ne \$sg\)') 'The toggle pass no longer compares the fingerprint it was given (regression of F-K1).'
+    # the refusal must happen BEFORE anything is written
+    $iCheck = ($code -split "`n" | Select-String -SimpleMatch 'PT_SU_SIGIN -ne $sg' | Select-Object -First 1)
+    $iWrite = ($code -split "`n" | Select-String -SimpleMatch 'Registry]::SetValue' | Select-Object -First 1)
+    Assert-True ($null -ne $iCheck -and $null -ne $iWrite) ':StartupWorker lost either the staleness check or the write.'
+    Assert-True ($iCheck.LineNumber -le $iWrite.LineNumber) ':StartupWorker checks the fingerprint after writing the new state (regression of F-K1).'
+    # the fingerprint is derived from source+name, never the raw name through cmd
+    # literal match, escaped - hand-writing this as a regex invites getting the backslash
+    # count wrong, which reads as a real failure
+    $sigExpr = [regex]::Escape('$_[0]+''\''+$_[2]')
+    Assert-True ($code -match $sigExpr) 'The fingerprint no longer covers both the source and the entry name, so an entry renamed between two sources would slip through (regression of F-K1).'
+
+    # caller side: capture the fingerprint, hand it back, and clear the handoff vars
+    $mgr = ((Get-RoutineBody -Lines $cmd -Label 'StartupMgr') -join "`n")
+    Assert-True ($mgr -match '(?i)for /f "usebackq delims=" %%S in \("%_susig%"\) do set "_SUSIG=%%S"') ':StartupMgr no longer reads the fingerprint the list pass produced (regression of F-K1).'
+    $all = $cmd -join "`n"
+    Assert-True ($all -match '(?i)set "PT_SU_SIGIN=%_SUSIG%"') 'The fingerprint is never handed back to the toggle pass, so the check can never fire (regression of F-K1).'
+    Assert-True ($all -match '(?i)set "PT_SU_SIG=" & set "PT_SU_SIGIN="') 'The startup fingerprint handoff variables are no longer cleared (regression of F-D3).'
 }
 
 # ---- summary ------------------------------------------------------------------
