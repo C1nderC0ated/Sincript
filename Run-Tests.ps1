@@ -34,6 +34,7 @@ $ScriptRoot = Split-Path -Parent $TestsDir
 $CmdPath    = Join-Path $ScriptRoot 'PerfTweaks.cmd'
 $BootPath   = Join-Path $ScriptRoot 'boot.config'
 $PresetPath = Join-Path $ScriptRoot 'sincript_presets\example.preset'
+$SelfPath   = $MyInvocation.MyCommand.Path
 
 # ---- tiny assertion framework -------------------------------------------------
 $script:Failures = New-Object System.Collections.Generic.List[string]
@@ -89,6 +90,44 @@ function Get-RoutineBody {
         $body.Add($Lines[$j])
     }
     return ,$body.ToArray()
+}
+
+function Get-BodyLines {
+    <#
+      Preferred way to slice a routine. Use this, not Get-RoutineBody, in new tests.
+
+      Get-RoutineBody returns `,$array` so a pipeline cannot unroll it, which makes
+      `$b = Get-RoutineBody ...` correct but `$b = @(Get-RoutineBody ...)` WRONG - the @()
+      wraps the array in a second array, the whole routine becomes one element, and every
+      per-line assertion built on it silently does nothing. That mistake has been made five
+      times, including on a test written to catch it, and it is invisible on good code:
+      the body reads as empty, an early `continue`/`if` guard skips, and the test reports
+      [PASS] having asserted nothing.
+
+      This wrapper emits the lines as INDIVIDUAL pipeline objects, so every shape works and
+      there is nothing to get wrong:
+
+          $b = Get-BodyLines -Lines $cmd -Label 'X'
+          $b = @(Get-BodyLines -Lines $cmd -Label 'X')
+          (Get-BodyLines -Lines $cmd -Label 'X') -join "`n"
+
+      -CodeOnly strips `rem` lines, -NoEcho also strips `echo`. Use -CodeOnly for any
+      NEGATIVE assertion or IndexOf ordering check: this codebase comments heavily and its
+      comments routinely quote the very construct being banned, so a raw -notmatch trips on
+      prose (trap 3b). Test 121 fails the harness if the misuse-prone form reappears.
+    #>
+    param(
+        [string[]]$Lines,
+        [string]$Label,
+        [switch]$CodeOnly,
+        [switch]$NoEcho
+    )
+    $body = Get-RoutineBody -Lines $Lines -Label $Label
+    foreach ($l in $body) {
+        if ($CodeOnly -or $NoEcho) { if ($l.Trim() -match '^(?i)rem\b') { continue } }
+        if ($NoEcho)               { if ($l.Trim() -match '^(?i)echo\b') { continue } }
+        $l
+    }
 }
 
 Write-Host ""
@@ -361,8 +400,7 @@ Invoke-Test 'OpenAsar download failure is detected and the partial file removed'
     foreach ($r in 'OpenAsar', 'DoOpenAsarSilent') {
         # rem-stripped: the routines carry a comment QUOTING the old broken shape to explain
         # why it was wrong, and the negative assertion below would match that comment.
-        $tAll = Get-RoutineBody -Lines $cmd -Label $r
-        $tAll = @($tAll)
+        $tAll = @(Get-BodyLines -Lines $cmd -Label $r)
         Assert-True ($tAll.Count -gt 5) ":$r body did not unroll - two-step Get-RoutineBody, or every assertion below is skipped."
         $t = @($tAll | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
         # Both routines download, so neither may take the skip path - without this the whole
@@ -1909,7 +1947,9 @@ Invoke-Test ':InstallAsarInto backups are write-once and gate the install' {
     Assert-True ($code -match '(?i)if not exist "!_localbak!" copy /y') ':InstallAsarInto overwrites the local .bak again - a re-run backs up OpenAsar over the stock asar (regression of F1).'
     Assert-True ($code -match '(?i)if not exist "!_docbak!"\s+copy /y')  ':InstallAsarInto overwrites the Documents .bak again - the asar has no randomized fallback, so both copies die (regression of F1).'
     $gate = $code.IndexOf('if "!_hadorig!"=="1" if not defined _bakloc')
-    $write = $code.IndexOf('copy /y "%_src%"')
+    # _asrc, not _src: the callers hold the same path in _SRC and cmd names are
+    # case-insensitive, so the old name was literally the same variable (test 118)
+    $write = $code.IndexOf('copy /y "%_asrc%"')
     Assert-True ($gate -ge 0)             ':InstallAsarInto lost the "no backup landed -> refuse" gate (regression of F4).'
     Assert-True ($write -ge 0)            ':InstallAsarInto install copy not found - routine changed shape?'
     Assert-True ($gate -lt $write)        ':InstallAsarInto gate no longer precedes the install copy - it overwrites first (regression of F4).'
@@ -2003,8 +2043,7 @@ Invoke-Test 'Privacy screen discloses Widgets / app-launch tracking / dmwappushs
 Invoke-Test 'Core actions set _RUNTRACK alongside _FAILS (service failures counted)' {
     $cmd = Read-Lines $CmdPath
     foreach ($r in 'Privacy','Power','Performance','ApplyRecommended') {
-        $b = Get-RoutineBody -Lines $cmd -Label $r
-        $b = @($b)
+        $b = @(Get-BodyLines -Lines $cmd -Label $r)
         Assert-True ($b.Count -gt 0) (":$r body empty.")
         $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
         Assert-True ($code -match '(?i)set "_RUNTRACK=1"') ":$r no longer sets _RUNTRACK - a failed sc/schtasks/powercfg on a non-elevated run goes uncounted and the action can still print [OK] (regression of F5)."
@@ -2257,8 +2296,7 @@ Invoke-Test 'Power undo file is captured once per action' {
     $pb = ((Get-RoutineBody -Lines $cmd -Label 'PowerBackup') -join "`n")
     Assert-True ($pb -match '(?i)if defined _PWBAK_FILE goto :eof') ':PowerBackup lost its once-per-pass guard - :DoPowerCore would write two undo files for one action (regression).'
     foreach ($r in 'Power','ApplyRecommended','PresetBegin') {
-        $b = Get-RoutineBody -Lines $cmd -Label $r
-        $b = @($b)
+        $b = @(Get-BodyLines -Lines $cmd -Label $r)
         Assert-True ($b.Count -gt 0) (":$r body empty.")
         $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
         Assert-True ($code -match '(?i)set "_PWBAK_FILE="') ":$r does not clear _PWBAK_FILE, so a later power change in the same session would reuse a stale undo file and capture nothing (regression)."
@@ -2665,8 +2703,7 @@ Invoke-Test 'Tracking is turned off again: every _RUNTRACK=1 action reports via 
 
     # the action this was found in: it calls the undo .bat directly, never through :Run,
     # so tracking bought nothing there and only ever leaked
-    $rp = Get-RoutineBody -Lines $cmd -Label 'RestorePowerBackup'
-    $rp = @($rp)
+    $rp = @(Get-BodyLines -Lines $cmd -Label 'RestorePowerBackup')
     Assert-True ($rp.Count -gt 1) ':RestorePowerBackup is missing (or the body did not unroll).'
     $rpc = @($rp | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
     Assert-True ($rpc -notmatch '(?i)set "_RUNTRACK=1"') ':RestorePowerBackup turns tracking on again but never calls :Summary, so nothing turns it off (regression of F-A3).'
@@ -2924,8 +2961,7 @@ Invoke-Test 'GPU detection tracks both vendors independently, so a hybrid machin
 
     # both the menu and the preset path must branch on the flags, not the single word
     foreach ($r in 'GpuTelemetry','DoGpuTelemetryOff') {
-        $b = Get-RoutineBody -Lines $cmd -Label $r
-        $b = @($b)
+        $b = @(Get-BodyLines -Lines $cmd -Label $r)
         $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
         Assert-True ($code -match '(?i)defined GPU_(NV|AMD)') ":$r still branches on %GPU% alone, so a machine with both vendors only gets whichever probe wrote it last (regression of F-E1)."
         Assert-True ($code -notmatch '(?i)"%GPU%"=="nvidia"') ":$r still compares %GPU% to a single vendor - that is the test that fails on a hybrid machine (regression of F-E1)."
@@ -2951,8 +2987,7 @@ Invoke-Test 'GPU detection tracks both vendors independently, so a hybrid machin
 Invoke-Test 'Untrusted preset text and large DWORDs never reach parse-time expansion' {
     $cmd = Read-Lines $CmdPath
 
-    $b = Get-RoutineBody -Lines $cmd -Label 'PresetCheckLine'
-    $b = @($b)
+    $b = @(Get-BodyLines -Lines $cmd -Label 'PresetCheckLine')
     $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
     Assert-True ($b.Count -gt 5) ':PresetCheckLine body did not unroll - use the two-step Get-RoutineBody idiom.'
     Assert-True ($code.Length -gt 0) ':PresetCheckLine body empty.'
@@ -2968,10 +3003,11 @@ Invoke-Test 'Untrusted preset text and large DWORDs never reach parse-time expan
         Assert-True ($c.Line -notmatch '(?i)call :PresetCheckLine\s+\S') ':PresetCheckLine is called with arguments again - the key/value must be assigned from the for-variables, which are substituted after parsing (regression of F-E2).'
     }
     foreach ($h in 'PVok','PChkWin32','PChkPlan','PChkDns') {
-        $hb = Get-RoutineBody -Lines $cmd -Label $h
-        $hb = @($hb)
-        $hc = @($hb | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+        $hc = (Get-BodyLines -Lines $cmd -Label $h -CodeOnly) -join "`n"
         Assert-True ($hc -match '!_v!') ":$h no longer reads the value with delayed expansion from the caller's scope (regression of F-E2)."
+        # and the percent form must be GONE - asserting only that !_v! appears somewhere is
+        # satisfied by the error-message line while the comparison silently reverts
+        Assert-True ($hc -notmatch '%_v%') ":$h percent-expands the preset value again; cmd resolves that at parse time, before it knows where a ( ) block ends (regression of F-E2)."
     }
 
     # set /a is 32-bit signed and SATURATES when it dereferences an out-of-range variable,
@@ -2995,8 +3031,7 @@ Invoke-Test 'Untrusted preset text and large DWORDs never reach parse-time expan
 Invoke-Test 'Every self-repeating prompt can give up when stdin is exhausted' {
     $cmd = Read-Lines $CmdPath
 
-    $niAll = Get-RoutineBody -Lines $cmd -Label 'NoInput'
-    $niAll = @($niAll)
+    $niAll = @(Get-BodyLines -Lines $cmd -Label 'NoInput')
     Assert-True ($niAll.Count -gt 5) ':NoInput body did not unroll - two-step Get-RoutineBody.'
     # rem-stripped: the routine's comment QUOTES the broken loop shape it exists to fix, and
     # the negative assertion below would match that prose rather than any real code.
@@ -3134,8 +3169,7 @@ Invoke-Test 'Backup size total sums kilobytes, so sub-megabyte exports are not l
 
     # no @() on the first line - Get-RoutineBody returns `,$array` and wrapping it there
     # keeps the whole body as ONE element, which makes every assertion below vacuous
-    $add = Get-RoutineBody -Lines $cmd -Label '_mbAddFull'
-    $add = @($add)
+    $add = @(Get-BodyLines -Lines $cmd -Label '_mbAddFull')
     Assert-True ($add.Count -gt 3) ':_mbAddFull body did not unroll.'
     $code = @($add | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
 
@@ -3197,8 +3231,7 @@ Invoke-Test 'No validator pipes a variable into findstr - the piped child re-par
 Invoke-Test 'Flipping a startup entry refuses if the list changed since it was shown' {
     $cmd = Read-Lines $CmdPath
 
-    $w = Get-RoutineBody -Lines $cmd -Label 'StartupWorker'
-    $w = @($w)
+    $w = @(Get-BodyLines -Lines $cmd -Label 'StartupWorker')
     Assert-True ($w.Count -gt 3) ':StartupWorker body did not unroll.'
     $code = @($w | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
 
@@ -3218,10 +3251,150 @@ Invoke-Test 'Flipping a startup entry refuses if the list changed since it was s
 
     # caller side: capture the fingerprint, hand it back, and clear the handoff vars
     $mgr = ((Get-RoutineBody -Lines $cmd -Label 'StartupMgr') -join "`n")
-    Assert-True ($mgr -match '(?i)for /f "usebackq delims=" %%S in \("%_susig%"\) do set "_SUSIG=%%S"') ':StartupMgr no longer reads the fingerprint the list pass produced (regression of F-K1).'
+    Assert-True ($mgr -match '(?i)for /f "usebackq delims=" %%S in \("%_susigf%"\) do set "_susigv=%%S"') ':StartupMgr no longer reads the fingerprint the list pass produced (regression of F-K1).'
     $all = $cmd -join "`n"
-    Assert-True ($all -match '(?i)set "PT_SU_SIGIN=%_SUSIG%"') 'The fingerprint is never handed back to the toggle pass, so the check can never fire (regression of F-K1).'
+    Assert-True ($all -match '(?i)set "PT_SU_SIGIN=%_susigv%"') 'The fingerprint is never handed back to the toggle pass, so the check can never fire (regression of F-K1).'
+    # a null -FilePath makes Out-File PROMPT for it, in a minimized window nobody can answer
+    $wCode = ((Get-RoutineBody -Lines $cmd -Label 'StartupWorker') -join "`n")
+    Assert-True ($wCode -match '(?i)if\(\$env:PT_SU_SIG\)\{ \$sg \| Out-File') 'The fingerprint write is no longer guarded on the path being set - Out-File prompts for a null -FilePath, and the whole screen then waits for input that cannot arrive (regression of F-K2).'
     Assert-True ($all -match '(?i)set "PT_SU_SIG=" & set "PT_SU_SIGIN="') 'The startup fingerprint handoff variables are no longer cleared (regression of F-D3).'
+}
+
+# ===============================================================================
+# 118. No two batch variables may differ only by CASE. cmd variable names are
+#      case-insensitive, so `_susigf` and `_SUSIGF` are one variable - a pair that
+#      reads like "the path" and "the value" is actually one slot, and setting
+#      either clears the other. It cost a screen that rendered nothing until a key
+#      was pressed: the blanked path reached PowerShell as a null -FilePath, which
+#      makes Out-File PROMPT for it, in a minimized window nobody can answer.
+# ===============================================================================
+Invoke-Test 'No two batch variables differ only by case (cmd names are case-insensitive)' {
+    $cmd = Read-Lines $CmdPath
+    $names = @{}
+    foreach ($ln in $cmd) {
+        if ($ln.Trim() -match '^(?i)rem\b') { continue }
+        foreach ($m in [regex]::Matches($ln, '(?i)\bset\s+"([A-Za-z_][A-Za-z0-9_]*)=')) {
+            $n = $m.Groups[1].Value
+            $k = $n.ToLowerInvariant()
+            if (-not $names.ContainsKey($k)) { $names[$k] = New-Object 'System.Collections.Generic.HashSet[string]' }
+            [void]$names[$k].Add($n)
+        }
+    }
+    Assert-True ($names.Count -gt 50) "Found only $($names.Count) assigned variables - the scan is not matching."
+    $clash = @($names.GetEnumerator() | Where-Object { $_.Value.Count -gt 1 } |
+                ForEach-Object { "{0} ({1})" -f $_.Key, (($_.Value | Sort-Object) -join ' / ') })
+    Assert-True ($clash.Count -eq 0) ("Variable name(s) that differ only by case, and are therefore THE SAME variable: {0}. Assigning one silently clears the other (regression of F-K2)." -f ($clash -join '; '))
+}
+
+# ===============================================================================
+# 119. Two screens that were asking the user to choose blind: the HAGS toggle
+#      offered on/off without saying which it already was, and Status carried a
+#      shorter machine header than the main menu, so the two disagreed about what
+#      had been probed.
+# ===============================================================================
+Invoke-Test 'The HAGS screen states the stored value, and Status carries the main-menu header' {
+    $cmd = Read-Lines $CmdPath
+    $all = $cmd -join "`n"
+
+    $h = @(Get-BodyLines -Lines $cmd -Label 'HagsToggle')
+    Assert-True ($h.Count -gt 5) ':HagsToggle body did not unroll.'
+    $hj = $h -join "`n"
+    Assert-True ($hj -match '(?i)reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers" /v HwSchMode') ':HagsToggle no longer reads the current HwSchMode, so the screen asks the user to choose blind (regression of F-L1).'
+    foreach ($v in '0x1','0x2') {
+        Assert-True ($hj -match ('(?i)"!_hags!"=="' + $v + '"')) ":HagsToggle lost the $v branch of its current-state line (regression of F-L1)."
+    }
+    Assert-True ($hj -match '(?i)if not defined _hags') ':HagsToggle does not handle an absent HwSchMode, which is the Windows default rather than an error (regression of F-L1).'
+    # no PowerShell here - this screen should draw instantly. Comment-stripped, because the
+    # routine's own comment says "no PowerShell" and would satisfy a raw -notmatch (trap 3b).
+    $hCode = @($h | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    Assert-True ($hCode -notmatch '(?i)powershell') ':HagsToggle spawns PowerShell to read one DWORD (regression of F-L1).'
+
+    # the two headers must agree; both are built from the same probes
+    $hdr = '(?i)echo   Build %WIN_BUILD%   Win11=%IS_WIN11%   GPU=%GPU%   Machine=%MACHINE%   Disk=%SYSDISK%'
+    Assert-True (([regex]::Matches($all, $hdr)).Count -ge 2) 'The Status screen no longer carries the same machine header as the main menu, so the two can disagree about what was probed (regression of F-L2).'
+    $st = ((Get-RoutineBody -Lines $cmd -Label 'Status') -join "`n")
+    Assert-True ($st -match '(?i)call :DetectSysDisk') ':Status no longer resolves the disk type before printing it (regression of F-L2).'
+    Assert-True ($st -match '(?i)call :DetectUndervolt') ':Status no longer resolves the undervolt probe before printing it (regression of F-L2).'
+}
+
+# ===============================================================================
+# 120. The undervolt probe reports a TOOL, never a voltage - nothing here can read
+#      an actual offset. So "none found" must never be presented as "not
+#      undervolted": a BIOS/EFI offset leaves no signature, and a false negative is
+#      exactly how someone gets talked into Ultimate Performance on the machine
+#      where that produced a WHEA 0x124.
+# ===============================================================================
+Invoke-Test 'The undervolt probe can only strengthen the warning, never soften it' {
+    $cmd = Read-Lines $CmdPath
+    $all = $cmd -join "`n"
+
+    $d = @(Get-BodyLines -Lines $cmd -Label 'DetectUndervolt')
+    Assert-True ($d.Count -gt 5) ':DetectUndervolt body did not unroll.'
+    $code = @($d | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+
+    Assert-True ($code -match '(?i)if defined UVPROBED goto :eof') ':DetectUndervolt no longer caches, so every caller re-probes (regression of F-L3).'
+    Assert-True ($code -notmatch '(?i)powershell') ':DetectUndervolt spawns PowerShell - it runs at startup and must stay cheap (regression of F-L3).'
+    foreach ($t in 'XTU3SERVICE','AMDRyzenMasterDriver') {
+        Assert-True ($code -match ('(?i)' + [regex]::Escape($t))) ":DetectUndervolt no longer looks for $t (regression of F-L3)."
+    }
+    # ThrottleStop is portable, so BOTH of its autostart routes must be probed - asserting
+    # the name appears somewhere is not enough, the Startup-folder .lnk check alone satisfies it
+    Assert-True ($code -match '(?i)findstr /I "ThrottleStop"') ':DetectUndervolt no longer scans the Run keys for ThrottleStop - the Startup-folder check alone misses the Run-entry autostart (regression of F-L3).'
+    Assert-True ($code -match '(?i)Startup\\ThrottleStop\.lnk') ':DetectUndervolt no longer checks the Startup folder for ThrottleStop (regression of F-L3).'
+    # every hit is recorded, not just the first - two tools on one machine is normal
+    Assert-True ($code -match '(?i)call :_uvAdd') ':DetectUndervolt no longer accumulates its hits, so a machine with two tools reports only one (regression of F-L3).'
+    $add = ((Get-RoutineBody -Lines $cmd -Label '_uvAdd') -join "`n")
+    Assert-True ($add -match '(?i)set "UVTOOL=!UVTOOL! \+ %~1"') ':_uvAdd no longer appends, so later tools overwrite earlier ones (regression of F-L3).'
+
+    # the advisory fires only on a POSITIVE find, and Status refuses to call a miss a "no"
+    $lap = ((Get-RoutineBody -Lines $cmd -Label 'LaptopAdvisory') -join "`n")
+    Assert-True ($lap -match '(?i)call :DetectUndervolt') ':LaptopAdvisory no longer consults the undervolt probe (regression of F-L3).'
+    Assert-True ($lap -match '(?i)if not defined UVTOOL goto :eof') ':LaptopAdvisory says something when NO tool was found - a missing tool is not evidence of a missing undervolt, so silence is the only honest option there (regression of F-L3).'
+    Assert-True ($lap -match '(?i)0x124') ':LaptopAdvisory lost the machine-check consequence, which is the whole reason this probe exists (regression of F-L3).'
+    Assert-True ($all -match '(?i)Treat it as "unknown", not "no"') 'Status no longer warns that a negative probe is not proof - without that line "no known tool found" reads as "not undervolted" (regression of F-L3).'
+}
+
+# ===============================================================================
+# 121. The harness checks ITSELF. `@(Get-RoutineBody ...)` in one step wraps the
+#      returned array instead of unrolling it, so the whole routine arrives as a
+#      single element and every per-line assertion built on it silently passes.
+#      It has been written five times, once on a test whose job was catching that
+#      class. Reading cannot find it and mutation-testing only finds it if you
+#      happen to mutate that routine, so the harness greps its own source.
+# ===============================================================================
+Invoke-Test 'The harness itself never uses the misuse-prone body slicer' {
+    Assert-True (Test-Path -LiteralPath $SelfPath) 'Could not locate the harness source to self-check.'
+    $self = [System.IO.File]::ReadAllLines($SelfPath)
+
+    # Skip comments - both `#` lines and `<# #>` blocks. Get-BodyLines' own doc comment
+    # spells the banned form out on purpose, and a scan that cannot tell code from prose
+    # would flag the explanation instead of a defect. This is trap 3b applied to the
+    # harness's own source, which is a fair test of whether the rule was understood.
+    $bad = @(); $inBlock = $false
+    for ($i = 0; $i -lt $self.Count; $i++) {
+        $ln = $self[$i]
+        if ($inBlock) { if ($ln -match '#>') { $inBlock = $false }; continue }
+        if ($ln -match '<#') { if ($ln -notmatch '#>') { $inBlock = $true }; continue }
+        if ($ln -match '^\s*#') { continue }
+        if ($ln -match '@\(Get-RoutineBody') { $bad += ("line {0}: {1}" -f ($i + 1), $ln.Trim()) }
+    }
+    Assert-True ($bad.Count -eq 0) ("Misuse-prone one-step slice(s) - @() wraps the returned array instead of unrolling it, so the routine becomes ONE element and every assertion on it passes vacuously. Use Get-BodyLines: {0}" -f ($bad -join '; '))
+
+    # and the safe wrapper must actually behave, or switching to it buys nothing
+    $cmd = Read-Lines $CmdPath
+    $direct = @(Get-BodyLines -Lines $cmd -Label 'Summary')
+    $viaVar = Get-BodyLines -Lines $cmd -Label 'Summary'
+    Assert-True ($direct.Count -gt 3) "Get-BodyLines under @() yielded $($direct.Count) element(s) - it is not unrolling."
+    Assert-True (@($viaVar).Count -eq $direct.Count) 'Get-BodyLines disagrees with itself between assignment and @() - the whole point is that both work.'
+    $joined = (Get-BodyLines -Lines $cmd -Label 'Summary') -join "`n"
+    Assert-True ($joined -match '(?i)_FAILS') 'Get-BodyLines output does not join into readable text.'
+    # -CodeOnly must drop rem lines and keep code
+    $all  = @(Get-BodyLines -Lines $cmd -Label 'Summary')
+    $code = @(Get-BodyLines -Lines $cmd -Label 'Summary' -CodeOnly)
+    Assert-True ($code.Count -lt $all.Count) '-CodeOnly did not strip anything from a routine that has comments.'
+    Assert-True ((@($code) -join "`n") -notmatch '(?im)^\s*rem\b') '-CodeOnly left rem lines in.'
+    $noEcho = @(Get-BodyLines -Lines $cmd -Label 'Summary' -NoEcho)
+    Assert-True ((@($noEcho) -join "`n") -notmatch '(?im)^\s*echo\b') '-NoEcho left echo lines in.'
 }
 
 # ---- summary ------------------------------------------------------------------
