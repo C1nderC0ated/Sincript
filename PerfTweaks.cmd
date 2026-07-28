@@ -2,6 +2,12 @@
 echo off
 setlocal EnableDelayedExpansion
 cd /d "%~dp0" 2>nul
+rem  Capture the script's own location HERE, before anything parses the command line:
+rem  "shift" renumbers %0 too, so after one shift %~dp0 names an argument, not this file.
+rem  SCRIPT_DIR finds the bundled hosts / boot.config / SetTimerResolution.exe / app.asar
+rem  and the sincript_presets folder - getting it wrong sends all of them to C:\.
+set "SCRIPT_DIR=%~dp0"
+set "_SELFPATH=%~f0"
 mode con: cols=100 lines=36 >nul 2>&1
 color 0D
 title Sincript - Windows 10/11 Optimizer
@@ -11,6 +17,55 @@ rem  Every registry change is backed up first (.reg in %BACKUP_DIR%). "Backups &
 rem  makes a System Restore Point and a full registry export - do that first.
 rem  Read "What was excluded" in the main menu for the safety rationale.
 rem =====================================================================================
+rem ---------- Command line ----------
+rem  Parsed BEFORE the elevation probe, because /preset: changes what elevation should do:
+rem  the menu relaunches itself elevated and exits at once, which would hand automation an
+rem  exit code for the RELAUNCH rather than the work. So a /preset: run never self-elevates.
+rem  Nothing here touches the system. Every value is read with delayed expansion after the
+rem  shift, so an argument containing ) & | " stays data instead of being re-parsed.
+set "_CLIPRESET=" & set "_CLIDNS=" & set "_CLINORP=" & set "_CLIHELP=" & set "_CLIBAD=" & set "_CLIPLAN="
+set "_RELAUNCHED=" & set "_CLIANY="
+
+:_argLoop
+if "%~1"=="" goto _argDone
+set "_a=%~1"
+shift
+rem  /elevated is the interactive relaunch marker, NOT a command-line request, so it is the
+rem  one argument that does not put the script into command-line mode.
+if /i "!_a!"=="/elevated"   set "_RELAUNCHED=1" & goto _argLoop
+rem  ANY other argument means the caller wanted the command line. Without this, an option
+rem  that parsed to nothing - "/preset:" with no name, or a typo - left every _CLI* variable
+rem  empty and the script quietly opened the menu: for an unattended caller the worst
+rem  outcome, since it neither works nor reports. :CliRun decides, and can exit 2.
+set "_CLIANY=1"
+if /i "!_a!"=="/?"          set "_CLIHELP=1" & goto _argLoop
+if /i "!_a!"=="/help"       set "_CLIHELP=1" & goto _argLoop
+if /i "!_a!"=="/norestore"  set "_CLINORP=1" & goto _argLoop
+if /i "!_a:~0,8!"=="/preset:" goto _argPreset
+if /i "!_a:~0,5!"=="/dns:"    goto _argDns
+if /i "!_a:~0,6!"=="/plan:"   goto _argPlan
+set "_CLIBAD=!_a!"
+goto _argLoop
+
+rem  Each value gets its own label rather than a one-liner: the "did it parse to nothing"
+rem  test needs a second statement, and chaining "& if ... & goto" would make the goto
+rem  conditional on that if, silently dropping the rest of the command line.
+:_argPreset
+set "_CLIPRESET=!_a:~8!"
+if not defined _CLIPRESET set "_CLIBAD=!_a!"
+goto _argLoop
+
+:_argDns
+set "_CLIDNS=!_a:~5!"
+if not defined _CLIDNS set "_CLIBAD=!_a!"
+goto _argLoop
+
+:_argPlan
+set "_CLIPLAN=!_a:~6!"
+if not defined _CLIPLAN set "_CLIBAD=!_a!"
+goto _argLoop
+
+:_argDone
 rem ---------- Self-elevate to Administrator (robust, cannot loop) ----------
 rem  net session needs the 'Server' service (often disabled by debloat scripts), so fall
 rem  back to fltmc, then to reg-querying the LocalService hive (needs no service at all).
@@ -18,17 +73,35 @@ rem  The one-shot /elevated marker guarantees we relaunch at most once - no infi
 set "_ELEV="
 net session >nul 2>&1 || fltmc >nul 2>&1 || reg query "HKU\S-1-5-19" >nul 2>&1
 if not errorlevel 1 ( set "_ELEV=1" & goto AdminOK )
-if /i "%~1"=="/elevated" goto AdminWarn
+rem  A /preset: or /? run must never relaunch: see the note at the top. It carries on
+rem  unelevated so :CliRun can print exactly why and return a usable exit code.
+if defined _CLIPRESET ( set "_ELEV=0" & goto AdminOK )
+if defined _CLIHELP ( set "_ELEV=0" & goto AdminOK )
+if defined _RELAUNCHED goto AdminWarn
 echo Requesting Administrator privileges...
-set "PT_SELF=%~f0"
-powershell -NoProfile -Command "Start-Process -FilePath $env:PT_SELF -ArgumentList '/elevated' -Verb RunAs -WorkingDirectory (Split-Path -Parent $env:PT_SELF)" >nul 2>&1
-exit /b
+rem  _SELFPATH, not %~f0: the argument loop above has already shifted, so %0 no longer
+rem  names this script and the relaunch would try to start whatever took its place.
+set "PT_SELF=%_SELFPATH%"
+rem  -ErrorAction Stop + try/catch so a DECLINED UAC prompt (Start-Process throws) or a
+rem  blocked/absent PowerShell comes back as a nonzero exit code instead of nothing. This
+rem  used to be a bare call with its output thrown away followed by an unconditional
+rem  "exit /b": the window printed "Requesting Administrator privileges..." and then simply
+rem  vanished, which looks identical to the script crashing. Silence is the one thing an
+rem  elevation failure must not be - the user cannot fix what they were never told about.
+powershell -NoProfile -Command "try{ Start-Process -FilePath $env:PT_SELF -ArgumentList '/elevated' -Verb RunAs -WorkingDirectory (Split-Path -Parent $env:PT_SELF) -ErrorAction Stop }catch{ exit 1 }" >nul 2>&1
+if not errorlevel 1 exit /b
+set "PT_SELF="
+echo.
+echo [WARN] The elevation prompt did not go through - either it was declined, or PowerShell
+echo        is blocked / unavailable on this machine.
+goto AdminWarn
 
 :AdminWarn
-rem  Reached only when a relaunch already happened but we are STILL not elevated (UAC declined,
-rem  or all three admin probes are unavailable). Don't pretend HKLM writes will work: make the
-rem  limited state explicit, set _ELEV=0 so :Summary / actions report honestly, and let the user
-rem  opt in instead of silently continuing.
+rem  Reached two ways: a relaunch already happened but we are STILL not elevated, or the
+rem  relaunch itself could not be started (declined UAC / no PowerShell) - the branch just
+rem  above. Either way, don't pretend HKLM writes will work: make the limited state explicit,
+rem  set _ELEV=0 so :Summary / actions report honestly, and let the user opt in instead of
+rem  silently continuing.
 set "_ELEV=0"
 echo.
 echo [WARN] Not running as Administrator. HKLM / service / boot / hosts changes WILL fail;
@@ -41,9 +114,10 @@ if /i not "%_lc%"=="Y" exit /b
 
 :AdminOK
 if not defined _ELEV set "_ELEV=1"
-cd /d "%~dp0" 2>nul
+rem  Both of these use SCRIPT_DIR rather than %~dp0: the argument loop has shifted by now, so
+rem  %0 is no longer this script. SCRIPT_DIR was captured at the top, before any shift.
+cd /d "%SCRIPT_DIR%" 2>nul
 rem ---------- Globals ----------
-set "SCRIPT_DIR=%~dp0"
 rem  Running tally of registry writes that FAILED since the last reset. :SafeRegAdd /
 rem  :SafeRegDelete bump it across their endlocal; :Summary reads it so an action's final
 rem  line reports the REAL outcome instead of an unconditional [OK].
@@ -57,14 +131,48 @@ if "!DOCS:~-1!"==" " set "DOCS=!DOCS:~0,-1!"
 set "BACKUP_DIR=%DOCS%\PerfTweaks_Backups"
 set "LOGFILE=%BACKUP_DIR%\PerfTweaks_%RANDOM%.log"
 if not exist "%BACKUP_DIR%" md "%BACKUP_DIR%" >nul 2>&1
+rem  Verify it worked. :SafeRegAdd refuses any tweak whose per-value .reg did not land, so
+rem  without this folder nearly every action reports [FAIL] with no stated reason. Delayed
+rem  expansion throughout the block: a Documents path can contain ")" (C:\Users\Bo (Work)\..)
+rem  and %BACKUP_DIR% would close the if-block early at parse time.
+set "_BAKOK=1"
+if not exist "%BACKUP_DIR%\" set "_BAKOK=0"
+if "%_BAKOK%"=="0" (
+    echo.
+    echo [WARN] The backup folder could not be created:
+    echo          !BACKUP_DIR!
+    echo        Every registry tweak refuses to run without a per-value undo file, so nearly
+    echo        all actions will report [FAIL] until this is fixed, and no log can be written.
+    echo        Usual causes: Controlled Folder Access, a read-only or offline OneDrive
+    echo        Documents folder, or a full disk.
+    echo.
+    set "_lb="
+    rem  No ^ escaping here: the prompt is inside double quotes, which already protect the
+    rem  parens from the enclosing if-block, so a caret would just be printed literally.
+    set /p "_lb=Continue anyway (status screens and file cleanup still work)? (Y/N): "
+    if /i not "!_lb!"=="Y" exit /b
+)
 rem ---------- OS build / Win11 / GPU detection ----------
 set "WIN_BUILD="
 for /f "tokens=3" %%B in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentBuildNumber 2^>nul ^| findstr /I "CurrentBuildNumber"') do set "WIN_BUILD=%%B"
 set "IS_WIN11=0"
 if defined WIN_BUILD if !WIN_BUILD! GEQ 22000 set "IS_WIN11=1"
+rem  Both vendors tracked SEPARATELY: an AMD APU with an NVIDIA discrete card is an ordinary
+rem  gaming laptop, and two unconditional probes writing one variable meant the second won -
+rem  such a machine came out "amd" and the NVIDIA telemetry tasks were skipped entirely.
+rem  GPU stays a single word for the header and the log; actions branch on GPU_NV / GPU_AMD,
+rem  so "both" simply means both run. One recursive reg query, read twice - it is the
+rem  slowest probe at startup.
 set "GPU=unknown"
-reg query "HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}" /s /v DriverDesc 2>nul | findstr /I "nvidia" >nul && set "GPU=nvidia"
-reg query "HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}" /s /v DriverDesc 2>nul | findstr /I "radeon" >nul && set "GPU=amd"
+set "GPU_NV=" & set "GPU_AMD="
+set "_gpuf=%TEMP%\pt_gpu_%RANDOM%%RANDOM%.txt"
+reg query "HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}" /s /v DriverDesc >"%_gpuf%" 2>nul
+if exist "%_gpuf%" findstr /I "nvidia" "%_gpuf%" >nul && set "GPU_NV=1"
+if exist "%_gpuf%" findstr /I "radeon" "%_gpuf%" >nul && set "GPU_AMD=1"
+del "%_gpuf%" >nul 2>&1
+if defined GPU_NV set "GPU=nvidia"
+if defined GPU_AMD set "GPU=amd"
+if defined GPU_NV if defined GPU_AMD set "GPU=nvidia+amd"
 rem ---------- Machine class (laptop / desktop / unknown) ----------
 rem  CmBatt is the ACPI control-method battery driver: its Enum\Count is nonzero exactly
 rem  when an internal battery is present, separating laptops from desktops with one instant
@@ -79,6 +187,10 @@ if not defined _bat ( reg query "HKLM\SYSTEM\CurrentControlSet\Services\CmBatt" 
 if "%_bat%"=="0x0" set "MACHINE=desktop"
 if defined _bat if not "%_bat%"=="0x0" set "MACHINE=laptop"
 call :Log "PerfTweaks start - build %WIN_BUILD% win11=%IS_WIN11% gpu=%GPU% machine=%MACHINE%"
+rem  Command-line paths branch here - after the globals and hardware probes they depend on,
+rem  before the first menu is ever drawn. Both exit the script; neither returns to the menu.
+if defined _CLIHELP goto CliHelp
+if defined _CLIANY goto CliRun
 rem =====================================================================================
 rem  MAIN MENU
 rem =====================================================================================
@@ -109,6 +221,7 @@ echo ===========================================================================
 :MainMenu_ask
 set "sel="
 set /p "sel=Choose: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto MainMenu_ask
 if "%sel%"=="1" goto MenuCleanup
 if "%sel%"=="2" goto Performance
@@ -132,7 +245,12 @@ echo   Log saved to: %LOGFILE%
 echo   Backups in:   %BACKUP_DIR%
 echo.
 echo   Bye.
-timeout /t 2 >nul
+rem  2>&1 as well as >nul: timeout REFUSES to run when stdin is redirected and says so on
+rem  stderr ("Input redirection is not supported"), which >nul alone does not catch. That
+rem  turned an otherwise clean non-interactive exit into a spurious ERROR line as the last
+rem  thing on screen. The pause is a courtesy for a double-clicked window; skipping it when
+rem  there is no console to pause for is exactly right, it just should not announce itself.
+timeout /t 2 >nul 2>&1
 exit /b
 rem =====================================================================================
 rem  SUBMENU: Cleanup & repair
@@ -152,6 +270,7 @@ echo ===========================================================================
 :MenuCleanup_ask
 set "sel="
 set /p "sel=Choose: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto MenuCleanup_ask
 if "%sel%"=="1" goto Cleanup
 if "%sel%"=="2" goto SfcDism
@@ -177,6 +296,7 @@ echo ===========================================================================
 :MenuNetwork_ask
 set "sel="
 set /p "sel=Choose: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto MenuNetwork_ask
 if "%sel%"=="1" goto NetworkApply
 if "%sel%"=="2" goto MenuDns
@@ -202,6 +322,7 @@ echo ===========================================================================
 :MenuDns_ask
 set "sel="
 set /p "sel=Choose: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto MenuDns_ask
 if "%sel%"=="1" goto DnsCloudflare
 if "%sel%"=="2" goto DnsGoogle
@@ -232,6 +353,7 @@ echo ===========================================================================
 :MenuApps_ask
 set "sel="
 set /p "sel=Choose: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto MenuApps_ask
 if "%sel%"=="1" goto OpenAsar
 if "%sel%"=="2" goto UnityBoot
@@ -268,6 +390,7 @@ echo ===========================================================================
 :MenuAdvanced_ask
 set "sel="
 set /p "sel=Choose: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto MenuAdvanced_ask
 if "%sel%"=="1" goto DisableMitigations
 if "%sel%"=="2" goto EnableMitigations
@@ -301,6 +424,7 @@ echo ===========================================================================
 :MenuBackups_ask
 set "sel="
 set /p "sel=Choose: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto MenuBackups_ask
 if "%sel%"=="1" goto DoRestorePoint
 if "%sel%"=="2" goto DoRegBackup
@@ -457,17 +581,75 @@ call :Logo
 echo =======================  Reset Windows Update components  =========================
 echo  Stops update services, renames SoftwareDistribution and catroot2, restarts them.
 echo  Fixes most stuck-update problems. Safe.
+echo  The renamed folders are kept as a rollback copy. They are NOT deleted automatically -
+echo  but sincript now offers to clear out the ones left by PREVIOUS resets first, because
+echo  SoftwareDistribution is routinely 1-5 GB and one copy accumulated per run.
 echo ===================================================================================
 set "_c="
 set /p "_c=Reset Windows Update now? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuCleanup
+call :WUPruneOld
 for %%S in (wuauserv bits cryptSvc msiserver appidsvc) do call :Run "net stop %%S"
 call :Run "ren ""%SystemRoot%\SoftwareDistribution"" SoftwareDistribution.bak_%RANDOM%"
 call :Run "ren ""%SystemRoot%\System32\catroot2"" catroot2.bak_%RANDOM%"
 for %%S in (wuauserv bits cryptSvc msiserver appidsvc) do call :Run "net start %%S"
 if "%_ELEV%"=="0" ( echo [WARN] Not elevated - Windows Update reset could not run. Re-run as Administrator. ) else ( echo [OK] Windows Update reset finished. See the output above and the log for any errors. )
+echo      The previous SoftwareDistribution / catroot2 were renamed beside the originals as
+echo      a rollback copy. Once Windows Update works again they are dead weight - re-run this
+echo      action, or delete them by hand from %%SystemRoot%%.
 pause
 goto MenuCleanup
+
+:WUPruneOld
+rem  Reports, and offers to delete, the SoftwareDistribution.bak_* / catroot2.bak_* folders
+rem  left by EARLIER runs - never the one this run is about to create. The rename is correct
+rem  (it is the rollback if the reset makes things worse); what was wrong is that nothing
+rem  removed or even mentioned them, and SoftwareDistribution is routinely 1-5 GB per run.
+rem  Deletion stays OPT-IN and only previous generations are offered, so the newest rollback
+rem  always survives - the same bargain :ManageBackups strikes with the full exports.
+set "_wpres=%TEMP%\pt_wuprune_%RANDOM%%RANDOM%.txt"
+set "PT_WP_RES=%_wpres%"
+set "PT_WP_MODE=count"
+call :WUPruneWorker
+set "_wpn=0" & set "_wpmb=0"
+if exist "%_wpres%" for /f "usebackq tokens=1,2" %%a in ("%_wpres%") do ( set "_wpn=%%a" & set "_wpmb=%%b" )
+del "%_wpres%" >nul 2>&1
+if "!_wpn!"=="0" goto :eof
+echo.
+echo   [i] !_wpn! folder^(s^) from previous Windows Update resets are still on disk,
+echo       using about !_wpmb! MB in %SystemRoot%. Deleting them is safe once Windows
+echo       Update is working; keeping them only helps if you need to roll a reset back.
+set "_wpc="
+set /p "_wpc=  Delete those older leftovers now? (Y/N): "
+if /i not "%_wpc%"=="Y" (
+    echo   [SKIP] Leftovers kept.
+    call :Log "WUReset: kept !_wpn! old leftover folder(s), ~!_wpmb! MB"
+    goto :eof
+)
+set "PT_WP_RES=%_wpres%"
+set "PT_WP_MODE=delete"
+call :WUPruneWorker
+set "_wpd=0" & set "_wpfree=0"
+if exist "%_wpres%" for /f "usebackq tokens=1,2" %%a in ("%_wpres%") do ( set "_wpd=%%a" & set "_wpfree=%%b" )
+del "%_wpres%" >nul 2>&1
+if "!_wpd!"=="0" (
+    echo         [FAIL] None could be removed - they may be in use, or this window is not elevated.
+    call :Log "FAIL: WUReset prune removed 0 of !_wpn!"
+    goto :eof
+)
+echo   [OK] Removed !_wpd! of !_wpn! old leftover folder^(s^), about !_wpfree! MB.
+call :Log "OK: WUReset prune removed !_wpd!/!_wpn! (~!_wpfree! MB)"
+goto :eof
+
+:WUPruneWorker
+rem  PT_WP_MODE = count | delete. Enumerates ONLY names this script itself creates
+rem  (SoftwareDistribution.bak_* under %SystemRoot%, catroot2.bak_* under System32) and,
+rem  in delete mode, removes them. Nothing is matched by a wildcard broader than that, and
+rem  the two parent folders are hardcoded - a prune that could walk anywhere else is not a
+rem  prune. Sizes are measured before removal so the freed figure is real, not estimated.
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $del=($env:PT_WP_MODE -eq 'delete'); $t=@(); $t+=@(Get-ChildItem -LiteralPath $env:SystemRoot -Directory -Filter 'SoftwareDistribution.bak_*' -ErrorAction SilentlyContinue); $t+=@(Get-ChildItem -LiteralPath (Join-Path $env:SystemRoot 'System32') -Directory -Filter 'catroot2.bak_*' -ErrorAction SilentlyContinue); $n=0; $mb=0; foreach($d in $t){ $sz=0; try{ $sz=[int64]((Get-ChildItem -LiteralPath $d.FullName -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum) }catch{}; if($del){ try{ Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction Stop; $n++; $mb+=[math]::Round($sz/1MB) }catch{} } else { $n++; $mb+=[math]::Round($sz/1MB) } }; (''+$n+' '+$mb) | Out-File -FilePath $env:PT_WP_RES -Encoding ASCII"
+set "PT_WP_RES=" & set "PT_WP_MODE="
+goto :eof
 rem =====================================================================================
 rem  ACTION: Re-register Store / apps
 rem =====================================================================================
@@ -548,7 +730,7 @@ echo Optional knobs (small / unproven gains, or plain preference - your call):
 set /p "_q1=  SystemResponsiveness=0 (reserve less for background)? (Y/N): "
 if /i "%_q1%"=="Y" call :SafeRegAdd "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" "SystemResponsiveness" REG_DWORD 0 "SystemResponsiveness 0"
 set /p "_q2=  Disable network throttling (may affect media playback)? (Y/N): "
-if /i "%_q2%"=="Y" call :SafeRegAdd "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" "NetworkThrottlingIndex" REG_DWORD 4294967295 "Network throttling off"
+if /i "%_q2%"=="Y" call :SafeRegAdd "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" "NetworkThrottlingIndex" REG_DWORD 0xffffffff "Network throttling off"
 rem  One mutually-exclusive choice (not two yes/no prompts): picking a value and then "reset"
 rem  in the same pass was a net no-op, and the reset's per-value .reg backup would snapshot 42
 rem  (the value just set) instead of the true prior default, breaking that single-value undo.
@@ -837,9 +1019,14 @@ rem  %_PWPLAN% = ultimate | high | balanced. UNSET means ultimate, because that 
 rem  preset "power=1" and "Apply recommended safe set" have always applied - those keep
 rem  their exact previous meaning. Only the interactive menu asks, and it now asks properly
 rem  instead of hiding a workstation plan behind a yes/no.
-if not defined _PWPLAN set "_PWPLAN=ultimate"
-if /i "%_PWPLAN%"=="balanced" goto _pwPlanBalanced
-if /i "%_PWPLAN%"=="high" goto _pwPlanHigh
+rem
+rem  Resolve into _pwsel and NEVER write back to _PWPLAN. Defaulting by assigning the global
+rem  made the fallback stick for the whole session, so the next caller inherited a plan
+rem  nobody chose on its screen. _PWPLAN is an INPUT; a mutated input is a side effect.
+set "_pwsel=%_PWPLAN%"
+if not defined _pwsel set "_pwsel=ultimate"
+if /i "%_pwsel%"=="balanced" goto _pwPlanBalanced
+if /i "%_pwsel%"=="high" goto _pwPlanHigh
 call :Log "Power plan -> Ultimate (fallback High)"
 rem  Duplicate Ultimate ONTO its canonical GUID. Without a destination GUID every run
 rem  created another randomly-numbered "Ultimate Performance" clone that /setactive (which
@@ -881,16 +1068,10 @@ goto :eof
 rem  Captures the CURRENT power scheme and its monitor / standby / disk idle timeouts into a
 rem  runnable undo .bat in the backup folder, before anything touches them.
 rem
-rem  This closes the last "changes state with no backup" gap in the script. Every registry
-rem  tweak writes a per-value .reg, hosts and app.asar keep write-once file copies - but the
-rem  power action switched your scheme and set six timeouts to never with nothing captured,
-rem  which is why :SetMinProcState's own prompt used to admit "no in-app undo".
-rem
-rem  Values are read from HKLM\...\Power\User\PowerSchemes (the same registry route :Status
-rem  already uses for the minimum processor state) rather than parsed out of "powercfg /query"
-rem  text. That output is LOCALIZED - "Current AC Power Setting Index" is translated - so text
-rem  parsing would silently capture nothing on a non-English Windows and hand back an undo file
-rem  that restores less than it claims. The registry names are the same in every language.
+rem  Values come from HKLM\...\Power\User\PowerSchemes, NOT from parsing "powercfg /query"
+rem  text: that output is localized, so a text parser silently captures nothing on a
+rem  non-English Windows and hands back an undo file that restores less than it claims.
+rem  The registry names are identical in every language.
 rem
 rem  A setting that was never explicitly set on the scheme has no registry value; it is written
 rem  into the .bat as a comment rather than guessed at, so the scheme default keeps applying -
@@ -1018,21 +1199,23 @@ goto :eof
 
 :_ip4_ok
 rem  Validates !_IPCHK! as a dotted-quad IPv4 address; errorlevel 1 if it is not one.
+rem  User-typed free text on its way to a command line, so it has to be airtight.
 rem
-rem  This is user-typed free text on its way into a command line, which is the shape that
-rem  bit the sibling project: a value expanded with %% before it was checked, so anything
-rem  containing ^& ^| ^< ^> was parsed as an operator instead of passed as data. Two defences,
-rem  both needed. The findstr pass allows nothing but digits and dots, so no metacharacter
-rem  can survive it; every use afterwards is delayed (!var!) so even that is literal.
-rem  The octet range check is the correctness half - 999.1.1.1 is not an injection risk but
-rem  it is not an address either, and failing here beats a confusing error from Windows.
-echo(!_IPCHK!| findstr /r /x /c:"[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*" >nul || exit /b 1
-for /f "tokens=1-4 delims=." %%a in ("!_IPCHK!") do (
-    if %%a GTR 255 exit /b 1
-    if %%b GTR 255 exit /b 1
-    if %%c GTR 255 exit /b 1
-    if %%d GTR 255 exit /b 1
-)
+rem  NEVER validate this by piping into findstr. cmd runs each side of a pipe in a child and
+rem  builds that child's command line from the already-expanded text, which is parsed again -
+rem  so "1.1.1.1&cmd" ran cmd and left findstr a clean "1.1.1.1" to approve. Pure batch only:
+rem    charset - "for /f delims=<allowed>" yields a token only for a character that is NOT a
+rem              delimiter. The value stays quoted in the ( ) set, so it is data throughout.
+rem    shape   - split on dots and rebuild; that matches only for exactly four non-empty
+rem              parts, rejecting 1.2.3 / 1.2.3.4.5 / 1..2.3 / .1.2.3 / 1.2.3. with no regex.
+set "_ipbad="
+for /f "delims=0123456789." %%X in ("!_IPCHK!") do set "_ipbad=1"
+if defined _ipbad exit /b 1
+set "_ipok="
+rem  "%%d is not empty" must come first: a missing token expands to EMPTY, so "1.2.3." would
+rem  rebuild to itself and pass. It also keeps the range tests from seeing an empty operand.
+for /f "tokens=1-4 delims=." %%a in ("!_IPCHK!") do if not "%%d"=="" if "%%a.%%b.%%c.%%d"=="!_IPCHK!" if %%a LEQ 255 if %%b LEQ 255 if %%c LEQ 255 if %%d LEQ 255 set "_ipok=1"
+if not defined _ipok exit /b 1
 exit /b 0
 
 :DnsCustom
@@ -1138,13 +1321,26 @@ set "_dl="
 set /p "_dl=Download the latest OpenAsar (nightly) from GitHub instead? (Y/N): "
 if /i not "%_dl%"=="Y" goto MenuApps
 echo Downloading OpenAsar nightly...
-start "" /min /wait powershell -NoProfile -Command "try{Invoke-WebRequest -Uri 'https://github.com/GooseMod/OpenAsar/releases/download/nightly/app.asar' -OutFile (Join-Path $env:TEMP 'openasar_nightly.asar') -UseBasicParsing}catch{exit 1}"
-rem  A failed download can leave a PARTIAL file behind; trust the child exit code first
-rem  and remove the leftover, so a broken .asar is never installed into Discord.
-if errorlevel 1 del "%TEMP%\openasar_nightly.asar" >nul 2>&1
-if errorlevel 1 goto OA_DlFail
-if not exist "%TEMP%\openasar_nightly.asar" goto OA_DlFail
-set "_SRC=%TEMP%\openasar_nightly.asar"
+rem  Per-run filename: the old fixed name meant two sincript windows downloading at once
+rem  shared one partially-written file, and whichever finished first installed it.
+set "_OADL=%TEMP%\openasar_nightly_%RANDOM%%RANDOM%.asar"
+set "PT_OADL=%_OADL%"
+start "" /min /wait powershell -NoProfile -Command "try{Invoke-WebRequest -Uri 'https://github.com/GooseMod/OpenAsar/releases/download/nightly/app.asar' -OutFile $env:PT_OADL -UseBasicParsing}catch{exit 1}"
+rem  CAPTURE the exit code before anything else runs. "del" always resets errorlevel to 0
+rem  (verified - it does so whether or not the file existed), so the old sequence
+rem      if errorlevel 1 del ...
+rem      if errorlevel 1 goto OA_DlFail
+rem  had a dead second line: the del between them had already cleared the very code it was
+rem  testing. The comment claimed the child's exit code was trusted "first"; it was not
+rem  trusted at all. Existence alone was doing the work, which is exactly the case that
+rem  fails when the download half-succeeds AND the del is blocked (antivirus scanning the
+rem  fresh file): a partial .asar would then be installed into Discord.
+set "_dlrc=%errorlevel%"
+set "PT_OADL="
+if not "%_dlrc%"=="0" del "%_OADL%" >nul 2>&1
+if not "%_dlrc%"=="0" goto OA_DlFail
+if not exist "%_OADL%" goto OA_DlFail
+set "_SRC=%_OADL%"
 
 :OA_HaveSrc
 set "_c="
@@ -1153,13 +1349,14 @@ if /i not "%_c%"=="Y" goto MenuApps
 taskkill /f /im Discord.exe       >nul 2>&1
 taskkill /f /im DiscordPTB.exe    >nul 2>&1
 taskkill /f /im DiscordCanary.exe >nul 2>&1
-timeout /t 3 >nul
+timeout /t 3 >nul 2>&1
 set "_DONE=0"
 set "_OAFAIL=0"
 for %%F in (Discord DiscordPTB DiscordCanary) do if exist "%LocalAppData%\%%F\" call :InstallAsarInto "%LocalAppData%\%%F" "%%F" "%_SRC%"
 rem  The downloaded nightly is a temp file and every flavor has now consumed it. Only the
 rem  download is removed - a bundled %SCRIPT_DIR%app.asar is the user's file and must stay.
-if exist "%TEMP%\openasar_nightly.asar" del /f /q "%TEMP%\openasar_nightly.asar" >nul 2>&1
+if defined _OADL if exist "%_OADL%" del /f /q "%_OADL%" >nul 2>&1
+set "_OADL="
 if "%_DONE%"=="0" (
     echo [ERROR] No Discord install was updated. Either none has a resources\app.asar ^(Store
     echo         version unsupported^), or Discord was still running - fully quit it and re-run.
@@ -1193,6 +1390,7 @@ echo  Copies the bundled boot.config into a Unity game's *_Data folder, tuned fo
 echo  CPU (job-worker-count). Per-game; restore boot.config.bak from that folder if needed.
 echo ===================================================================================
 call :RequireBundledFile boot.config "Unity engine boot configuration"
+if errorlevel 1 goto MenuApps
 call :DetectUnityJobWorkers
 echo.
 echo   Detected: !_CORESRC!
@@ -1353,6 +1551,7 @@ echo  The current hosts is backed up next to it AND into the backup folder. DNS 
 echo ===================================================================================
 set "_HOSTS=%SystemRoot%\System32\drivers\etc\hosts"
 call :RequireBundledFile hosts "ad/telemetry blocklist for the system hosts file"
+if errorlevel 1 goto MenuApps
 set "_c="
 set /p "_c=Proceed? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuApps
@@ -1420,6 +1619,7 @@ set "_HOSTS=%SystemRoot%\System32\drivers\etc\hosts"
 :RestoreHosts_ask
 set "sel="
 set /p "sel=Choose: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto RestoreHosts_ask
 if "%sel%"=="1" goto RestoreHostsBak
 if "%sel%"=="2" goto ResetHostsDefault
@@ -1663,8 +1863,10 @@ rem ============================================================================
 cls
 call :Logo
 echo =========================  GPU telemetry / tasks off  =============================
-if "%GPU%"=="nvidia" goto GpuNvidia
-if "%GPU%"=="amd" goto GpuAmd
+rem  Flags, not the single GPU word, so a machine with both is offered both in turn rather
+rem  than only whichever probe wrote GPU last.
+if defined GPU_NV goto GpuNvidia
+if defined GPU_AMD goto GpuAmd
 echo  No NVIDIA/AMD GPU detected (or detection failed). Nothing to do here.
 pause
 goto MenuAdvanced
@@ -1674,12 +1876,22 @@ echo  Detected NVIDIA. Disables NVIDIA telemetry tasks and background reporting 
 echo  large undocumented GPU registry tweaks are NOT applied (they can cause crashes).
 set "_c="
 set /p "_c=Apply NVIDIA telemetry-off? (Y/N): "
-if /i not "%_c%"=="Y" goto MenuAdvanced
+rem  Declining NVIDIA must not skip AMD on a machine that has both - the same "one no should
+rem  not throw away an unrelated option" rule the Power screen follows.
+if /i not "%_c%"=="Y" goto _gpuNvDone
 set "_FAILS=0"
 call :DisableNvidiaTelemetryTasks
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm\Global\Startup" "SendTelemetryData" REG_DWORD 0 "NVIDIA telemetry off"
 call :SafeRegAdd "HKLM\SOFTWARE\NVIDIA Corporation\NvControlPanel2\Client" "OptInOrOutPreference" REG_DWORD 0 "NVIDIA opt-out"
 call :Summary "NVIDIA telemetry / tasks disabled."
+
+:_gpuNvDone
+if defined GPU_AMD (
+    echo.
+    echo  This machine also has an AMD adapter - its opt-out is offered next.
+    echo.
+    goto GpuAmd
+)
 pause
 goto MenuAdvanced
 
@@ -1720,6 +1932,7 @@ echo ===========================================================================
 :HagsToggle_ask
 set "sel="
 set /p "sel=Choose: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto HagsToggle_ask
 if "%sel%"=="1" goto HagsOff
 if "%sel%"=="2" goto HagsOn
@@ -1831,11 +2044,21 @@ for /f "tokens=*" %%i in ('powercfg /getactivescheme') do echo   %%i
 echo [Hibernation]  (0x0 = off, 0x1 = on)
 call :ShowReg "HKLM\SYSTEM\CurrentControlSet\Control\Power" "HibernateEnabled"
 echo [Min processor state]  (this script can set 5%%)
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $g=[regex]::Match(((powercfg /getactivescheme) -join ' '),'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}').Value; $p='HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\'+$g+'\54533251-82be-4824-96c1-47b60b740d00\893dee8e-2bef-41e0-89c6-b55d0929964c'; $ac=(Get-ItemProperty -Path $p).ACSettingIndex; $dc=(Get-ItemProperty -Path $p).DCSettingIndex; if($ac -ne $null){ $s='  AC=' + $ac + '%%   DC=' + $dc + '%%' } else { $s='  (using scheme default)' }; $s | Out-File -FilePath (Join-Path $env:TEMP 'pt_mps.txt') -Encoding ASCII"
-if exist "%TEMP%\pt_mps.txt" ( type "%TEMP%\pt_mps.txt" & del "%TEMP%\pt_mps.txt" >nul 2>&1 )
+rem  Per-call filenames (%RANDOM%), like every other worker in this script. These four were
+rem  the last fixed-name temp files left: two sincript windows open at once - which nothing
+rem  prevents - would read each other's results, and worse, the first to finish deletes the
+rem  file the second is about to read, so :Status silently prints nothing for that section.
+set "_mps=%TEMP%\pt_mps_%RANDOM%%RANDOM%.txt"
+set "PT_MPS=%_mps%"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $g=[regex]::Match(((powercfg /getactivescheme) -join ' '),'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}').Value; $p='HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\'+$g+'\54533251-82be-4824-96c1-47b60b740d00\893dee8e-2bef-41e0-89c6-b55d0929964c'; $ac=(Get-ItemProperty -Path $p).ACSettingIndex; $dc=(Get-ItemProperty -Path $p).DCSettingIndex; if($ac -ne $null){ $s='  AC=' + $ac + '%%   DC=' + $dc + '%%' } else { $s='  (using scheme default)' }; $s | Out-File -FilePath $env:PT_MPS -Encoding ASCII"
+set "PT_MPS="
+if exist "%_mps%" ( type "%_mps%" & del "%_mps%" >nul 2>&1 )
 echo [DNS - adapters with DNS configured]
-start "" /min /wait powershell -NoProfile -Command "Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {$_.ServerAddresses} | ForEach-Object { '  ' + $_.InterfaceAlias + ': ' + ($_.ServerAddresses -join ', ') } | Out-File -FilePath (Join-Path $env:TEMP 'pt_dns.txt') -Encoding ASCII"
-if exist "%TEMP%\pt_dns.txt" ( type "%TEMP%\pt_dns.txt" & del "%TEMP%\pt_dns.txt" >nul 2>&1 )
+set "_dnsf=%TEMP%\pt_dns_%RANDOM%%RANDOM%.txt"
+set "PT_DNSF=%_dnsf%"
+start "" /min /wait powershell -NoProfile -Command "Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {$_.ServerAddresses} | ForEach-Object { '  ' + $_.InterfaceAlias + ': ' + ($_.ServerAddresses -join ', ') } | Out-File -FilePath $env:PT_DNSF -Encoding ASCII"
+set "PT_DNSF="
+if exist "%_dnsf%" ( type "%_dnsf%" & del "%_dnsf%" >nul 2>&1 )
 echo [Key tweaks]
 call :ShowReg "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" "NetworkThrottlingIndex"
 call :ShowReg "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" "SystemResponsiveness"
@@ -1854,8 +2077,11 @@ echo [CPU mitigations] FeatureSettingsOverride above: 0x2000003 ^(33554435^)=all
 echo                   Downfall; 0x3=Spectre/Meltdown off only; 0/^(not set^)=all on.
 echo                   Detail: PowerShell ^> Get-SpeculationControlSettings
 echo [Memory compression]  (True = on/default, False = disabled via Advanced)
-start "" /min /wait powershell -NoProfile -Command "try{ $m=Get-MMAgent; $s='  MemoryCompression=' + $m.MemoryCompression + '   PageCombining=' + $m.PageCombining }catch{ $s='  (MMAgent not available on this system)' }; $s | Out-File -FilePath (Join-Path $env:TEMP 'pt_mma.txt') -Encoding ASCII"
-if exist "%TEMP%\pt_mma.txt" ( type "%TEMP%\pt_mma.txt" & del "%TEMP%\pt_mma.txt" >nul 2>&1 )
+set "_mma=%TEMP%\pt_mma_%RANDOM%%RANDOM%.txt"
+set "PT_MMA=%_mma%"
+start "" /min /wait powershell -NoProfile -Command "try{ $m=Get-MMAgent; $s='  MemoryCompression=' + $m.MemoryCompression + '   PageCombining=' + $m.PageCombining }catch{ $s='  (MMAgent not available on this system)' }; $s | Out-File -FilePath $env:PT_MMA -Encoding ASCII"
+set "PT_MMA="
+if exist "%_mma%" ( type "%_mma%" & del "%_mma%" >nul 2>&1 )
 echo [hosts file]
 rem  Flat, not nested: "find /c /v ^< file" needs its ^ escape, and the escaping rules shift
 rem  inside a ( ) block. A missing/unreadable hosts used to print the header and nothing at all.
@@ -1865,8 +2091,11 @@ if exist "%_hostsf%" for /f %%c in ('find /c /v "" ^< "%_hostsf%"') do set "_hli
 if defined _hlines echo   !_hlines! lines total
 if not defined _hlines echo   ^(hosts file not found or unreadable^)
 echo [OpenAsar]  (app.asar well under 1 MB = OpenAsar; ~9 MB = stock Discord)
-start "" /min /wait powershell -NoProfile -Command "Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Discord\app-*\resources\app.asar') -ErrorAction SilentlyContinue | ForEach-Object { '  ' + [math]::Round($_.Length/1MB,2) + ' MB  ' + $_.FullName } | Out-File -FilePath (Join-Path $env:TEMP 'pt_asar.txt') -Encoding ASCII"
-if exist "%TEMP%\pt_asar.txt" ( type "%TEMP%\pt_asar.txt" & del "%TEMP%\pt_asar.txt" >nul 2>&1 )
+set "_asarf=%TEMP%\pt_asar_%RANDOM%%RANDOM%.txt"
+set "PT_ASARF=%_asarf%"
+start "" /min /wait powershell -NoProfile -Command "Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Discord\app-*\resources\app.asar') -ErrorAction SilentlyContinue | ForEach-Object { '  ' + [math]::Round($_.Length/1MB,2) + ' MB  ' + $_.FullName } | Out-File -FilePath $env:PT_ASARF -Encoding ASCII"
+set "PT_ASARF="
+if exist "%_asarf%" ( type "%_asarf%" & del "%_asarf%" >nul 2>&1 )
 echo ===================================================================================
 pause
 goto MenuBackups
@@ -1890,6 +2119,9 @@ if /i not "%_c%"=="Y" goto MainMenu
 rem  Same _RUNTRACK reasoning as :Privacy / :Power / :Performance - this path runs all five
 rem  cores, so it has the most sc/schtasks/powercfg calls of any single action.
 set "_PWBAK_FILE="
+rem  Same reason as :PresetBegin - this path documents itself as the Ultimate/High power
+rem  core, so it must not inherit a plan the user picked on menu 4 earlier in the session.
+set "_PWPLAN="
 set "_FAILS=0" & set "_RUNTRACK=1"
 call :DoCleanupCore
 call :DoPrivacyCore
@@ -1950,6 +2182,11 @@ rem ============================================================================
 rem  HELPERS
 rem =====================================================================================
 :Logo
+rem  Every screen draw goes through here, which makes it the natural place to clear the
+rem  empty-read counter :NoInput keeps. A spin loop never redraws - it re-asks the same
+rem  prompt - so the count only ever accumulates while ONE prompt is being repeated, and
+rem  navigating anywhere at all resets it.
+set "_NOIN=0"
 echo.
 echo                           SSSS   III   N   N
 echo                           S       I    NN  N
@@ -1959,11 +2196,267 @@ echo                           SSSS   III   N   N
 echo.
 goto :eof
 
+rem =====================================================================================
+rem  COMMAND LINE:  PerfTweaks.cmd /preset:NAME [/dns:VALUE] [/norestore]
+rem =====================================================================================
+:CliHelp
+echo.
+echo  sincript - Windows 10/11 optimizer
+echo.
+echo  Run with no arguments for the interactive menu, or drive one preset unattended:
+echo.
+echo     PerfTweaks.cmd /preset:NAME [/dns:VALUE] [/norestore]
+echo.
+echo     /preset:light      cleanup + privacy + network cores
+echo     /preset:moderate   the recommended safe set (cleanup, privacy, performance,
+echo                        power, network)
+echo     /preset:heavy      the safe set plus the aggressive-but-reversible extras
+echo     /preset:NAME       any NAME.preset file in sincript_presets\
+echo.
+echo     /dns:VALUE         cloudflare ^| google ^| quad9 ^| an IPv4 address.
+echo                        Omit it and DNS is left exactly as it is - the interactive
+echo                        presets ASK, and an unattended run must not guess.
+echo     /plan:VALUE        ultimate ^| high ^| balanced - which power scheme a preset
+echo                        containing power=1 activates. Unset means ultimate.
+echo                        ON A LAPTOP RUNNING AN UNDERVOLT, PASS high OR balanced:
+echo                        ultimate pins sustained maximum clocks, which is where a
+echo                        stable undervolt stops being stable and the CPU raises an
+echo                        uncorrectable machine check (bugcheck 0x124). Unattended
+echo                        there is no prompt to reconsider at, so choose it here.
+echo     /norestore         skip the System Restore Point (it is created by default).
+echo     /?                 this help.
+echo.
+echo  Requires an elevated window: unlike the menu, a /preset: run will NOT relaunch
+echo  itself, because a relaunch returns an exit code for the relaunch and not for the
+echo  work. Start it from an elevated prompt or a task set to run with highest privileges.
+echo.
+echo  Exit codes:  0 applied cleanly   1 applied with failures   2 bad usage
+echo               3 not elevated
+echo.
+exit /b 0
+
+:CliRun
+rem  One preset, no prompts, a real exit code. Everything it applies comes from the same
+rem  routines the menu uses (:PresetBody* / :PresetApplyDirectives), so the two paths cannot
+rem  drift apart - that is the whole reason those were split out.
+if defined _CLIBAD (
+    echo [ERROR] Unrecognized option, or an option with no value: !_CLIBAD!
+    echo         Run  PerfTweaks.cmd /?  for the accepted options.
+    exit /b 2
+)
+if not defined _CLIPRESET (
+    echo [ERROR] No preset given. The command line needs /preset:NAME - on its own,
+    echo         an option like /norestore has nothing to apply.
+    echo         Run  PerfTweaks.cmd /?  for the accepted options.
+    exit /b 2
+)
+rem  Validate /dns: with the SAME checker the menu and the preset key use, before anything
+rem  is applied - an unattended run should fail on a typo, not halfway through.
+if defined _CLIDNS (
+    set "_dnsok="
+    if /i "!_CLIDNS!"=="cloudflare" set "_dnsok=1"
+    if /i "!_CLIDNS!"=="google"     set "_dnsok=1"
+    if /i "!_CLIDNS!"=="quad9"      set "_dnsok=1"
+    if not defined _dnsok set "_IPCHK=!_CLIDNS!" & call :_ip4_ok && set "_dnsok=1"
+    if not defined _dnsok (
+        echo [ERROR] /dns:!_CLIDNS! is not valid - use cloudflare, google, quad9 or an IPv4 address.
+        exit /b 2
+    )
+)
+if defined _CLIPLAN (
+    set "_planok="
+    if /i "!_CLIPLAN!"=="ultimate" set "_planok=1"
+    if /i "!_CLIPLAN!"=="high"     set "_planok=1"
+    if /i "!_CLIPLAN!"=="balanced" set "_planok=1"
+    if not defined _planok (
+        echo [ERROR] /plan:!_CLIPLAN! is not valid - use ultimate, high or balanced.
+        exit /b 2
+    )
+)
+rem  ---- resolve and fully validate the preset BEFORE anything is changed ----
+rem  Everything above and below this point is read-only. An unattended run must fail on a
+rem  typo without having touched the machine: the first version created the System Restore
+rem  Point before it discovered the preset did not exist, which is a side effect for a run
+rem  that was always going to abort.
+set "_CLIKIND=builtin"
+if /i "!_CLIPRESET!"=="light"    goto _cliResolved
+if /i "!_CLIPRESET!"=="moderate" goto _cliResolved
+if /i "!_CLIPRESET!"=="heavy"    goto _cliResolved
+set "_CLIKIND=custom"
+rem  The NAME becomes a path AND appears in messages, so it is held to a WHITELIST - letters,
+rem  digits, underscore, dot, hyphen - not a list of banned characters. A blacklist kept
+rem  missing things (the first one allowed "&", which then split an echo and ran the rest).
+rem  ".." is checked separately because dots pass the whitelist. No pipe: a piped child
+rem  re-parses the expanded text, so "&" would split and run there.
+set "_pnbad="
+for /f "delims=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-" %%X in ("!_CLIPRESET!") do set "_pnbad=1"
+if defined _pnbad goto _cliBadName
+if not "!_CLIPRESET!"=="!_CLIPRESET:..=!" goto _cliBadName
+set "_pfile=%SCRIPT_DIR%sincript_presets\!_CLIPRESET!.preset"
+if not exist "!_pfile!" (
+    echo [ERROR] No such preset: !_CLIPRESET!
+    echo         Expected a built-in ^(light / moderate / heavy^) or this file:
+    echo           !_pfile!
+    call :Log "CLI abort: preset file not found - !_pfile!"
+    exit /b 2
+)
+rem  Parse and validate the file now - this only fills in _P_* variables, it changes nothing.
+set "_perr=0" & set "_pgood=0"
+set "_perrfile=%TEMP%\sincript_cli_err_%RANDOM%%RANDOM%.txt"
+break>"%_perrfile%"
+for %%K in (CLEANUP PRIVACY PERFORMANCE POWER PWTIMEOUTS PWPLAN NETWORK OPENASAR GAMEMODE GAMEBAR EDGE ONEDRIVE SYSRESP NETTHROTTLE LARGECACHE MINPROC BCDTIMERS IPV6 MEMCOMPRESS NVME GPUTEL NAGLE WIN32 DNS) do set "_P_%%K="
+for /f "usebackq eol=# tokens=1,* delims==" %%A in ("!_pfile!") do (
+    set "_k=%%A"
+    set "_v=%%B"
+    call :PresetCheckLine
+)
+echo  Recognized directives: !_pgood!    Problems: !_perr!
+if %_perr% gtr 0 type "%_perrfile%"
+del "%_perrfile%" >nul 2>&1
+if %_pgood% lss 1 (
+    echo [ERROR] No valid directives in !_CLIPRESET!.preset - nothing to apply.
+    call :Log "CLI abort: no valid directives in !_pfile!"
+    exit /b 2
+)
+
+:_cliResolved
+rem  ---- the command line is valid; now check the environment can honour it ----
+rem  Argument errors are reported BEFORE environment errors on purpose. A typo and a
+rem  non-elevated window are both fatal, but only one of them is the caller's command: being
+rem  told "not elevated", fixing that, and only then learning the preset name was wrong is
+rem  two round trips for one mistake. Neither check has changed anything yet.
+if "%_ELEV%"=="0" (
+    echo [ERROR] /preset: needs an elevated window - almost every tweak writes to HKLM.
+    echo         This run would have failed nearly everything, so nothing was attempted.
+    echo         Re-run from an elevated prompt, or set the scheduled task to run with
+    echo         highest privileges. A /preset: run never self-elevates on purpose: the
+    echo         relaunch would return its own exit code instead of the work's.
+    call :Log "CLI abort: /preset:!_CLIPRESET! without elevation"
+    exit /b 3
+)
+if "%_BAKOK%"=="0" (
+    echo [ERROR] The backup folder is not writable, and every registry tweak refuses to run
+    echo         without a per-value undo file. Nothing was attempted.
+    echo           !BACKUP_DIR!
+    call :Log "CLI abort: /preset:!_CLIPRESET! with no writable backup folder"
+    exit /b 2
+)
+rem  ---- validated; from here on the machine is actually changed ----
+echo.
+echo  sincript - applying preset "!_CLIPRESET!" unattended.
+echo.
+call :Log "CLI start: preset=!_CLIPRESET! kind=!_CLIKIND! dns=!_CLIDNS! plan=!_CLIPLAN! norestore=!_CLINORP!"
+rem  The laptop advisory runs here too. Unattended there is no prompt to reconsider at, which
+rem  makes stating it matter more, not less: it is the only record - console and log - that
+rem  this run was about to move a portable machine to sustained maximum clocks. Warning-only,
+rem  as everywhere else: it never blocks and never alters what the preset applies.
+call :LaptopAdvisory
+if /i "%MACHINE%"=="laptop" if not defined _CLIPLAN (
+    echo   [ADVISORY] No /plan: given, so a preset containing power=1 will activate ULTIMATE
+    echo              PERFORMANCE - the plan Windows hides on battery-powered machines. If this
+    echo              laptop runs an undervolt, pass /plan:high or /plan:balanced instead: the
+    echo              jump to sustained max clocks is where a stable undervolt stops being
+    echo              stable, and the CPU reports it as an uncorrectable machine check.
+)
+call :Log "CLI advisory: machine=%MACHINE% plan=!_CLIPLAN!"
+if not defined _CLINORP call :CreateRestorePoint
+set "_FAILS=0"
+if /i "!_CLIKIND!"=="custom" goto _cliCustom
+call :PresetBegin !_CLIPRESET!
+if errorlevel 1 exit /b 2
+rem  AFTER :PresetBegin, never before: :PresetBegin clears _PWPLAN so a preset starts from the
+rem  documented default rather than inheriting a plan from earlier in the session. Setting
+rem  /plan: ahead of it would simply be wiped.
+if defined _CLIPLAN set "_PWPLAN=!_CLIPLAN!"
+if /i "!_CLIPRESET!"=="light"    call :PresetBodyLight
+if /i "!_CLIPRESET!"=="moderate" call :PresetBodyModerate
+if /i "!_CLIPRESET!"=="heavy"    call :PresetBodyHeavy
+if defined _CLIDNS call :PresetDnsByName "!_CLIDNS!"
+call :PresetEnd
+goto _cliDone
+
+:_cliBadName
+echo [ERROR] /preset:!_CLIPRESET! - a custom preset is a plain file name from
+echo         sincript_presets\, with no path separators, wildcards or "..".
+call :Log "CLI abort: rejected preset name !_CLIPRESET!"
+exit /b 2
+
+:_cliCustom
+set "_pbase=!_CLIPRESET: =_!"
+call :PresetBegin custom_!_pbase!
+if errorlevel 1 exit /b 2
+rem  /plan: overrides the file's power_plan= key, and it does so by writing _P_PWPLAN rather
+rem  than _PWPLAN: :PresetApplyDirectives reads _P_PWPLAN and would otherwise put the file's
+rem  value back over the command line's. The more specific instruction wins.
+if defined _CLIPLAN set "_P_PWPLAN=!_CLIPLAN!"
+call :PresetApplyDirectives
+rem  An explicit /dns: overrides whatever the file said - the command line is the more
+rem  specific instruction, and :PresetApplyDirectives has already applied the file's key.
+if defined _CLIDNS call :PresetDnsByName "!_CLIDNS!"
+call :PresetEnd
+
+:_cliDone
+echo.
+rem  The preset NAME is deliberately not passed to :Summary. That routine ends in
+rem  "echo [OK] %~1", and %~1 is substituted during parsing, so whatever it holds is parsed
+rem  again - an "&" in the text splits the line and cmd runs the remainder as a command.
+rem  It is block-free so a ")" is safe, but that does not extend to "&". Fixed text goes to
+rem  :Summary; the name is echoed on its own line with delayed expansion, where it is data.
+rem  (The whitelist above already refuses such a name; this is the second lock on that door.)
+call :Summary "Preset applied."
+echo      Preset:          !_CLIPRESET!
+echo      Registry backup: !PRESET_LAST!
+echo      A reboot is recommended.
+call :Log "CLI end: preset=!_CLIPRESET! fails=%_FAILS%"
+if not "%_FAILS%"=="0" exit /b 1
+exit /b 0
+
+:NonAsciiCheck
+rem  Sets _naData=1 when !_rd! holds any character outside printable ASCII. Runs inside
+rem  :SafeRegAdd's setlocal, so it uses the caller's variables directly.
+rem  Via a FILE, not a pipe: a piped child re-parses the expanded text, so registry data
+rem  containing "&" would split there - the remainder would RUN and findstr would judge the
+rem  wrong string. The redirect below happens in this shell, where the value stays inert.
+set "_naf=%TEMP%\pt_na_%RANDOM%%RANDOM%.txt"
+>"!_naf!" echo(!_rd!
+findstr /r "[^ -~]" "!_naf!" >nul && set "_naData=1"
+del "!_naf!" >nul 2>&1
+goto :eof
+
+:NoInput
+rem  Called when a prompt read back empty. Returns 0 = ask again, 1 = give up.
+rem
+rem  set /p cannot tell an exhausted stdin from a bare Enter - both leave the variable unset
+rem  and return errorlevel 1 - so a menu loop that only re-asks has no exit at all once stdin
+rem  is redirected or closed, and spins at 100%% CPU. Bounded patience instead: count
+rem  CONSECUTIVE empty reads. :Logo clears the count on every screen draw, so it accumulates
+rem  only while one prompt is being re-asked; at EOF the limit is hit in milliseconds.
+rem
+rem  Returns a STATUS rather than jumping - callers are menu labels reached by goto and do
+rem  their own "goto ExitScript", which keeps cmd's call stack balanced (test 105).
+if not defined _NOIN set "_NOIN=0"
+set /a _NOIN+=1
+if !_NOIN! lss 100 exit /b 0
+echo.
+echo [ERROR] No input after !_NOIN! empty reads - stdin looks empty or closed.
+echo         sincript is an interactive menu: run it from a console window, or
+echo         double-click it. It cannot be driven from a pipe or a redirected file.
+call :Log "ABORT: input exhausted after !_NOIN! empty reads"
+exit /b 1
+
 :Log
 rem  Capture the message first, then echo it via DELAYED expansion. A literal ">" inside the
 rem  message (e.g. the "-> path" we log) must not be seen by the parser as a redirection - if
 rem  it were, a path like "C:\Program Files\.." would be split and create a stray "C:\Program".
+rem  The write sits one call deeper so "2>nul" can go on the CALL. A failed redirection is
+rem  reported as the redirect is set up - before the command's own stderr exists - so 2>nul
+rem  on the echo does not suppress it. Redirecting the call does, and unlike "( ) 2>nul" it
+rem  adds no parenthesised block for a ")" in %LOGFILE% or the message to close early.
 set "_LOGLN=%~1"
+call :_LogWrite 2>nul
+goto :eof
+
+:_LogWrite
 >>"%LOGFILE%" echo [%date% %time%] !_LOGLN!
 goto :eof
 
@@ -1978,6 +2471,7 @@ echo  Reversible via option 7 (Remove timer resolution).
 echo ===================================================================================
 call :LaptopAdvisory
 call :RequireBundledFile SetTimerResolution.exe "raises the Windows timer resolution (autostart helper)"
+if errorlevel 1 goto MenuApps
 echo.
 echo  Resolution is in 100ns units:  5000 = 0.5 ms (typical best),  10000 = 1 ms.
 echo  The TimerResolution tool's MeasureSleep can find the best value for your PC.
@@ -2059,13 +2553,21 @@ echo  Removes built-in Microsoft Store apps (telemetry / ads / rarely-used). Eac
 echo  is opt-in below. This is NOT covered by the .reg backups: to get an app back you
 echo  reinstall it from the Microsoft Store. Apps you actually use, just answer N.
 echo ===================================================================================
+rem  Elevation is checked HERE rather than left to fail per-package. Get-AppxPackage -AllUsers
+rem  needs Administrator, so without it the enumeration returns nothing and every group would
+rem  report "none of these are installed" - a false SKIP that reads like good news. Same guard
+rem  :StoreRepair and :MemCompress already use.
+if "%_ELEV%"=="0" (
+    echo [WARN] Not elevated - listing packages for all users needs Administrator, so nothing
+    echo        could be removed. Close this window and use "Run as administrator".
+    pause
+    goto MenuApps
+)
 set "_c="
 set /p "_c=Remove the standard bloat set (Copilot, Bing apps, Teams, Office hub, Solitaire, etc.)? (Y/N): "
 if /i not "%_c%"=="Y" goto DebloatOpt
 call :Log "DEBLOAT standard set"
-echo Removing standard bloat (a minimized window may flash)...
-start "" /min /wait powershell -NoProfile -Command "$p=@('MicrosoftCorporationII.QuickAssist','Microsoft.WindowsFeedbackHub','Microsoft.Copilot','Microsoft.BingWeather','MicrosoftCorporationII.MicrosoftFamily','Microsoft.MicrosoftOfficeHub','Microsoft.BingSearch','Clipchamp.Clipchamp','MSTeams','Microsoft.Todos','Microsoft.MicrosoftStickyNotes','Microsoft.BingNews','Microsoft.OutlookForWindows','Microsoft.WindowsAlarms','Microsoft.MicrosoftSolitaireCollection'); foreach($x in $p){Get-AppxPackage -AllUsers $x | Remove-AppxPackage -ErrorAction SilentlyContinue}"
-echo [OK] Standard bloat removed where present.
+call :DebloatRun "MicrosoftCorporationII.QuickAssist|Microsoft.WindowsFeedbackHub|Microsoft.Copilot|Microsoft.BingWeather|MicrosoftCorporationII.MicrosoftFamily|Microsoft.MicrosoftOfficeHub|Microsoft.BingSearch|Clipchamp.Clipchamp|MSTeams|Microsoft.Todos|Microsoft.MicrosoftStickyNotes|Microsoft.BingNews|Microsoft.OutlookForWindows|Microsoft.WindowsAlarms|Microsoft.MicrosoftSolitaireCollection" "Standard bloat"
 
 :DebloatOpt
 echo.
@@ -2073,9 +2575,7 @@ set "_c2="
 set /p "_c2=Also remove optional apps (Camera, Sound Recorder, Snipping Tool, Power Automate, Xbox)? (Y/N): "
 if /i not "%_c2%"=="Y" goto DebloatOneDrive
 call :Log "DEBLOAT optional apps"
-echo Removing optional apps (a minimized window may flash)...
-start "" /min /wait powershell -NoProfile -Command "$p=@('Microsoft.WindowsCamera','Microsoft.WindowsSoundRecorder','Microsoft.ScreenSketch','Microsoft.PowerAutomateDesktop','Microsoft.Xbox.TCUI','Microsoft.GamingApp'); foreach($x in $p){Get-AppxPackage -AllUsers $x | Remove-AppxPackage -ErrorAction SilentlyContinue}"
-echo [OK] Optional apps removed where present.
+call :DebloatRun "Microsoft.WindowsCamera|Microsoft.WindowsSoundRecorder|Microsoft.ScreenSketch|Microsoft.PowerAutomateDesktop|Microsoft.Xbox.TCUI|Microsoft.GamingApp" "Optional apps"
 
 :DebloatOneDrive
 echo.
@@ -2084,14 +2584,66 @@ set /p "_c4=Also remove OneDrive (uninstall it and remove the sync app)? (Y/N): 
 if /i not "%_c4%"=="Y" goto DebloatDone
 call :Log "DEBLOAT OneDrive"
 echo Removing OneDrive (a minimized window may flash)...
-start "" /min /wait powershell -NoProfile -Command "Get-AppxPackage -AllUsers Microsoft.OneDriveSync | Remove-AppxPackage -ErrorAction SilentlyContinue; Start-Process -FilePath ($env:SystemRoot + '\System32\OneDriveSetup.exe') -ArgumentList '/uninstall' -NoNewWindow -Wait -ErrorAction SilentlyContinue"
-echo [OK] OneDrive removed.
+rem  Two halves, both now reported. The uninstaller is looked for in SysWOW64 as well as
+rem  System32: on a 64-bit Windows the shipped OneDriveSetup.exe is commonly the 32-bit one
+rem  and lives ONLY in SysWOW64, so the old System32-only path silently did nothing on a very
+rem  ordinary machine while the screen still said "[OK] OneDrive removed."
+set "_odres=%TEMP%\pt_od_%RANDOM%.txt"
+del "%_odres%" >nul 2>&1
+set "PT_OD_RES=%_odres%"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $ok=0; foreach($q in @(Get-AppxPackage -AllUsers Microsoft.OneDriveSync -ErrorAction SilentlyContinue)){ try{ $q | Remove-AppxPackage -ErrorAction Stop; $ok++ }catch{} }; $s=(Join-Path $env:SystemRoot 'System32\OneDriveSetup.exe'); if(-not (Test-Path -LiteralPath $s)){ $s=(Join-Path $env:SystemRoot 'SysWOW64\OneDriveSetup.exe') }; $rc=-1; if(Test-Path -LiteralPath $s){ $pr=Start-Process -FilePath $s -ArgumentList '/uninstall' -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue; if($pr){ $rc=$pr.ExitCode } }; (''+$ok+' '+$rc) | Out-File -FilePath $env:PT_OD_RES -Encoding ASCII"
+set "PT_OD_RES="
+set "_odok=0" & set "_odrc=-1"
+if exist "%_odres%" for /f "usebackq tokens=1,2" %%a in ("%_odres%") do ( set "_odok=%%a" & set "_odrc=%%b" )
+del "%_odres%" >nul 2>&1
+if "!_odrc!"=="-1" (
+    echo   [WARN] OneDrive: the sync app removal ran ^(!_odok! package^(s^)^), but OneDriveSetup.exe
+    echo          was not found in System32 or SysWOW64 - OneDrive itself was NOT uninstalled.
+    call :Log "DEBLOAT OneDrive: setup not found, appx=!_odok!"
+) else (
+    echo   [OK] OneDrive uninstalled ^(!_odok! sync package^(s^) removed, uninstaller exit !_odrc!^).
+    call :Log "DEBLOAT OneDrive: appx=!_odok! setup rc=!_odrc!"
+)
 
 :DebloatDone
 echo.
 echo Done. Any removed app can be reinstalled later from the Microsoft Store.
 pause
 goto MenuApps
+
+:DebloatRun
+rem  %1 = pipe-separated package list   %2 = group label
+rem  Removes each package and reports what actually happened. Counted three ways so the cases
+rem  stay distinguishable - removed / failed / not-installed - the same shape
+rem  :DisableTelemetryTasks uses. Debloat is the one action with no undo, so a blanket "[OK]"
+rem  is worse here than anywhere else. The package list travels by environment variable, so
+rem  no name is ever re-parsed by cmd.
+set "_dbres=%TEMP%\pt_debloat_%RANDOM%.txt"
+del "%_dbres%" >nul 2>&1
+set "PT_DB_RES=%_dbres%"
+set "PT_DB_PKGS=%~1"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $rm=0;$fail=0;$absent=0; foreach($x in @($env:PT_DB_PKGS -split '\|')){ if(-not $x){ continue }; $pk=@(Get-AppxPackage -AllUsers $x -ErrorAction SilentlyContinue); if($pk.Count -eq 0){ $absent++; continue }; foreach($q in $pk){ try{ $q | Remove-AppxPackage -ErrorAction Stop; $rm++ }catch{ $fail++ } } }; (''+$rm+' '+$fail+' '+$absent) | Out-File -FilePath $env:PT_DB_RES -Encoding ASCII"
+set "PT_DB_RES=" & set "PT_DB_PKGS="
+set "_dbrm=0" & set "_dbf=0" & set "_dba=0"
+if exist "%_dbres%" for /f "usebackq tokens=1,2,3" %%a in ("%_dbres%") do ( set "_dbrm=%%a" & set "_dbf=%%b" & set "_dba=%%c" )
+del "%_dbres%" >nul 2>&1
+if not "!_dbf!"=="0" goto _dbFail
+if "!_dbrm!"=="0" goto _dbNone
+echo   [OK] %~2: removed !_dbrm! package^(s^); !_dba! were not installed.
+call :Log "OK: DEBLOAT %~2 removed=!_dbrm! absent=!_dba!"
+goto :eof
+
+:_dbNone
+echo   [SKIP] %~2: none of these apps are installed - nothing to remove.
+call :Log "SKIP: DEBLOAT %~2 - none present"
+goto :eof
+
+:_dbFail
+echo         [FAIL] %~2: removed !_dbrm!, but !_dbf! could NOT be removed ^(!_dba! not installed^).
+echo                Some in-box apps are provisioned by Windows and refuse removal; a few come
+echo                back after a feature update. Re-running is safe.
+call :Log "FAIL: DEBLOAT %~2 removed=!_dbrm! failed=!_dbf! absent=!_dba!"
+goto :eof
 rem =====================================================================================
 rem  ACTION: Manage startup programs (the reversible Task Manager switch, with backups)
 rem =====================================================================================
@@ -2105,15 +2657,21 @@ echo  This is the same reversible StartupApproved switch Task Manager uses: noth
 echo  deleted, and the entry's previous state is saved as a .reg backup before each
 echo  flip (restorable from Backups ^& status, or by double-clicking the file).
 echo ===================================================================================
-set "_sulist=%TEMP%\pt_startup_%RANDOM%.txt"
-set "_sures=%TEMP%\pt_sures_%RANDOM%.txt"
+set "_sulist=%TEMP%\pt_startup_%RANDOM%%RANDOM%.txt"
+set "_sures=%TEMP%\pt_sures_%RANDOM%%RANDOM%.txt"
+set "_susig=%TEMP%\pt_susig_%RANDOM%%RANDOM%.txt"
 del "%_sulist%" >nul 2>&1
+set "_SUSIG="
 call :StartupWorker list 0
 if not exist "%_sulist%" (
     echo [ERROR] Could not enumerate startup entries ^(PowerShell blocked or unavailable^).
     pause
     goto MenuApps
 )
+rem  Fingerprint of the enumeration this screen is about to show. The toggle pass compares
+rem  its own against it and refuses if the set changed in between - see :StartupWorker.
+if exist "%_susig%" for /f "usebackq delims=" %%S in ("%_susig%") do set "_SUSIG=%%S"
+del "%_susig%" >nul 2>&1
 set "_sn=0"
 for /f "usebackq tokens=1,2,3,* delims=|" %%a in ("%_sulist%") do (
     set /a _sn+=1
@@ -2137,6 +2695,7 @@ echo  targets the exact entry. Disabled entries stay listed and can be re-enable
 :StartupMgr_ask
 set "sel="
 set /p "sel=Number to flip Enabled/Disabled (0 = back): "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto StartupMgr_ask
 if "%sel%"=="0" goto MenuApps
 set "_sok="
@@ -2186,22 +2745,37 @@ rem  (UTF-16, the native regedit format) in the backup folder, THEN writes the T
 rem  Manager-style StartupApproved value: 02.. = enabled, 03 + timestamp = disabled.
 rem  Registry access uses literal-path/.NET calls so names with wildcard characters
 rem  ([ ] * ?) cannot misfire onto a different value.
+rem  PT_SU_SIG / PT_SU_SIGIN close a time-of-check gap: the listing is addressed by NUMBER
+rem  and the toggle pass re-enumerates, so an entry added or removed in between made number N
+rem  point at something other than what the confirm prompt named. Bounds alone only catch a
+rem  list that got shorter. The list pass writes a fingerprint of the enumeration; the toggle
+rem  pass recomputes and refuses on a mismatch. A fingerprint, not the name - the name is
+rem  exactly what must not round-trip through cmd (non-ASCII names).
 set "PT_SU_MODE=%~1"
 set "PT_SU_IDX=%~2"
 set "PT_SU_LIST=%_sulist%"
 set "PT_SU_RES=%_sures%"
 set "PT_SU_BAK=%BACKUP_DIR%"
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $srcs=@(@('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run','HKCU-Run'),@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run','HKLM-Run'),@('HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32','HKLM-Run32')); $E=@(); foreach($s in $srcs){ $k=Get-Item -LiteralPath $s[0] -ErrorAction SilentlyContinue; if($k){ foreach($n in ($k.GetValueNames() | Sort-Object)){ if($n -ne ''){ $E+=,@($s[2],$s[1],$n) } } } }; $dirs=@(@([Environment]::GetFolderPath('Startup'),'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder','User-Startup'),@([Environment]::GetFolderPath('CommonStartup'),'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder','Common-Startup')); foreach($s in $dirs){ if($s[0] -and (Test-Path -LiteralPath $s[0])){ foreach($f in (Get-ChildItem -LiteralPath $s[0] -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' } | Sort-Object Name)){ $E+=,@($s[2],$s[1],$f.Name) } } }; function S($a,$n){ $k=Get-Item -LiteralPath $a -ErrorAction SilentlyContinue; if($k){ $v=$k.GetValue($n); if($v -and $v.Length -ge 1 -and (($v[0] -band 1) -eq 1)){ return 'Disabled' } }; return 'Enabled' }; if($env:PT_SU_MODE -eq 'list'){ $i=0; $o=@(); foreach($x in $E){ $i++; $dn=$x[2] -replace '[^\x20-\x7e]','?' -replace '[\x21\x22\x25\x26\x3c\x3e\x5e\x7c]','?'; $o+=(''+$i+'|'+(S $x[1] $x[2])+'|'+$x[0]+'|'+$dn) }; $o | Out-File -FilePath $env:PT_SU_LIST -Encoding ASCII; exit 0 }; $n=0; try{ $n=[int]$env:PT_SU_IDX }catch{ $n=0 }; if($n -lt 1 -or $n -gt $E.Count){ 'Entry not found - the startup list changed. Nothing was modified.' | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; $x=$E[$n-1]; $appr=$x[1]; $name=$x[2]; $cur=S $appr $name; $had=$false; $raw=$null; $k=Get-Item -LiteralPath $appr -ErrorAction SilentlyContinue; if($k){ $raw=$k.GetValue($name); if($null -ne $raw){ $had=$true } }; $rk=$appr.Replace('HKCU:','HKEY_CURRENT_USER').Replace('HKLM:','HKEY_LOCAL_MACHINE'); $q=[char]34; $en=$name.Replace('\','\\').Replace([string]$q,'\'+$q); $bak=Join-Path $env:PT_SU_BAK ('StartupApproved_'+(Get-Random)+'.reg'); $body=@('Windows Registry Editor Version 5.00','','['+$rk+']'); if($had -and ($raw -is [byte[]])){ $hex=(($raw | ForEach-Object { $_.ToString('x2') }) -join ','); $body+=($q+$en+$q+'=hex:'+$hex) } elseif($had){ $body+=('; original value was not REG_BINARY - not auto-restorable from this file') } else { $body+=($q+$en+$q+'=-') }; $body | Out-File -FilePath $bak -Encoding Unicode; if(-not (Test-Path -LiteralPath $bak)){ 'Could not write the undo backup - antivirus or Controlled Folder Access may be blocking the backup folder. The startup entry was NOT changed.' | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; if($cur -eq 'Enabled'){ $new=[byte[]](3,0,0,0)+[BitConverter]::GetBytes([DateTime]::Now.ToFileTime()); $ns='Disabled' } else { $new=[byte[]](2,0,0,0,0,0,0,0,0,0,0,0); $ns='Enabled' }; try{ [Microsoft.Win32.Registry]::SetValue($rk,$name,[byte[]]$new,[Microsoft.Win32.RegistryValueKind]::Binary) }catch{ Remove-Item -LiteralPath $bak -ErrorAction SilentlyContinue; ('Could not write the new state: '+$_.Exception.Message) | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; $dn=$name -replace '[^\x20-\x7e]','?'; ((''+$dn+' : '+$cur+' -> '+$ns),('Backup of the previous state: '+$bak)) | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 0"
+set "PT_SU_SIG=%_susig%"
+set "PT_SU_SIGIN=%_SUSIG%"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $srcs=@(@('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run','HKCU-Run'),@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run','HKLM-Run'),@('HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32','HKLM-Run32')); $E=@(); foreach($s in $srcs){ $k=Get-Item -LiteralPath $s[0] -ErrorAction SilentlyContinue; if($k){ foreach($n in ($k.GetValueNames() | Sort-Object)){ if($n -ne ''){ $E+=,@($s[2],$s[1],$n) } } } }; $dirs=@(@([Environment]::GetFolderPath('Startup'),'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder','User-Startup'),@([Environment]::GetFolderPath('CommonStartup'),'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder','Common-Startup')); foreach($s in $dirs){ if($s[0] -and (Test-Path -LiteralPath $s[0])){ foreach($f in (Get-ChildItem -LiteralPath $s[0] -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' } | Sort-Object Name)){ $E+=,@($s[2],$s[1],$f.Name) } } }; function S($a,$n){ $k=Get-Item -LiteralPath $a -ErrorAction SilentlyContinue; if($k){ $v=$k.GetValue($n); if($v -and $v.Length -ge 1 -and (($v[0] -band 1) -eq 1)){ return 'Disabled' } }; return 'Enabled' }; $sg=[BitConverter]::ToString([Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::Unicode.GetBytes((($E | ForEach-Object { $_[0]+'\'+$_[2] }) -join ';')))).Replace('-',''); if($env:PT_SU_MODE -eq 'list'){ $i=0; $o=@(); foreach($x in $E){ $i++; $dn=$x[2] -replace '[^\x20-\x7e]','?' -replace '[\x21\x22\x25\x26\x3c\x3e\x5e\x7c]','?'; $o+=(''+$i+'|'+(S $x[1] $x[2])+'|'+$x[0]+'|'+$dn) }; $o | Out-File -FilePath $env:PT_SU_LIST -Encoding ASCII; $sg | Out-File -FilePath $env:PT_SU_SIG -Encoding ASCII; exit 0 }; if($env:PT_SU_SIGIN -and $env:PT_SU_SIGIN -ne $sg){ 'The startup list changed since it was displayed - something added or removed an entry. Nothing was modified. The refreshed list is shown below; pick again.' | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; $n=0; try{ $n=[int]$env:PT_SU_IDX }catch{ $n=0 }; if($n -lt 1 -or $n -gt $E.Count){ 'Entry not found - the startup list changed. Nothing was modified.' | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; $x=$E[$n-1]; $appr=$x[1]; $name=$x[2]; $cur=S $appr $name; $had=$false; $raw=$null; $k=Get-Item -LiteralPath $appr -ErrorAction SilentlyContinue; if($k){ $raw=$k.GetValue($name); if($null -ne $raw){ $had=$true } }; $rk=$appr.Replace('HKCU:','HKEY_CURRENT_USER').Replace('HKLM:','HKEY_LOCAL_MACHINE'); $q=[char]34; $en=$name.Replace('\','\\').Replace([string]$q,'\'+$q); $bak=Join-Path $env:PT_SU_BAK ('StartupApproved_'+(Get-Random)+'.reg'); $body=@('Windows Registry Editor Version 5.00','','['+$rk+']'); if($had -and ($raw -is [byte[]])){ $hex=(($raw | ForEach-Object { $_.ToString('x2') }) -join ','); $body+=($q+$en+$q+'=hex:'+$hex) } elseif($had){ $body+=('; original value was not REG_BINARY - not auto-restorable from this file') } else { $body+=($q+$en+$q+'=-') }; $body | Out-File -FilePath $bak -Encoding Unicode; if(-not (Test-Path -LiteralPath $bak)){ 'Could not write the undo backup - antivirus or Controlled Folder Access may be blocking the backup folder. The startup entry was NOT changed.' | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; if($cur -eq 'Enabled'){ $new=[byte[]](3,0,0,0)+[BitConverter]::GetBytes([DateTime]::Now.ToFileTime()); $ns='Disabled' } else { $new=[byte[]](2,0,0,0,0,0,0,0,0,0,0,0); $ns='Enabled' }; try{ [Microsoft.Win32.Registry]::SetValue($rk,$name,[byte[]]$new,[Microsoft.Win32.RegistryValueKind]::Binary) }catch{ Remove-Item -LiteralPath $bak -ErrorAction SilentlyContinue; ('Could not write the new state: '+$_.Exception.Message) | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 1 }; $dn=$name -replace '[^\x20-\x7e]','?'; ((''+$dn+' : '+$cur+' -> '+$ns),('Backup of the previous state: '+$bak)) | Out-File -FilePath $env:PT_SU_RES -Encoding ASCII; exit 0"
 set "_swrc=%errorlevel%"
 set "PT_SU_MODE=" & set "PT_SU_IDX=" & set "PT_SU_LIST=" & set "PT_SU_RES=" & set "PT_SU_BAK="
+set "PT_SU_SIG=" & set "PT_SU_SIGIN="
 exit /b %_swrc%
 
 :RequireBundledFile
 rem %1 = filename beside PerfTweaks.cmd   %2 = short description for messages/log
+rem  Returns 0 = present and non-empty, 1 = missing or empty. The CALLER owns the abort.
+rem  It must NOT jump to a menu: cmd pops a call frame on "goto :eof" / "exit /b" and never
+rem  on a bare goto, so a "goto MenuApps" here left the frame pending and the next "exit /b"
+rem  returned into it instead of ending the script - Exit stopped meaning exit. Returning a
+rem  status is also what would let a preset depend on this without being stranded part-way.
+rem  Callers must check errorlevel; test 105 asserts they do.
 set "_bundled=%SCRIPT_DIR%%~1"
 set "_bundled_sz="
 if exist "%_bundled%" for %%F in ("%_bundled%") do set "_bundled_sz=%%~zF"
-if exist "%_bundled%" if defined _bundled_sz if not "!_bundled_sz!"=="0" goto :eof
+if exist "%_bundled%" if defined _bundled_sz if not "!_bundled_sz!"=="0" exit /b 0
 echo.
 if not exist "%_bundled%" (
     echo [ERROR] Bundled file not found: %~1
@@ -2218,7 +2792,7 @@ echo   Fix: copy %~1 into the same folder as PerfTweaks.cmd, then run this optio
 echo        It is listed under "Optional bundled files" in the Sincript README.
 call :Log "ABORT: missing/empty bundled %~1 (%~2)"
 pause
-goto MenuApps
+exit /b 1
 
 :DetectUnityJobWorkers
 rem Sets _JWCOUNT and _CORESRC. Logical processors (threads) - 1 when detectable; else prompt.
@@ -2228,9 +2802,12 @@ set "_CORESRC="
 set "_LOGI=0"
 rem  Run PowerShell in a SEPARATE minimized window (keeps this console's font intact),
 rem  write the logical-processor (thread) count to a temp file, then read it back.
-start "" /min /wait powershell -NoProfile -Command "try{$s=(Get-CimInstance Win32_Processor|Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum;if(-not $s){$s=0}}catch{$s=0}; $s | Out-File -FilePath (Join-Path $env:TEMP 'pt_cores.txt') -Encoding ASCII"
-if exist "%TEMP%\pt_cores.txt" for /f "usebackq tokens=1 delims= " %%N in ("%TEMP%\pt_cores.txt") do set "_LOGI=%%N"
-del "%TEMP%\pt_cores.txt" >nul 2>&1
+set "_coresf=%TEMP%\pt_cores_%RANDOM%%RANDOM%.txt"
+set "PT_CORESF=%_coresf%"
+start "" /min /wait powershell -NoProfile -Command "try{$s=(Get-CimInstance Win32_Processor|Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum;if(-not $s){$s=0}}catch{$s=0}; $s | Out-File -FilePath $env:PT_CORESF -Encoding ASCII"
+set "PT_CORESF="
+if exist "!_coresf!" for /f "usebackq tokens=1 delims= " %%N in ("!_coresf!") do set "_LOGI=%%N"
+del "!_coresf!" >nul 2>&1
 if !_LOGI! gtr 0 (
     set /a "_JWCOUNT=!_LOGI!-1"
     set "_CORESRC=!_LOGI! logical processors"
@@ -2253,14 +2830,30 @@ echo [WARN] Could not detect CPU core count automatically.
 :DetectUnityJobWorkers_ask
 set "_in="
 set /p "_in=Enter job-worker count for Unity (usually logical CPUs minus 1, e.g. 7 for 8 threads): "
+if not defined _in call :NoInput || goto DetectUnityJobWorkers_giveup
 if not defined _in goto DetectUnityJobWorkers_ask
-echo !_in!| findstr /R "^[0-9][0-9]*$" >nul || (
+rem  No pipe. This is typed input, and cmd builds a piped child's command line from the
+rem  already-expanded text, so "7&some-command" ran the command and left findstr looking at
+rem  a clean "7" - it validated AND executed. "for /f delims=" keeps the value quoted in
+rem  this shell and yields a token only if some character is not a digit.
+set "_inbad="
+for /f "delims=0123456789" %%X in ("!_in!") do set "_inbad=1"
+if defined _inbad (
     echo [ERROR] Enter a whole number between 1 and 32.
     goto DetectUnityJobWorkers_ask
 )
 set "_JWCOUNT=!_in!"
 set "_CORESRC=user specified"
 goto DetectUnityJobWorkers_clamp
+
+:DetectUnityJobWorkers_giveup
+rem  Reached only when stdin is exhausted. This routine is CALLED, so it must NOT goto a menu
+rem  the way the menu-level prompts do - that would leave cmd's call stack one frame deep and
+rem  make a later "exit /b" resume here instead of exiting (the :RequireBundledFile bug, test
+rem  105). It returns a safe default instead; :UnityBoot's own path prompt then finds nothing
+rem  to read either and unwinds the action normally.
+set "_JWCOUNT=1"
+set "_CORESRC=no input available - defaulted to 1"
 
 :DetectUnityJobWorkers_clamp
 if !_JWCOUNT! lss 1 set "_JWCOUNT=1"
@@ -2290,6 +2883,13 @@ rem ============================================================================
 :MenuTools
 cls
 call :Logo
+rem  PT_PE_SCOPE steers which hive the PATH worker reads and WRITES (HKLM vs HKCU). It is
+rem  the only PT_* variable that was never cleared after use - every other worker clears its
+rem  own (see :StartupWorker, :PathWorker, :LockWorker) - so it survived in the environment
+rem  for the rest of the session and was inherited by every child process sincript spawned.
+rem  Clearing it on the way IN to the menu means the PATH editor can only ever act on a scope
+rem  chosen this visit, rather than one left over from the last one.
+set "PT_PE_SCOPE="
 echo =============================  SYSTEM TOOLS  ======================================
 echo  General-purpose tools, not tweaks. Both are read-first and reversible.
 echo     1.  Edit PATH (System / User environment variable)
@@ -2300,6 +2900,7 @@ echo ===========================================================================
 :MenuTools_ask
 set "sel="
 set /p "sel=Choose: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto MenuTools_ask
 if "%sel%"=="1" goto PathEditor
 if "%sel%"=="2" goto LockFinder
@@ -2373,6 +2974,7 @@ echo     D.  Remove all dead ^(missing^) entries      C.  Clean duplicate entrie
 echo     0.  Back
 set "_pea="
 set /p "_pea=Choose: "
+if not defined _pea call :NoInput || goto ExitScript
 if not defined _pea goto PathEditor_ask
 if /i "%_pea%"=="0" goto MenuTools
 if /i "%_pea%"=="A" goto PathEditor_add
@@ -2398,6 +3000,10 @@ if not defined _prm goto PathEditor_ask
 if "%_prm%"=="0" goto PathEditor_ask
 set "_pok="
 for /l %%I in (1,1,%_pen%) do if "%_prm%"=="%%I" set "_pok=1"
+rem  Guarded like the prompts even though EOF escapes this cycle earlier (an empty _prm goes
+rem  to :PathEditor_ask, which is guarded). Keeping the rule uniform means the invariant is
+rem  "every backward jump's cycle passes through a guard" with no exceptions to remember.
+if not defined _pok call :NoInput || goto ExitScript
 if not defined _pok goto PathEditor_remove
 echo.
 echo  About to remove:  !_penm[%_prm%]!
@@ -2543,6 +3149,7 @@ echo  the only safe way to release a file they hold.
 echo.
 set "_lfk="
 set /p "_lfk=Number to close (0 = back): "
+if not defined _lfk call :NoInput || goto ExitScript
 if not defined _lfk goto LockFinder_ask
 if "%_lfk%"=="0" goto MenuTools
 set "_lok="
@@ -2666,47 +3273,32 @@ rem ============================================================================
 rem  Sets SYSDISK=ssd|hdd|unknown, and caches it - the "if defined SYSDISK" guard below is
 rem  what keeps this to ONE probe per session no matter how many callers there are.
 rem
-rem  It used to be probed lazily right before the SysMain prompt, on the reasoning that no
-rem  run should pay a PowerShell launch for a question most runs never ask. That reasoning
-rem  expired when the disk type moved onto the main-menu header: every session now displays
-rem  it, so every session needs it, and deferring only moved the same cost later. MACHINE
-rem  stays a pure reg query and is still resolved at startup; this one costs one minimized
-rem  PowerShell window on the first menu draw.
-rem
 rem  Asks the disk directly, via IOCTL_STORAGE_QUERY_PROPERTY with
-rem  StorageDeviceSeekPenaltyProperty - "does this device incur a seek penalty?" is
-rem  literally the SSD-vs-spinning question, and it is what Windows itself uses. The
-rem  volume is opened with 0 access (query only, no read rights, no elevation needed).
+rem  StorageDeviceSeekPenaltyProperty - "does this device incur a seek penalty?" IS the
+rem  SSD-vs-spinning question, and it is what Windows itself uses. The volume is opened with
+rem  0 access (query only, no read rights, no elevation).
 rem
-rem  It does NOT go through Get-PhysicalDisk / Get-Partition, and that is the whole
-rem  point. Those live in the root\Microsoft\Windows\Storage CIM namespace, and per
-rem  Microsoft they enumerate "across any available Storage Management Providers" - so
-rem  ONE broken vendor storage provider makes every cmdlet in that namespace throw. That
-rem  is not hypothetical: on a test machine (HP Omen, NVMe SSD) Get-Partition,
-rem  Get-PhysicalDisk and even raw Get-CimInstance MSFT_PhysicalDisk all failed with
-rem  CimException "Invalid property", while this IOCTL answered correctly and instantly.
-rem  OEM laptops ship those providers as standard, so this is a common case, not an edge.
+rem  Do NOT "simplify" this to Get-PhysicalDisk / Get-Partition. Those live in the
+rem  root\Microsoft\Windows\Storage CIM namespace, which enumerates across any available
+rem  Storage Management Provider - so ONE broken vendor provider makes every cmdlet in the
+rem  namespace throw. Not hypothetical: on an HP Omen with an NVMe SSD, Get-Partition,
+rem  Get-PhysicalDisk and raw Get-CimInstance MSFT_PhysicalDisk all failed with CimException
+rem  "Invalid property" while this IOCTL answered instantly. OEM laptops ship those
+rem  providers as standard.
 rem
-rem  Failure stays safe: if the device cannot answer, SYSDISK stays "unknown" and the
-rem  advisory this feeds is warning-only - a miss costs a hint, never a changed default
-rem  or a blocked action.
+rem  Failure stays safe: an unanswerable device leaves SYSDISK "unknown", and the advisory it
+rem  feeds is warning-only - a miss costs a hint, never a default or a blocked action.
 if defined SYSDISK goto :eof
 set "SYSDISK=unknown"
 rem  ---- tier 1: the answer this machine already gave, if the hardware has not changed ----
-rem  The probe below is correct but not cheap, and the expensive part is NOT the IOCTL - that
-rem  is microseconds. It is "Add-Type -Language CSharp", which spawns the C# compiler at
-rem  runtime to build the P/Invoke shim, and that costs a second or two on a cold run. Moving
-rem  the disk type onto the main-menu header made every session pay it before the menu drew.
-rem
-rem  Switching to a faster detector is not the fix: the fast ones are Get-PhysicalDisk /
-rem  Get-Partition, and those are exactly what this routine exists to avoid, because one
-rem  broken vendor storage provider takes the whole Storage namespace down with it. So keep
-rem  the trusted probe and run it once per MACHINE instead of once per session.
-rem
-rem  The cache is keyed on disk 0's device instance path (a plain reg query, instant, and the
-rem  same string in every locale). It is not necessarily the system disk - it does not need to
-rem  be. It only has to CHANGE when the storage hardware changes, which is exactly what makes
-rem  a stale cached answer impossible to keep. Delete the file to force a fresh probe.
+rem  The expensive part of the probe is not the IOCTL (microseconds) but "Add-Type -Language
+rem  CSharp", which spawns the C# compiler to build the P/Invoke shim - a second or two cold,
+rem  paid before the menu draws. The fast alternatives are exactly the ones this routine
+rem  exists to avoid, so keep the trusted probe and run it once per MACHINE instead.
+rem  The cache is keyed on disk 0's device instance path: a plain reg query, instant, same
+rem  string in every locale. It need not be the system disk - it only has to CHANGE when the
+rem  storage hardware does, which is what makes a stale answer impossible to keep. Delete the
+rem  file to force a fresh probe.
 set "_sdkey="
 for /f "tokens=2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\disk\Enum" /v 0 2^>nul ^| findstr /I /C:"REG_SZ"') do set "_sdkey=%%B"
 set "_sddir=%LOCALAPPDATA%\Sincript"
@@ -2900,14 +3492,19 @@ rem ============================================================================
 :FreeSpaceSnap
 set "_FREE_BYTES="
 set "_FREE_HUMAN="
-del "%TEMP%\pt_free.txt" >nul 2>&1
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $letter=if($env:SystemDrive){$env:SystemDrive.Substring(0,1)}else{'C'}; $d=Get-CimInstance Win32_LogicalDisk -Filter ('DeviceID='''+$letter+':'''); if(-not $d -or $null -eq $d.FreeSpace){exit 1}; $b=[int64]$d.FreeSpace; $t=[int64]$d.Size; $line=('{0}|{1:N1} GB free of {2:N1} GB on {3}:' -f $b,($b/1GB),($t/1GB),$letter); $line | Out-File (Join-Path $env:TEMP 'pt_free.txt') -Encoding ASCII"
-if not exist "%TEMP%\pt_free.txt" goto :eof
-for /f "usebackq tokens=1,* delims=|" %%A in ("%TEMP%\pt_free.txt") do (
+rem  Per-call name: this routine runs at least twice per cleanup (before and after), and a
+rem  second sincript window doing its own cleanup would otherwise share the same file - the
+rem  "freed N MB" line would then be measured against the other window's snapshot.
+set "_freef=%TEMP%\pt_free_%RANDOM%%RANDOM%.txt"
+set "PT_FREEF=%_freef%"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $letter=if($env:SystemDrive){$env:SystemDrive.Substring(0,1)}else{'C'}; $d=Get-CimInstance Win32_LogicalDisk -Filter ('DeviceID='''+$letter+':'''); if(-not $d -or $null -eq $d.FreeSpace){exit 1}; $b=[int64]$d.FreeSpace; $t=[int64]$d.Size; $line=('{0}|{1:N1} GB free of {2:N1} GB on {3}:' -f $b,($b/1GB),($t/1GB),$letter); $line | Out-File -FilePath $env:PT_FREEF -Encoding ASCII"
+set "PT_FREEF="
+if not exist "%_freef%" goto :eof
+for /f "usebackq tokens=1,* delims=|" %%A in ("%_freef%") do (
     set "_FREE_BYTES=%%A"
     set "_FREE_HUMAN=%%B"
 )
-del "%TEMP%\pt_free.txt" >nul 2>&1
+del "%_freef%" >nul 2>&1
 goto :eof
 rem  HELPER: print free-space delta from _FREE_BEFORE / _FREE_AFTER byte strings
 rem =====================================================================================
@@ -2916,12 +3513,13 @@ if not defined _FREE_BEFORE goto _fsFail
 if not defined _FREE_AFTER goto _fsFail
 set "PT_FB=%_FREE_BEFORE%"
 set "PT_FA=%_FREE_AFTER%"
-del "%TEMP%\pt_freed.txt" >nul 2>&1
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='Stop'; try{ $b=[int64]$env:PT_FB; $a=[int64]$env:PT_FA; $d=$a-$b; if($d -ge 1048576){ $s='  [Disk] Freed about '+[math]::Round($d/1MB,1)+' MB  now '+[math]::Round($a/1GB,1)+' GB free.' } elseif($d -le -1048576){ $s='  [Disk] Free space dropped about '+[math]::Round((-$d)/1MB,1)+' MB  other activity; now '+[math]::Round($a/1GB,1)+' GB free.' } else { $s='  [Disk] No measurable change  now '+[math]::Round($a/1GB,1)+' GB free.' }; $s | Out-File (Join-Path $env:TEMP 'pt_freed.txt') -Encoding ASCII }catch{ exit 1 }"
-set "PT_FB=" & set "PT_FA="
-if exist "%TEMP%\pt_freed.txt" (
-    type "%TEMP%\pt_freed.txt"
-    del "%TEMP%\pt_freed.txt" >nul 2>&1
+set "_freedf=%TEMP%\pt_freed_%RANDOM%%RANDOM%.txt"
+set "PT_FREEDF=%_freedf%"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='Stop'; try{ $b=[int64]$env:PT_FB; $a=[int64]$env:PT_FA; $d=$a-$b; if($d -ge 1048576){ $s='  [Disk] Freed about '+[math]::Round($d/1MB,1)+' MB  now '+[math]::Round($a/1GB,1)+' GB free.' } elseif($d -le -1048576){ $s='  [Disk] Free space dropped about '+[math]::Round((-$d)/1MB,1)+' MB  other activity; now '+[math]::Round($a/1GB,1)+' GB free.' } else { $s='  [Disk] No measurable change  now '+[math]::Round($a/1GB,1)+' GB free.' }; $s | Out-File -FilePath $env:PT_FREEDF -Encoding ASCII }catch{ exit 1 }"
+set "PT_FB=" & set "PT_FA=" & set "PT_FREEDF="
+if exist "%_freedf%" (
+    type "%_freedf%"
+    del "%_freedf%" >nul 2>&1
 ) else (
     echo   [Disk] Could not measure free-space change.
 )
@@ -3117,9 +3715,26 @@ if /i "!_type!"=="REG_SZ" goto _sraIdemSz
 goto _sraDoWrite
 
 :_sraIdemDword
+rem  set /a is 32-bit SIGNED, and when it dereferences a variable holding a number that does
+rem  not fit it SATURATES to 2147483647 rather than erroring (verified: a literal errors, a
+rem  variable saturates). Both sides go through a variable here, so any two values at or above
+rem  2^31 compare EQUAL - today that is harmless, because the one such tweak
+rem  (NetworkThrottlingIndex = 0xffffffff) only ever meets "unset", a small number, or itself.
+rem  It would stop being harmless the moment a second large DWORD is added: a real difference
+rem  would read as "already set" and the write would be skipped silently.
+rem  So when BOTH sides saturate, fall back to comparing the raw tokens as text. Large values
+rem  are therefore written as 0x hex at the call site, which reg add accepts (verified) and
+rem  which matches what reg query returns. If someone writes a large DECIMAL instead, the text
+rem  comparison simply fails to match and the value is re-written - a redundant write, never a
+rem  false skip, which is the right way for this to degrade.
 for %%a in (!_ln!) do set "_curtok=%%a"
 set /a _curdec=_curtok 2>nul
 set /a _tgtdec=_data 2>nul
+if "!_curdec!"=="2147483647" if "!_tgtdec!"=="2147483647" (
+    if /i not "!_curtok!"=="!_data!" goto _sraDoWrite
+    echo   [SKIP] !_desc! - already set.
+    endlocal & goto :eof
+)
 if not "!_curdec!"=="!_tgtdec!" goto _sraDoWrite
 echo   [SKIP] !_desc! - already set.
 endlocal & goto :eof
@@ -3243,7 +3858,7 @@ rem  Non-ASCII value data can't survive the console-code-page echo into an ANSI 
 rem  (it would restore as mojibake). Detect it and decline honestly below - the full
 rem  reg export handles non-ASCII correctly. DWORD data is numeric, so this never trips it.
 set "_naData="
-if defined _rd echo(!_rd!| findstr /r "[^ -~]" >nul && set "_naData=1"
+if defined _rd call :NonAsciiCheck
 if /i "!_rt!"=="REG_DWORD" (
     set "_hx=0000000!_rd:~2!"
     >>"!_bkp!" echo "!_val!"=dword:!_hx:~-8!
@@ -3269,8 +3884,11 @@ goto :eof
 :CreateRestorePoint
 echo Creating a System Restore Point (may take a moment)...
 call :Log "Creating restore point"
-start "" /min /wait powershell -NoProfile -Command "& { try { Enable-ComputerRestore -Drive '%SystemDrive%\' -ErrorAction SilentlyContinue; Checkpoint-Computer -Description 'PerfTweaks' -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop; 'Restore point created.' } catch { 'Restore point failed (System Protection off, or one was made in the last 24h): ' + $_.Exception.Message } } | Out-File -FilePath (Join-Path $env:TEMP 'pt_rp.txt') -Encoding ASCII"
-if exist "%TEMP%\pt_rp.txt" ( type "%TEMP%\pt_rp.txt" & del "%TEMP%\pt_rp.txt" >nul 2>&1 )
+set "_rpf=%TEMP%\pt_rp_%RANDOM%%RANDOM%.txt"
+set "PT_RPF=%_rpf%"
+start "" /min /wait powershell -NoProfile -Command "& { try { Enable-ComputerRestore -Drive '%SystemDrive%\' -ErrorAction SilentlyContinue; Checkpoint-Computer -Description 'PerfTweaks' -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop; 'Restore point created.' } catch { 'Restore point failed (System Protection off, or one was made in the last 24h): ' + $_.Exception.Message } } | Out-File -FilePath $env:PT_RPF -Encoding ASCII"
+set "PT_RPF="
+if exist "%_rpf%" ( type "%_rpf%" & del "%_rpf%" >nul 2>&1 )
 goto :eof
 
 :CreateRegBackup
@@ -3401,6 +4019,7 @@ echo ===========================================================================
 :MenuPresets_ask
 set "sel="
 set /p "sel=Choose: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto MenuPresets_ask
 if "%sel%"=="1" goto PresetLight
 if "%sel%"=="2" goto PresetModerate
@@ -3414,6 +4033,11 @@ rem ---------- preset capture helpers ----------
 rem %1 = preset label used in the backup filename
 set "_pname=%~1"
 set "_PWBAK_FILE="
+rem  Start every preset from the documented default plan. _PWPLAN is a session global the
+rem  Power menu also writes, so without this a visit to menu 4 decided which plan a later
+rem  preset activated. A preset must be a function of its own definition. :PresetCustom
+rem  re-sets it from _P_PWPLAN afterwards, so an explicit power_plan= key still wins.
+set "_PWPLAN="
 rem  Reset the failure tally so each preset's :Summary reflects only THIS preset's registry writes.
 rem  (Not tracking _RUNTRACK here: presets also run cleanup deletes, whose failures are benign.)
 set "_FAILS=0"
@@ -3495,7 +4119,7 @@ call :SafeRegAdd "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\S
 goto :eof
 
 :DoNetThrottleOff
-call :SafeRegAdd "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" "NetworkThrottlingIndex" REG_DWORD 4294967295 "Network throttling off"
+call :SafeRegAdd "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" "NetworkThrottlingIndex" REG_DWORD 0xffffffff "Network throttling off"
 goto :eof
 
 :DoWin32_42
@@ -3583,8 +4207,10 @@ if errorlevel 1 (
 goto :eof
 
 :DoGpuTelemetryOff
-if /i "%GPU%"=="amd" call :SafeRegAdd "HKLM\SOFTWARE\AMD\CN" "UserExperienceProgram" REG_DWORD 0 "AMD User Experience Program opt-out"
-if /i not "%GPU%"=="nvidia" goto :eof
+rem  Branch on the per-vendor flags, not on the single GPU word: a machine with both gets
+rem  BOTH applied instead of whichever probe happened to write GPU last.
+if defined GPU_AMD call :SafeRegAdd "HKLM\SOFTWARE\AMD\CN" "UserExperienceProgram" REG_DWORD 0 "AMD User Experience Program opt-out"
+if not defined GPU_NV goto :eof
 call :DisableNvidiaTelemetryTasks
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm\Global\Startup" "SendTelemetryData" REG_DWORD 0 "NVIDIA telemetry off"
 call :SafeRegAdd "HKLM\SOFTWARE\NVIDIA Corporation\NvControlPanel2\Client" "OptInOrOutPreference" REG_DWORD 0 "NVIDIA opt-out"
@@ -3606,19 +4232,25 @@ if exist "%SCRIPT_DIR%app.asar" set "_SRC=%SCRIPT_DIR%app.asar"
 if defined _SRC goto _oasInstall
 echo   ^> OpenAsar: no bundled app.asar found - downloading the latest nightly...
 call :Log "PRESET OpenAsar: downloading nightly"
-set "PT_OA=%TEMP%\openasar_nightly.asar"
-del "%PT_OA%" >nul 2>&1
+set "_OADL=%TEMP%\openasar_nightly_%RANDOM%%RANDOM%.asar"
+set "PT_OA=%_OADL%"
 start "" /min /wait powershell -NoProfile -Command "try{Invoke-WebRequest -Uri 'https://github.com/GooseMod/OpenAsar/releases/download/nightly/app.asar' -OutFile $env:PT_OA -UseBasicParsing}catch{exit 1}"
-rem  Same partial-download guard as the interactive path: exit code first, then existence.
-if errorlevel 1 del "%PT_OA%" >nul 2>&1
-if not exist "%PT_OA%" (
-    echo [ERROR] OpenAsar download failed - skipping. Put app.asar next to the script and retry.
-    call :Log "PRESET OpenAsar: download failed"
-    set "PT_OA="
-    goto :eof
-)
-set "_SRC=%PT_OA%"
+rem  Same partial-download guard as the interactive path, and the same fix: capture the exit
+rem  code BEFORE the del, because del resets errorlevel and the old "if errorlevel 1" that
+rem  followed it could never fire.
+set "_dlrc=%errorlevel%"
 set "PT_OA="
+if not "%_dlrc%"=="0" del "%_OADL%" >nul 2>&1
+if not "%_dlrc%"=="0" goto _oasDlFail
+if not exist "%_OADL%" goto _oasDlFail
+set "_SRC=%_OADL%"
+goto _oasInstall
+
+:_oasDlFail
+echo [ERROR] OpenAsar download failed - skipping. Put app.asar next to the script and retry.
+call :Log "PRESET OpenAsar: download failed"
+set "_OADL="
+goto :eof
 
 :_oasInstall
 echo   ^> Installing OpenAsar into Discord (closing Discord first)...
@@ -3626,14 +4258,54 @@ call :Log "PRESET OpenAsar install from !_SRC!"
 taskkill /f /im Discord.exe       >nul 2>&1
 taskkill /f /im DiscordPTB.exe    >nul 2>&1
 taskkill /f /im DiscordCanary.exe >nul 2>&1
-timeout /t 2 >nul
+timeout /t 2 >nul 2>&1
 set "_DONE=0"
 set "_OAFAIL=0"
 for %%F in (Discord DiscordPTB DiscordCanary) do if exist "%LocalAppData%\%%F\" call :InstallAsarInto "%LocalAppData%\%%F" "%%F" "!_SRC!"
-if exist "%TEMP%\openasar_nightly.asar" del /f /q "%TEMP%\openasar_nightly.asar" >nul 2>&1
+if defined _OADL if exist "%_OADL%" del /f /q "%_OADL%" >nul 2>&1
+set "_OADL="
 if "%_DONE%"=="0" echo [SKIP] OpenAsar: no Discord install with a resources\app.asar found.
 if not "%_OAFAIL%"=="0" echo   [WARN] %_OAFAIL% Discord install^(s^) could NOT be updated - see above.
 if exist "%LocalAppData%\Discord\Update.exe" start "" "%LocalAppData%\Discord\Update.exe" --processStart Discord.exe
+goto :eof
+rem =====================================================================================
+rem  PRESET BODIES - what each built-in preset actually APPLIES, with no prompts, no
+rem  screens and no backup bookkeeping. Split out so the interactive menu and the
+rem  /preset: command line run the SAME set of tweaks: two copies of these lists would
+rem  drift the moment one preset gained a tweak, and the drift would be invisible - both
+rem  paths would still say "HEAVY preset applied." Test 114 asserts they stay shared.
+rem  Callers own :PresetBegin / :PresetEnd / :Summary and any DNS choice.
+rem =====================================================================================
+:PresetBodyLight
+call :DoCleanupCore
+call :DoPrivacyCore
+call :DoNetworkCore
+goto :eof
+
+:PresetBodyModerate
+call :DoCleanupCore
+call :DoPrivacyCore
+call :DoPerformanceCore
+call :DoPowerCore
+call :DoNetworkCore
+goto :eof
+
+:PresetBodyHeavy
+call :DoCleanupCore
+call :DoPrivacyCore
+call :DoPerformanceCore
+call :DoPowerCore
+call :DoNetworkCore
+call :DoSysResp0
+call :DoNetThrottleOff
+call :DoWin32_42
+call :DoGameModeOff
+call :DoNagleOff
+call :DoIpv6Off
+call :DoNvmeFlags
+call :DoGpuTelemetryOff
+call :DoBcdTimers
+call :DoMemCompressOff
 goto :eof
 rem =====================================================================================
 rem  PRESET: LIGHT
@@ -3650,14 +4322,12 @@ set /p "_c=Apply the LIGHT preset? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuPresets
 call :PresetBegin light
 if errorlevel 1 goto MenuPresets
-call :DoCleanupCore
-call :DoPrivacyCore
-call :DoNetworkCore
+call :PresetBodyLight
 call :PresetDnsChoice
 call :PresetEnd
 echo.
 call :Summary "LIGHT preset applied."
-echo      Registry backup: %PRESET_LAST%
+echo      Registry backup: !PRESET_LAST!
 echo      Reboot recommended.
 pause
 goto MenuPresets
@@ -3681,15 +4351,11 @@ set /p "_c=Apply the MODERATE preset? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuPresets
 call :PresetBegin moderate
 if errorlevel 1 goto MenuPresets
-call :DoCleanupCore
-call :DoPrivacyCore
-call :DoPerformanceCore
-call :DoPowerCore
-call :DoNetworkCore
+call :PresetBodyModerate
 call :PresetEnd
 echo.
 call :Summary "MODERATE preset applied."
-echo      Registry backup: %PRESET_LAST%
+echo      Registry backup: !PRESET_LAST!
 echo.
 set "_oa="
 set /p "_oa=Also install OpenAsar into Discord now? (Y/N): "
@@ -3722,26 +4388,12 @@ set /p "_c=Apply the HEAVY preset? (Y/N): "
 if /i not "%_c%"=="Y" goto MenuPresets
 call :PresetBegin heavy
 if errorlevel 1 goto MenuPresets
-call :DoCleanupCore
-call :DoPrivacyCore
-call :DoPerformanceCore
-call :DoPowerCore
-call :DoNetworkCore
-call :DoSysResp0
-call :DoNetThrottleOff
-call :DoWin32_42
-call :DoGameModeOff
-call :DoNagleOff
-call :DoIpv6Off
-call :DoNvmeFlags
-call :DoGpuTelemetryOff
-call :DoBcdTimers
-call :DoMemCompressOff
+call :PresetBodyHeavy
 call :PresetDnsChoice
 call :PresetEnd
 echo.
 call :Summary "HEAVY preset applied."
-echo      Registry backup: %PRESET_LAST%
+echo      Registry backup: !PRESET_LAST!
 echo      REBOOT required for the timer / IPv6 / memory-compression changes to take hold.
 echo.
 echo  Tip: to also enable a higher timer resolution, use  Apps ^& files ^> Apply timer
@@ -3788,6 +4440,7 @@ echo ===========================================================================
 :PresetCustom_ask
 set "sel="
 set /p "sel=Choose a preset file: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto PresetCustom_ask
 if "%sel%"=="0" goto MenuPresets
 set "_pfile="
@@ -3803,8 +4456,18 @@ set "_perr=0"
 set "_pgood=0"
 set "_perrfile=%TEMP%\sincript_preset_err_%RANDOM%.txt"
 break>"%_perrfile%"
-for %%K in (CLEANUP PRIVACY PERFORMANCE POWER NETWORK OPENASAR GAMEMODE GAMEBAR EDGE SYSRESP NETTHROTTLE LARGECACHE MINPROC BCDTIMERS IPV6 MEMCOMPRESS NVME GPUTEL NAGLE WIN32 DNS) do set "_P_%%K="
-for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%_pfile%") do call :PresetCheckLine "%%A" "%%B"
+rem  EVERY directive the validators can set must be listed here. These are plain globals, so
+rem  a directive left defined by one custom preset is silently applied by the next one in the
+rem  same session. Keep in sync with :PresetCheckLine - test 102 derives the list and asserts.
+for %%K in (CLEANUP PRIVACY PERFORMANCE POWER PWTIMEOUTS PWPLAN NETWORK OPENASAR GAMEMODE GAMEBAR EDGE ONEDRIVE SYSRESP NETTHROTTLE LARGECACHE MINPROC BCDTIMERS IPV6 MEMCOMPRESS NVME GPUTEL NAGLE WIN32 DNS) do set "_P_%%K="
+rem  _k / _v are assigned from the FOR variables, not passed as call arguments. For-variables
+rem  are substituted after the line is parsed, so a stray " or ) in the user's file stays data;
+rem  routing the same text through call arguments would put it back into parse-time expansion.
+for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%_pfile%") do (
+    set "_k=%%A"
+    set "_v=%%B"
+    call :PresetCheckLine
+)
 cls
 call :Logo
 echo ===============================  CUSTOM PRESET  ===================================
@@ -3835,6 +4498,19 @@ set /p "_rp=Create a System Restore Point first? (Y/N): "
 if /i "%_rp%"=="Y" call :CreateRestorePoint
 call :PresetBegin custom_%_pbase%
 if errorlevel 1 goto MenuPresets
+call :PresetApplyDirectives
+call :PresetEnd
+echo.
+call :Summary "Custom preset applied."
+echo      Registry backup: !PRESET_LAST!
+echo      Reboot recommended.
+pause
+goto MenuPresets
+
+:PresetApplyDirectives
+rem  Applies whatever _P_* directives the validator recorded. Split out of :_pcReady so the
+rem  /preset: command line runs the identical list instead of a second copy of it - see the
+rem  note on the preset bodies above. Caller owns :PresetBegin / :PresetEnd / :Summary.
 if defined _P_CLEANUP     call :DoCleanupCore
 if defined _P_PRIVACY     call :DoPrivacyCore
 if defined _P_PERFORMANCE call :DoPerformanceCore
@@ -3866,69 +4542,68 @@ if defined _P_BCDTIMERS   call :DoBcdTimers
 if defined _P_MEMCOMPRESS call :DoMemCompressOff
 if defined _P_OPENASAR    call :DoOpenAsarSilent
 if defined _P_DNS         call :PresetDnsByName "%_P_DNS%"
-call :PresetEnd
-echo.
-call :Summary "Custom preset applied."
-echo      Registry backup: %PRESET_LAST%
-echo      Reboot recommended.
-pause
-goto MenuPresets
+goto :eof
 
 :PresetCheckLine
-rem %1 = key   %2 = value   (validates + records a directive; logs problems)
-set "_k=%~1"
-set "_v=%~2"
+rem  Reads !_k! / !_v!, set by the caller's for-loop. Takes NO arguments, on purpose.
+rem  This validates a file the USER wrote, so surviving a malformed one is its whole job.
+rem  cmd resolves %_k% / %_v% at PARSE time, before it knows where a ( ) block ends, so an
+rem  unpaired " in a key or value killed the run with "was unexpected at this time". :PVok
+rem  and the :PChk* helpers therefore read !_v! from this scope rather than taking it as an
+rem  argument, and the caller assigns _k / _v from for-variables (substituted after parsing).
 if not defined _k goto :eof
-if "%_k:~0,1%"==";" goto :eof
+if "!_k:~0,1!"==";" goto :eof
 if defined _v if "!_v:~-1!"==" " set "_v=!_v:~0,-1!"
 set "_match="
-if /i "%_k%"=="cleanup"               ( set "_match=1" & call :PVok CLEANUP "%_v%" 1 )
-if /i "%_k%"=="privacy"               ( set "_match=1" & call :PVok PRIVACY "%_v%" 1 )
-if /i "%_k%"=="performance"           ( set "_match=1" & call :PVok PERFORMANCE "%_v%" 1 )
-if /i "%_k%"=="power"                 ( set "_match=1" & call :PVok POWER "%_v%" 1 )
-if /i "%_k%"=="power_timeouts"        ( set "_match=1" & call :PVok PWTIMEOUTS "%_v%" 1 )
-if /i "%_k%"=="network"               ( set "_match=1" & call :PVok NETWORK "%_v%" 1 )
-if /i "%_k%"=="openasar"              ( set "_match=1" & call :PVok OPENASAR "%_v%" 1 )
-if /i "%_k%"=="gamemode_off"          ( set "_match=1" & call :PVok GAMEMODE "%_v%" 1 )
-if /i "%_k%"=="gamebar_off"           ( set "_match=1" & call :PVok GAMEBAR "%_v%" 1 )
-if /i "%_k%"=="edge_nudges_off"       ( set "_match=1" & call :PVok EDGE "%_v%" 1 )
-if /i "%_k%"=="onedrive_off"         ( set "_match=1" & call :PVok ONEDRIVE "%_v%" 1 )
-if /i "%_k%"=="systemresponsiveness"  ( set "_match=1" & call :PVok SYSRESP "%_v%" 0 )
-if /i "%_k%"=="networkthrottling_off" ( set "_match=1" & call :PVok NETTHROTTLE "%_v%" 1 )
-if /i "%_k%"=="largesystemcache"      ( set "_match=1" & call :PVok LARGECACHE "%_v%" 1 )
-if /i "%_k%"=="minprocstate5"         ( set "_match=1" & call :PVok MINPROC "%_v%" 1 )
-if /i "%_k%"=="bcdtimers"             ( set "_match=1" & call :PVok BCDTIMERS "%_v%" 1 )
-if /i "%_k%"=="ipv6_off"              ( set "_match=1" & call :PVok IPV6 "%_v%" 1 )
-if /i "%_k%"=="memcompress_off"       ( set "_match=1" & call :PVok MEMCOMPRESS "%_v%" 1 )
-if /i "%_k%"=="nvme_flags"            ( set "_match=1" & call :PVok NVME "%_v%" 1 )
-if /i "%_k%"=="gpu_telemetry_off"     ( set "_match=1" & call :PVok GPUTEL "%_v%" 1 )
-if /i "%_k%"=="nagle_off"             ( set "_match=1" & call :PVok NAGLE "%_v%" 1 )
-if /i "%_k%"=="win32priority"         ( set "_match=1" & call :PChkWin32 "%_v%" )
-if /i "%_k%"=="dns"                   ( set "_match=1" & call :PChkDns "%_v%" )
-if /i "%_k%"=="power_plan"            ( set "_match=1" & call :PChkPlan "%_v%" )
-if not defined _match (
-    >>"%_perrfile%" echo   ignored - unknown key: %_k%
-    set /a _perr+=1
-)
+if /i "!_k!"=="cleanup"               ( set "_match=1" & call :PVok CLEANUP 1 )
+if /i "!_k!"=="privacy"               ( set "_match=1" & call :PVok PRIVACY 1 )
+if /i "!_k!"=="performance"           ( set "_match=1" & call :PVok PERFORMANCE 1 )
+if /i "!_k!"=="power"                 ( set "_match=1" & call :PVok POWER 1 )
+if /i "!_k!"=="power_timeouts"        ( set "_match=1" & call :PVok PWTIMEOUTS 1 )
+if /i "!_k!"=="network"               ( set "_match=1" & call :PVok NETWORK 1 )
+if /i "!_k!"=="openasar"              ( set "_match=1" & call :PVok OPENASAR 1 )
+if /i "!_k!"=="gamemode_off"          ( set "_match=1" & call :PVok GAMEMODE 1 )
+if /i "!_k!"=="gamebar_off"           ( set "_match=1" & call :PVok GAMEBAR 1 )
+if /i "!_k!"=="edge_nudges_off"       ( set "_match=1" & call :PVok EDGE 1 )
+if /i "!_k!"=="onedrive_off"          ( set "_match=1" & call :PVok ONEDRIVE 1 )
+if /i "!_k!"=="systemresponsiveness"  ( set "_match=1" & call :PVok SYSRESP 0 )
+if /i "!_k!"=="networkthrottling_off" ( set "_match=1" & call :PVok NETTHROTTLE 1 )
+if /i "!_k!"=="largesystemcache"      ( set "_match=1" & call :PVok LARGECACHE 1 )
+if /i "!_k!"=="minprocstate5"         ( set "_match=1" & call :PVok MINPROC 1 )
+if /i "!_k!"=="bcdtimers"             ( set "_match=1" & call :PVok BCDTIMERS 1 )
+if /i "!_k!"=="ipv6_off"              ( set "_match=1" & call :PVok IPV6 1 )
+if /i "!_k!"=="memcompress_off"       ( set "_match=1" & call :PVok MEMCOMPRESS 1 )
+if /i "!_k!"=="nvme_flags"            ( set "_match=1" & call :PVok NVME 1 )
+if /i "!_k!"=="gpu_telemetry_off"     ( set "_match=1" & call :PVok GPUTEL 1 )
+if /i "!_k!"=="nagle_off"             ( set "_match=1" & call :PVok NAGLE 1 )
+if /i "!_k!"=="win32priority"         ( set "_match=1" & call :PChkWin32 )
+if /i "!_k!"=="dns"                   ( set "_match=1" & call :PChkDns )
+if /i "!_k!"=="power_plan"            ( set "_match=1" & call :PChkPlan )
+if defined _match goto :eof
+>>"%_perrfile%" echo   ignored - unknown key: !_k!
+set /a _perr+=1
 goto :eof
 
 :PVok
-rem %1 = directive var name   %2 = value   %3 = expected value (1 or 0)
-if "%~2"=="%~3" (
-    set "_P_%~1=1"
-    set /a _pgood+=1
-) else (
-    >>"%_perrfile%" echo   bad value "%~2" for key %_k% ^(expected %~3^)
-    set /a _perr+=1
-)
+rem %1 = directive var name   %2 = expected value (1 or 0). Reads !_k! / !_v! from the caller.
+rem  Flat, not if/else: %~2 is this script's own literal, but !_v! is the user's text and must
+rem  never sit inside a ( ) block being echoed.
+if "!_v!"=="%~2" goto _pvOk
+>>"%_perrfile%" echo   bad value "!_v!" for key !_k! ^(expected %~2^)
+set /a _perr+=1
+goto :eof
+
+:_pvOk
+set "_P_%~1=1"
+set /a _pgood+=1
 goto :eof
 
 :PChkWin32
-if "%~1"=="42" ( set "_P_WIN32=42" & set /a _pgood+=1 & goto :eof )
-if "%~1"=="38" ( set "_P_WIN32=38" & set /a _pgood+=1 & goto :eof )
-if "%~1"=="26" ( set "_P_WIN32=26" & set /a _pgood+=1 & goto :eof )
-if "%~1"=="2"  ( set "_P_WIN32=2"  & set /a _pgood+=1 & goto :eof )
->>"%_perrfile%" echo   bad value "%~1" for key win32priority (use 42, 38, 26 or 2)
+if "!_v!"=="42" ( set "_P_WIN32=42" & set /a _pgood+=1 & goto :eof )
+if "!_v!"=="38" ( set "_P_WIN32=38" & set /a _pgood+=1 & goto :eof )
+if "!_v!"=="26" ( set "_P_WIN32=26" & set /a _pgood+=1 & goto :eof )
+if "!_v!"=="2"  ( set "_P_WIN32=2"  & set /a _pgood+=1 & goto :eof )
+>>"%_perrfile%" echo   bad value "!_v!" for key win32priority (use 42, 38, 26 or 2)
 set /a _perr+=1
 goto :eof
 
@@ -3936,23 +4611,24 @@ goto :eof
 rem  Explicit plan choice for custom presets. Without it, power=1 means Ultimate, which is
 rem  a workstation plan Windows hides on battery-powered machines - fine on a desktop, and
 rem  the thing to override on a laptop, especially one running an undervolt.
-if /i "%~1"=="ultimate" ( set "_P_PWPLAN=ultimate" & set /a _pgood+=1 & goto :eof )
-if /i "%~1"=="high"     ( set "_P_PWPLAN=high"     & set /a _pgood+=1 & goto :eof )
-if /i "%~1"=="balanced" ( set "_P_PWPLAN=balanced" & set /a _pgood+=1 & goto :eof )
->>"%_perrfile%" echo   bad value "%~1" for key power_plan (use ultimate, high or balanced)
+if /i "!_v!"=="ultimate" ( set "_P_PWPLAN=ultimate" & set /a _pgood+=1 & goto :eof )
+if /i "!_v!"=="high"     ( set "_P_PWPLAN=high"     & set /a _pgood+=1 & goto :eof )
+if /i "!_v!"=="balanced" ( set "_P_PWPLAN=balanced" & set /a _pgood+=1 & goto :eof )
+>>"%_perrfile%" echo   bad value "!_v!" for key power_plan (use ultimate, high or balanced)
 set /a _perr+=1
 goto :eof
 
 :PChkDns
-if /i "%~1"=="cloudflare" ( set "_P_DNS=cloudflare" & set /a _pgood+=1 & goto :eof )
-if /i "%~1"=="google"     ( set "_P_DNS=google"     & set /a _pgood+=1 & goto :eof )
-if /i "%~1"=="quad9"      ( set "_P_DNS=quad9"      & set /a _pgood+=1 & goto :eof )
+if /i "!_v!"=="cloudflare" ( set "_P_DNS=cloudflare" & set /a _pgood+=1 & goto :eof )
+if /i "!_v!"=="google"     ( set "_P_DNS=google"     & set /a _pgood+=1 & goto :eof )
+if /i "!_v!"=="quad9"      ( set "_P_DNS=quad9"      & set /a _pgood+=1 & goto :eof )
 rem  Also accept a literal IPv4, so an unattended preset can point at a router or Pi-hole
 rem  instead of only the three bundled providers. Same validator the interactive screen
-rem  uses, so a preset cannot smuggle in something the menu would have rejected.
-set "_IPCHK=%~1"
-call :_ip4_ok && ( set "_P_DNS=%~1" & set /a _pgood+=1 & goto :eof )
->>"%_perrfile%" echo   bad value "%~1" for key dns (use cloudflare, google, quad9 or an IPv4 address)
+rem  uses, so a preset cannot smuggle in something the menu would have rejected - and by the
+rem  time _P_DNS is set the value has passed it, so it holds nothing but digits and dots.
+set "_IPCHK=!_v!"
+call :_ip4_ok && ( set "_P_DNS=!_v!" & set /a _pgood+=1 & goto :eof )
+>>"%_perrfile%" echo   bad value "!_v!" for key dns (use cloudflare, google, quad9 or an IPv4 address)
 set /a _perr+=1
 goto :eof
 rem =====================================================================================
@@ -3986,6 +4662,7 @@ echo ===========================================================================
 :RestorePresetJson_ask
 set "sel="
 set /p "sel=Choose a backup to restore: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto RestorePresetJson_ask
 if "%sel%"=="0" goto MenuBackups
 set "_rfile="
@@ -4057,6 +4734,7 @@ echo ===========================================================================
 :RestoreRegBackup_ask
 set "sel="
 set /p "sel=Choose a backup to restore: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto RestoreRegBackup_ask
 if "%sel%"=="0" goto MenuBackups
 set "_qfile="
@@ -4120,6 +4798,7 @@ echo ===========================================================================
 :RestorePowerBackup_ask
 set "sel="
 set /p "sel=Choose a backup to run: "
+if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto RestorePowerBackup_ask
 if "%sel%"=="0" goto MenuBackups
 set "_pfile="
@@ -4131,7 +4810,12 @@ echo     %_pfile%
 set "_cc="
 set /p "_cc=Proceed? (Y/N): "
 if /i not "%_cc%"=="Y" goto MenuBackups
-set "_FAILS=0" & set "_RUNTRACK=1"
+rem  _RUNTRACK stays CLEAR here. Nothing on this path routes through :Run - the undo file is
+rem  called directly - so setting it bought nothing, and because only :Summary clears it (and
+rem  this action never calls :Summary) it stayed set for the rest of the session. The next
+rem  non-elevated cleanup would then count its benign "del" failures as real ones, which is
+rem  exactly the cry-wolf the :Run tally is written to avoid.
+set "_FAILS=0" & set "_RUNTRACK="
 call :Log "POWER revert from %_pfile%"
 rem  /q suppresses the undo file's own pause - it is there for double-clicking from Explorer.
 call "%_pfile%" /q
@@ -4160,8 +4844,13 @@ echo  backup - can be pruned, and even then the newest pair is always kept.
 echo ===================================================================================
 set "_cntAllReg=0"
 for %%Z in ("!BACKUP_DIR!\*.reg") do set /a _cntAllReg+=1
-set "_cntFull=0" & set "_mbFull=0"
+set "_cntFull=0" & set "_kbFull=0"
 for %%Z in ("!BACKUP_DIR!\FullReg_*.reg") do call :_mbAddFull "%%~zZ"
+rem  One conversion, at the end, with a tenth of a MB kept - so a folder holding a few
+rem  hundred KB reads "0.4 MB" instead of a flat "0 MB" next to a nonzero file count.
+set /a _mbW=_kbFull/1024
+set /a _mbF=(_kbFull*10/1024)%%10
+set "_mbFull=!_mbW!.!_mbF!"
 set /a _cntVal=_cntAllReg-_cntFull
 if !_cntVal! lss 0 set "_cntVal=0"
 set "_cntJson=0"
@@ -4200,9 +4889,17 @@ pause
 goto MenuBackups
 
 :_mbAddFull
-rem  %1 = file size in bytes of one full export; updates the running count + MB total
+rem  %1 = file size in bytes of one full export; updates the running count + KB total.
+rem  Sums KILOBYTES and lets the caller convert once - dividing each file by 1 MB here threw
+rem  away the remainder per file, so exports under a megabyte counted as zero. Not bytes,
+rem  because set /a is 32-bit signed and 2 GB of exports would overflow; in KB the ceiling is
+rem  ~2 TB. The size goes through a VARIABLE because set /a saturates an out-of-range
+rem  variable at INT_MAX but errors on an out-of-range literal, and an error would drop that
+rem  file from the total rather than cap it.
 set /a _cntFull+=1
-set /a _mbFull+=%~1/1048576
+set "_fsz=%~1"
+if not defined _fsz set "_fsz=0"
+set /a _kbFull+=_fsz/1024
 goto :eof
 
 :_mbPrune
@@ -4225,7 +4922,7 @@ set "_td=REG_!_ln:*REG_=!"
 set "_rd="
 for /f "tokens=1,*" %%a in ("!_td!") do ( set "_rt=%%a" & set "_rd=%%b" )
 set "_naData="
-if defined _rd echo(!_rd!| findstr /r "[^ -~]" >nul && set "_naData=1"
+if defined _rd call :NonAsciiCheck
 if /i "!_rt!"=="REG_DWORD" goto _bvjDword
 if /i "!_rt!"=="REG_SZ" goto _bvjSz
 >>"!PRESET_JSON_TMP!" echo {"key":"!_jk!","name":"!_jv!","present":true,"oldtype":"!_rt!","restorable":false}
