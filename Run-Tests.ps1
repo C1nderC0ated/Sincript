@@ -281,7 +281,7 @@ Invoke-Test ':Performance gates Win32PrioritySeparation on a single choice' {
     foreach ($ln in $body) {
         if ($ln -match '(?i)SafeRegAdd' -and $ln -match '(?i)Win32PrioritySeparation') {
             $writes++
-            $m = [regex]::Match($ln, '%(_\w+)%')   # the prompt var this write is gated on
+            $m = [regex]::Match($ln, '[%!](_\w+)[%!]')   # the prompt var this write is gated on
             Assert-True $m.Success ("Win32PrioritySeparation write is not gated by a prompt variable:`n         " + $ln.Trim())
             [void]$gates.Add($m.Groups[1].Value)
         }
@@ -782,11 +782,11 @@ Invoke-Test 'Machine class detected at startup; advisories warning-only and pre-
 Invoke-Test 'System tools menu reachable and wired' {
     $cmd = Read-Lines $CmdPath
     $text = ($cmd -join "`n")
-    Assert-True ($text -match '(?m)^if "%sel%"=="12" goto MenuTools\s*$') 'Main-menu dispatcher does not route 12 -> MenuTools.'
+    Assert-True ($text -match '(?m)^if "!sel!"=="12" goto MenuTools\s*$') 'Main-menu dispatcher does not route 12 -> MenuTools.'
     $mtText = (Get-RoutineBody -Lines $cmd -Label 'MenuTools_ask') -join "`n"
-    Assert-True ($mtText -match '(?i)if "%sel%"=="1" goto PathEditor') 'MenuTools does not route 1 -> PathEditor.'
-    Assert-True ($mtText -match '(?i)if "%sel%"=="2" goto LockFinder') 'MenuTools does not route 2 -> LockFinder.'
-    Assert-True ($mtText -match '(?i)if "%sel%"=="0" goto MainMenu') 'MenuTools has no 0 -> back to MainMenu.'
+    Assert-True ($mtText -match '(?i)if "!sel!"=="1" goto PathEditor') 'MenuTools does not route 1 -> PathEditor.'
+    Assert-True ($mtText -match '(?i)if "!sel!"=="2" goto LockFinder') 'MenuTools does not route 2 -> LockFinder.'
+    Assert-True ($mtText -match '(?i)if "!sel!"=="0" goto MainMenu') 'MenuTools has no 0 -> back to MainMenu.'
 }
 
 # ===============================================================================
@@ -1475,15 +1475,23 @@ Invoke-Test ':Summary echoes its argument outside any ( ) block' {
             continue 
         }
         # does this line echo the argument (unquoted, so a ) in it would matter)?
-        if ($ln -match '(?i)^\s*echo\b.*%~1') { $echoDepths += $depth }
+        if ($ln -match '(?i)^\s*echo\b.*(%~1|!_sumtext!)') { $echoDepths += $depth }
         # update depth: a line ending in a bare ( opens; a lone ) closes
         $stripped = $s
         if ($stripped -match '\($' -and $stripped -notmatch '\^\($') { $depth++ }
         if ($stripped -eq ')' -or $stripped -match '^\)\s') { $depth-- }
     }
-    Assert-True ($echoDepths.Count -ge 1) ':Summary no longer echoes %~1 at all - unexpected.'
+    Assert-True ($echoDepths.Count -ge 1) ':Summary no longer echoes the caller''s phrase at all - unexpected.'
+
+    # The phrase must be echoed LATE (!_sumtext!), never as a bare %~1. "echo [OK] %~1"
+    # re-parses the text after substitution, so an "&" in it split the line and RAN the
+    # remainder - and :ProcPriority passes an executable name, where "&" is legal.
+    $sumCode = @($body | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    Assert-True ($sumCode -match 'set "_sumtext=%~1"') ':Summary no longer captures its argument before echoing it (regression).'
+    $rawEcho = @($body | Where-Object { $_ -match '(?i)^\s*echo\b.*%~1' })
+    Assert-True ($rawEcho.Count -eq 0) ':Summary echoes %~1 directly again - an "&" in the caller''s text splits the line and runs the remainder (regression).'
     $bad = @($echoDepths | Where-Object { $_ -ne 0 })
-    Assert-True ($bad.Count -eq 0) ":Summary echoes %~1 inside a ( ) block (depth $($bad -join ',')). A ')' in the caller's text - e.g. '(incl. Downfall/GDS)' - will close the block early and crash the script. Keep :Summary block-free (goto branching), do not use if(...)else(...)."
+    Assert-True ($bad.Count -eq 0) ":Summary echoes the caller's phrase inside a ( ) block (depth $($bad -join ',')). Keep :Summary block-free (goto branching), do not use if(...)else(...) - a ')' in text like '(incl. Downfall/GDS)' closed the block early back when the phrase was substituted at parse time."
 
     # Positive: at least one real caller passes parens, proving the safe path is exercised.
     $parenCaller = @($cmd | Where-Object { $_ -match '(?i)call :Summary "[^"]*\([^"]*\)[^"]*"' })
@@ -1621,7 +1629,7 @@ Invoke-Test ':PresetBegin refuses to run when the JSON temp is unwritable' {
         Assert-True ($t -match '(?i)if errorlevel 1 goto MenuPresets') ":$r does not abort when :PresetBegin fails - it would apply with no JSON undo (regression)."
     }
     $all = $cmd -join "`n"
-    Assert-True ($all -match '(?i)call :PresetBegin custom_%_pbase%[\s\S]{0,120}if errorlevel 1 goto MenuPresets') 'Custom preset apply does not abort when :PresetBegin fails (regression).'
+    Assert-True ($all -match '(?i)call :PresetBegin "custom_!_pbase!"[\s\S]{0,160}if errorlevel 1 goto MenuPresets') 'Custom preset apply does not abort when :PresetBegin fails (regression).'
 }
 
 # ===============================================================================
@@ -1673,10 +1681,17 @@ Invoke-Test 'SteamLight verifies the Desktop shortcut before claiming it' {
     $code = @($body | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
     Assert-True ($joined -match 'SteamLight\.lnk') ':SteamLight no longer targets SteamLight.lnk (regression).'
     Assert-True ($joined -match 'Test-Path -LiteralPath \$lnk') ':SteamLight no longer verifies the .lnk landed after Save() (regression).'
-    Assert-True ($code -match 'if errorlevel 1') ':SteamLight no longer branches on the shortcut PS exit code (regression).'
+    Assert-True ($code -match 'set "_slrc=%errorlevel%"') ':SteamLight no longer captures the shortcut PS exit code (regression).'
+    Assert-True ($code -match 'if not "%_slrc%"=="0"') ':SteamLight no longer branches on the captured shortcut exit code (regression).'
+    # The capture has to come BEFORE the `set "PT_SLDIR="` cleanup. This is a .cmd file, and
+    # there `set` resets errorlevel to 0 on success (a .bat leaves it alone), so reading it
+    # after that line made the failure branch unreachable: a missing shortcut reported success.
+    $iCap = ($body | Select-String -SimpleMatch 'set "_slrc=%errorlevel%"' | Select-Object -First 1)
+    $iClr = ($body | Select-String -SimpleMatch 'set "PT_SLDIR="' | Select-Object -First 1)
+    Assert-True ($null -ne $iCap -and $null -ne $iClr -and $iCap.LineNumber -lt $iClr.LineNumber) ':SteamLight reads the shortcut exit code after the PT_SLDIR cleanup set, which clears it in a .cmd file (regression).'
     Assert-True ($joined -match '\[WARN\].*shortcut') ':SteamLight lost its [WARN] when the Desktop shortcut fails (regression).'
     # Desktop claim must share the success branch with the errorlevel gate, not stand alone.
-    Assert-True ($joined -match 'if errorlevel 1[\s\S]{0,400}shortcut was placed on your Desktop') ':SteamLight Desktop-shortcut [OK] is no longer gated on the shortcut PS exit code (regression).'
+    Assert-True ($joined -match 'if not "%_slrc%"=="0"[\s\S]{0,400}shortcut was placed on your Desktop') ':SteamLight Desktop-shortcut [OK] is no longer gated on the shortcut PS exit code (regression).'
 }
 
 # ===============================================================================
@@ -1769,7 +1784,7 @@ Invoke-Test 'Game Bar residual is prompt-gated via :DoGameBarOff (not in :DoPerf
 
     $perf = (Get-RoutineBody -Lines $cmd -Label 'Performance') -join "`n"
     Assert-True ($perf -match '(?i)call :DoGameBarOff') ':Performance no longer offers :DoGameBarOff (regression).'
-    Assert-True ($perf -match '(?i)%_q12%') ':Performance Game Bar residual is not gated on _q12 (regression).'
+    Assert-True ($perf -match '(?i)[%!]_q12[%!]') ':Performance Game Bar residual is not gated on _q12 (regression).'
 
     $gb = (Get-RoutineBody -Lines $cmd -Label 'DoGameBarOff') -join "`n"
     Assert-True ($gb.Length -gt 0) ':DoGameBarOff helper missing.'
@@ -1846,10 +1861,10 @@ Invoke-Test ':Cleanup optional buckets and tool launches are prompt-gated; free-
     Assert-True ($joined -match '(?i)Clear-RecycleBin') ':Cleanup missing Recycle Bin optional.'
     Assert-True ($joined -match '(?i)cleanmgr') ':Cleanup missing Disk Cleanup launch.'
     Assert-True ($joined -match '(?i)storagesense') ':Cleanup missing Storage Sense launch.'
-    Assert-True ($joined -match '(?i)%_sh%') ':Cleanup shader bucket not gated on a prompt var.'
-    Assert-True ($joined -match '(?i)%_rb%') ':Cleanup Recycle Bin not gated on a prompt var.'
-    Assert-True ($joined -match '(?i)%_cm%') ':Cleanup cleanmgr not gated on a prompt var.'
-    Assert-True ($joined -match '(?i)%_ss%') ':Cleanup Storage Sense not gated on a prompt var.'
+    Assert-True ($joined -match '(?i)[%!]_sh[%!]') ':Cleanup shader bucket not gated on a prompt var.'
+    Assert-True ($joined -match '(?i)[%!]_rb[%!]') ':Cleanup Recycle Bin not gated on a prompt var.'
+    Assert-True ($joined -match '(?i)[%!]_cm[%!]') ':Cleanup cleanmgr not gated on a prompt var.'
+    Assert-True ($joined -match '(?i)[%!]_ss[%!]') ':Cleanup Storage Sense not gated on a prompt var.'
     Assert-True ($joined -match 'call :CleanRoot ProgramData') ':Cleanup NVIDIA Downloader path missing ProgramData CleanRoot probe.'
 }
 
@@ -2173,7 +2188,7 @@ Invoke-Test ':Power offers a current-plan path when the switch is declined' {
     $b = @($b)
     Assert-True ($b.Count -gt 0) ':Power body empty.'
     $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
-    Assert-True ($code -notmatch '(?i)if /i not "%_c%"=="Y" goto MainMenu') ':Power sends a declined plan switch straight back to the main menu again - hibernation, min CPU state and throttling become unreachable (regression of the current-plan path).'
+    Assert-True ($code -notmatch '(?i)if /i not "[%!]_c[%!]"=="Y" goto MainMenu') ':Power sends a declined plan switch straight back to the main menu again - hibernation, min CPU state and throttling become unreachable (regression of the current-plan path).'
     Assert-True ($code -match '(?i)set /p "_c2=')             ':Power no longer asks whether to apply changes to the CURRENT plan (regression).'
     Assert-True ($code -match '(?i)if defined _PWPLAN call :DoPowerPlanSwitch') ':Power no longer gates the scheme switch on the plan answer (regression).'
     Assert-True ($code -match '(?i)set "_PWPLAN="')           ':Power does not clear _PWPLAN first - a stale value from a previous visit would switch the plan without being asked.'
@@ -2234,9 +2249,17 @@ Invoke-Test ':PowerBackup captures an undo file before either power half changes
     Assert-True ($pb -match '(?i)ACSettingIndex')          ':PowerBackup no longer captures the AC timeout values.'
     Assert-True ($pb -match '(?i)DCSettingIndex')          ':PowerBackup no longer captures the DC timeout values.'
     Assert-True ($pb -notmatch '(?i)Current AC Power Setting') ':PowerBackup parses localized powercfg text again - it would capture nothing on a non-English Windows (regression).'
-    Assert-True ($pb -match '(?i)powercfg -setacvalueindex') ':PowerBackup no longer emits restore commands into the undo file.'
+    # The flags come from a table now (powercfg '+$s[1]+'), so assert the flags themselves.
+    Assert-True ($pb -match '(?i)-setacvalueindex') ':PowerBackup no longer emits AC restore commands into the undo file.'
+    Assert-True ($pb -match '(?i)-setdcvalueindex') ':PowerBackup no longer emits DC restore commands into the undo file.'
     Assert-True ($pb -match '(?i)powercfg -setactive')       ':PowerBackup undo file no longer re-activates the captured scheme.'
-    Assert-True ($pb -match '(?i)never explicitly set')      ':PowerBackup no longer honest-declines a setting the scheme never had - it would guess a value instead of leaving the default (regression).'
+    # A setting the scheme never stored explicitly must still be restorable: sincript writes an
+    # explicit 0 over it, so "leave it alone" left never-sleep in place after a revert. The chain
+    # is per-scheme value -> that plan's default -> the value actually in effect, and only then a
+    # comment. The last step reads powercfg /query as HEX, never its localized labels.
+    Assert-True ($pb -match '(?i)DefaultPowerSchemeValues') ':PowerBackup no longer falls back to the plan default, so a setting the scheme never stored would go unrestored (regression).'
+    Assert-True ($pb -match '0x\[0-9a-fA-F\]\{8\}') ':PowerBackup no longer reads the effective value as hex - on a custom or OEM plan there is neither a stored value nor a plan default, so that setting would go unrestored (regression).'
+    Assert-True ($pb -match '(?i)could not be read at backup time') ':PowerBackup no longer honest-declines when nothing can be read at all - it would emit a guessed restore line (regression).'
     # PROCTHROTTLEMIN is reachable on its own (decline the plan switch AND the timeouts, then
     # say yes to the minimum processor state), so leaving it out made the prompt promise an
     # undo that did not exist.
@@ -2244,7 +2267,7 @@ Invoke-Test ':PowerBackup captures an undo file before either power half changes
     # A partial run is the realistic failure here: the machine crashed part-way through the
     # restore and never reached -setactive, so the plan stayed switched. It goes back FIRST.
     $first = $pb.IndexOf('powercfg -setactive')
-    $write = $pb.IndexOf('powercfg -setacvalueindex')
+    $write = $pb.IndexOf('-setacvalueindex')   # the flag now comes from a table, not a literal
     Assert-True ($first -ge 0 -and $write -ge 0) ':PowerBackup undo file lost its setactive / value writes (regression).'
     Assert-True ($first -lt $write) ':PowerBackup undo file re-activates the scheme only AFTER the value writes - a run that stops part-way leaves the plan switched (regression).'
     $reactivations = ([regex]::Matches($pb, '(?i)powercfg -setactive')).Count
@@ -2256,8 +2279,10 @@ Invoke-Test ':PowerBackup captures an undo file before either power half changes
     # nothing still read as success - pitfall 18, living inside generated output.
     # Assert EVERY emitted powercfg goes through the helper, not merely that one does -
     # replacing a single call site would otherwise leave this green.
-    $emitPc  = ([regex]::Matches($pb, "'powercfg -set")).Count
-    $emitVia = ([regex]::Matches($pb, "'call :pt_do powercfg -set")).Count
+    # The value-write flag comes from a table now, so match up to "powercfg " rather than the
+    # literal "-set" that used to follow it - otherwise this counts 2 and misses the third.
+    $emitPc  = ([regex]::Matches($pb, "'powercfg ")).Count
+    $emitVia = ([regex]::Matches($pb, "'call :pt_do powercfg ")).Count
     Assert-True ($emitVia -ge 3)   ':PowerBackup emits fewer than three counted powercfg restores - the undo file lost commands (regression).'
     Assert-True ($emitPc -eq 0)    ':PowerBackup emits a powercfg restore that bypasses its counting helper - that failure would go unrecorded (regression).'
     Assert-True ($pb -match '(?i)\[OK\] Restored')         ':PowerBackup undo file lost its counted [OK] summary (regression).'
@@ -2311,10 +2336,12 @@ Invoke-Test ':RestorePowerBackup is wired into the Backups menu' {
     $cmd = Read-Lines $CmdPath
     $mb = ((Get-RoutineBody -Lines $cmd -Label 'MenuBackups') -join "`n")
     Assert-True ($mb -match '(?i)6\.\s+Revert power settings') ':MenuBackups no longer offers the power revert item (regression).'
-    Assert-True ($mb -match '(?i)7\.\s+Manage / open backup folder') ':MenuBackups lost the renumbered Manage item.'
+    Assert-True ($mb -match '(?i)7\.\s+Revert telemetry services / tasks') ':MenuBackups lost the telemetry revert item.'
+    Assert-True ($mb -match '(?i)8\.\s+Manage / open backup folder') ':MenuBackups lost the renumbered Manage item.'
     $ask = ((Get-RoutineBody -Lines $cmd -Label 'MenuBackups_ask') -join "`n")
-    Assert-True ($ask -match '(?i)"%sel%"=="6" goto RestorePowerBackup') 'Backups menu item 6 no longer routes to :RestorePowerBackup (regression).'
-    Assert-True ($ask -match '(?i)"%sel%"=="7" goto ManageBackups')      'Backups menu item 7 no longer routes to :ManageBackups (renumbering broke).'
+    Assert-True ($ask -match '(?i)"!sel!"=="6" goto RestorePowerBackup') 'Backups menu item 6 no longer routes to :RestorePowerBackup (regression).'
+    Assert-True ($ask -match '(?i)"!sel!"=="7" goto RestoreTelemetryBackup') 'Backups menu item 7 no longer routes to :RestoreTelemetryBackup (renumbering broke).'
+    Assert-True ($ask -match '(?i)"!sel!"=="8" goto ManageBackups')      'Backups menu item 8 no longer routes to :ManageBackups (renumbering broke).'
 
     # :RestorePowerBackup_ask does not start with "_", so it ends the routine body - concatenate.
     $r1 = Get-RoutineBody -Lines $cmd -Label 'RestorePowerBackup'
@@ -2489,7 +2516,7 @@ Invoke-Test 'Menu items and their dispatch branches match exactly' {
         $ask = Get-RoutineBody -Lines $cmd -Label ($m + '_ask')
         $ask = @($ask)
         $handled = @()
-        foreach ($l in ($menu + $ask)) { if ($l -match 'if(?:\s+/i)?\s+"%\w+%"=="([0-9]+)"') { $handled += $Matches[1] } }
+        foreach ($l in ($menu + $ask)) { if ($l -match 'if(?:\s+/i)?\s+"[%!]\w+[%!]"=="([0-9]+)"') { $handled += $Matches[1] } }
 
         $missing = @($shown | Where-Object { $handled -notcontains $_ })
         $orphan  = @($handled | Where-Object { $shown -notcontains $_ })
@@ -2553,7 +2580,11 @@ Invoke-Test 'Custom DNS input is validated before it reaches a command line' {
     # "echo(!_IPCHK!| findstr ..." split on "&" in the child: it RAN the injected remainder
     # and then handed findstr a clean "1.1.1.1", answering "valid". Verified both ways.
     Assert-True ($vc -notmatch '(?i)echo\(?!_IPCHK!\s*\|') ':_ip4_ok pipes the value into findstr again - the piped child re-parses it, so "1.1.1.1&command" executes the command and still validates (regression of F-J1).'
-    Assert-True ($vc -match '(?i)for /f "delims=0123456789\." %%X in \("!_IPCHK!"\)') ':_ip4_ok lost its pipe-free charset check (regression of F-J1).'
+    # The eol= is part of the check, not decoration: for /f ignores a line whose first
+    # character AFTER the leading delimiters is the eol character, and eol defaults to ";".
+    # Without it "1.1.1.1;<anything>" produced no token at all and validated clean, and the
+    # value went on to an elevated PowerShell command line. It must be an allowed character.
+    Assert-True ($vc -match '(?i)for /f "eol=[0-9] delims=0123456789\." %%X in \("!_IPCHK!"\)') ':_ip4_ok lost its pipe-free charset check, or the eol= that closes the ";" hole (regression of F-J1).'
     Assert-True ($vc -match '(?i)if not "%%d"==""') ':_ip4_ok no longer requires a fourth octet - a missing token expands to empty, so "1.2.3." rebuilds to itself and passes (regression of F-J1).'
     # All four octets, not "at least one" - dropping a single check leaves the rest matching.
     # LEQ 255, not GTR 255: the checks are chained onto the four-part rebuild now, so they
@@ -2971,8 +3002,8 @@ Invoke-Test 'GPU detection tracks both vendors independently, so a hybrid machin
     Assert-True ($nv -match '(?i)goto GpuAmd') ':GpuNvidia never continues to the AMD opt-out, so on a hybrid machine one screen silently swallows the other (regression of F-E1).'
     # ...and DECLINING NVIDIA must reach that continuation too, not jump straight to the menu -
     # otherwise one "no" throws away an unrelated vendor's opt-out
-    Assert-True ($nv -notmatch '(?i)if /i not "%_c%"=="Y" goto MenuAdvanced') ':GpuNvidia sends a declined NVIDIA prompt straight back to the menu, so on a hybrid machine it skips the AMD opt-out entirely (regression of F-E1).'
-    Assert-True ($nv -match '(?i)if /i not "%_c%"=="Y" goto _gpuNvDone') ':GpuNvidia no longer routes a declined prompt through the shared continuation point (regression of F-E1).'
+    Assert-True ($nv -notmatch '(?i)if /i not "[%!]_c[%!]"=="Y" goto MenuAdvanced') ':GpuNvidia sends a declined NVIDIA prompt straight back to the menu, so on a hybrid machine it skips the AMD opt-out entirely (regression of F-E1).'
+    Assert-True ($nv -match '(?i)if /i not "!_c!"=="Y" goto _gpuNvDone') ':GpuNvidia no longer routes a declined prompt through the shared continuation point (regression of F-E1).'
 }
 
 # ===============================================================================
@@ -3129,7 +3160,7 @@ Invoke-Test 'The /preset: command line shares the menu bodies and warns before t
     # a preset name becomes a path, so it must be constrained to a bare file name
     # A whitelist, and not through a pipe. The first version blacklisted path separators and
     # wildcards but not "&", and the piped child re-parsed the name and ran the remainder.
-    Assert-True ($cliCode -match '(?i)for /f "delims=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_\.-" %%X in \("!_CLIPRESET!"\)') ':CliRun no longer holds the preset name to a whitelist without a pipe, so /preset:..\..\x or a name containing "&" gets through (regression of F-H3).'
+    Assert-True ($cliCode -match '(?i)for /f "eol=[A-Za-z0-9_.\-] delims=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_\.-" %%X in \("!_CLIPRESET!"\)') ':CliRun no longer holds the preset name to a whitelist without a pipe, or lost the eol= that closes the ";" hole - so /preset:..\..\x, a name containing "&", or anything after a ";" gets through (regression of F-H3).'
     Assert-True ($cliCode -notmatch '(?i)echo\(?!_CLIPRESET!\s*\|') ':CliRun pipes the preset name into findstr again - the piped child re-parses it and an "&" in the name executes (regression of F-J1).'
     # and the name must never reach :Summary, whose "echo [OK] %~1" re-parses its argument
     Assert-True ($cliCode -notmatch '(?i)call :Summary "Preset !_CLIPRESET!') ':CliRun passes the preset name to :Summary again - it ends in "echo [OK] %~1", and %~1 is substituted during parsing, so an "&" in the text splits the line (regression of F-J2).'
@@ -3211,12 +3242,23 @@ Invoke-Test 'No validator pipes a variable into findstr - the piped child re-par
 
     # the three that had it must each still validate, by the safe route
     $ip4 = ((Get-RoutineBody -Lines $cmd -Label '_ip4_ok') -join "`n")
-    Assert-True ($ip4 -match '(?i)for /f "delims=0123456789\."') ':_ip4_ok lost its pipe-free charset check (regression of F-J1).'
+    Assert-True ($ip4 -match '(?i)for /f "eol=[0-9] delims=0123456789\."') ':_ip4_ok lost its pipe-free charset check, or the eol= that closes the ";" hole (regression of F-J1).'
     $na = ((Get-RoutineBody -Lines $cmd -Label 'NonAsciiCheck') -join "`n")
     Assert-True ($na.Length -gt 0) ':NonAsciiCheck is missing - the non-ASCII test went back inline through a pipe (regression of F-J1).'
-    Assert-True ($na -match '(?i)>"!_naf!" echo\(!_rd!') ':NonAsciiCheck no longer writes the value to a file before scanning it (regression of F-J1).'
+    # Pipe-free AND actually able to fire. `findstr /r "[^ -~]"` never flagged anything (without
+    # /c: the space splits the pattern in two), adding /c: hangs, and findstr ranges follow
+    # collation order rather than character codes - [^!-~] flags plain ASCII. So: pure batch,
+    # a for /f over a printable-ASCII delimiter whitelist, with an eol that is itself allowed.
+    Assert-True ($na -match '(?i)for /f "eol=[^"]*delims=[^"]*" %%c in \("!_rd!"\)') ':NonAsciiCheck no longer scans the value with a pipe-free for /f whitelist (regression of F-J1).'
+    # Against CODE only: the routine's own comment explains why findstr is not used, and
+    # that prose would otherwise decide this assertion. -CodeOnly is the helper that
+    # unrolls properly; @(Get-RoutineBody ...) would make the whole routine one element.
+    $naCode = (Get-BodyLines -Lines $cmd -Label 'NonAsciiCheck' -CodeOnly) -join "`n"
+    Assert-True ($naCode.Length -gt 0) ':NonAsciiCheck has no code lines - only comments?'
+    Assert-True ($naCode -notmatch '(?i)findstr') ':NonAsciiCheck went back to findstr - collation-order ranges mean it either never fires or flags plain ASCII (regression).'
+    Assert-True ($na -notmatch '(?i)echo\(!_rd!\s*\|') ':NonAsciiCheck pipes the value into a child again - the child re-parses it (regression of F-J1).'
     $all = $cmd -join "`n"
-    Assert-True ($all -match '(?i)for /f "delims=0123456789" %%X in \("!_in!"\)') 'The Unity job-worker prompt pipes typed input into findstr again (regression of F-J1).'
+    Assert-True ($all -match '(?i)for /f "eol=[0-9] delims=0123456789" %%X in \("!_in!"\)') 'The Unity job-worker prompt pipes typed input into findstr again, or lost its eol= (regression of F-J1).'
 }
 
 # ===============================================================================
@@ -3397,7 +3439,137 @@ Invoke-Test 'The harness itself never uses the misuse-prone body slicer' {
     Assert-True ((@($noEcho) -join "`n") -notmatch '(?im)^\s*echo\b') '-NoEcho left echo lines in.'
 }
 
-# ---- summary ------------------------------------------------------------------
+# ===============================================================================
+# 122. A lone " typed at any prompt used to abort the entire script. `if
+#      "%sel%"=="1"` substitutes the typed value BEFORE the line is parsed, so
+#      one double quote left the line unbalanced and cmd stopped dead - from any
+#      of 189 comparisons. `!sel!` is substituted AFTER parsing, so the quote
+#      stays data and the comparison just says "no". This test reads the set /p
+#      targets out of the script rather than hard-coding them, so a new prompt is
+#      covered the day it is added.
+# ===============================================================================
+Invoke-Test 'Typed input is compared late-expanded, so a lone quote cannot abort the script' {
+    $cmd = Read-Lines $CmdPath
+    $targets = @{}
+    foreach ($ln in $cmd) {
+        foreach ($m in [regex]::Matches($ln, '(?i)\bset\s+/p\s+"?([A-Za-z_][A-Za-z0-9_]*)=')) {
+            $targets[$m.Groups[1].Value.ToLower()] = $true
+        }
+    }
+    Assert-True ($targets.Count -gt 20) "Only $($targets.Count) set /p target(s) found - the scan is not seeing the prompts, so the rest of this test proves nothing."
+    $bad = @()
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        $ln = $cmd[$i]
+        if ($ln.Trim() -match '^(?i)(rem\b|::)') { continue }
+        foreach ($m in [regex]::Matches($ln, '(?i)(?:==\s*)"%([A-Za-z_][A-Za-z0-9_]*)%"|"%([A-Za-z_][A-Za-z0-9_]*)%"(?:\s*==)')) {
+            $name = if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }
+            if ($targets.ContainsKey($name.ToLower())) {
+                $bad += ("line {0}: {1}" -f ($i + 1), $ln.Trim())
+            }
+        }
+    }
+    Assert-True ($bad.Count -eq 0) ("Typed input is compared with %var% instead of !var!, so a lone double quote at that prompt aborts the script: " + ($bad -join ' | '))
+}
+
+# ===============================================================================
+# 123. The shipped hosts and boot.config are read on Windows too, and nothing
+#      was checking their bytes. hosts in particular ended mid-entry with no
+#      final newline, so the next ">> hosts" append by a user or another tool
+#      glued onto the last blocked name - "echo 192.168.1.10 nas >> hosts" would
+#      have blocked "nas". hosts is LF-only by convention (it comes from an
+#      upstream blocklist) so uniform-CRLF is NOT asserted here; ASCII, no BOM
+#      and a final newline are.
+# ===============================================================================
+Invoke-Test 'Shipped data files are ASCII, BOM-free and end with a newline' {
+    $dir = Split-Path -Parent $CmdPath
+    $checked = 0
+    foreach ($name in @('hosts', 'boot.config')) {
+        $p = Join-Path $dir $name
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        $checked++
+        $bytes = [System.IO.File]::ReadAllBytes($p)
+        Assert-True ($bytes.Length -gt 10) "$name is suspiciously small - wrong path?"
+        $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+        Assert-True (-not $hasBom) "$name has a UTF-8 BOM."
+        $nonAscii = @($bytes | Where-Object { $_ -gt 127 }).Count
+        Assert-True ($nonAscii -eq 0) "$name is not ASCII-pure ($nonAscii byte(s))."
+        $last = $bytes[$bytes.Length - 1]
+        Assert-True ($last -eq 10 -or $last -eq 13) "$name does not end with a newline - the next '>> $name' append would glue onto its last line (regression)."
+    }
+    Assert-True ($checked -gt 0) 'Neither hosts nor boot.config was found next to the script - the paths are wrong, so this test proved nothing.'
+}
+
+# ===============================================================================
+# 124. The telemetry undo file. Privacy disables two services and nine scheduled
+#      tasks, and until now that was the one corner of the script with nothing
+#      captured first - `sc config` and `schtasks /Change` leave no .reg behind
+#      the way :SafeRegAdd does. What matters here is the ORDER (capture before
+#      disable, or the file faithfully records "already disabled"), reading state
+#      from the registry and Get-ScheduledTask rather than localized command
+#      output, and the generated file counting its own failures instead of
+#      printing a flat [OK].
+# ===============================================================================
+Invoke-Test 'Telemetry disables are captured first, into a self-checking undo file' {
+    $cmd = Read-Lines $CmdPath
+
+    $priv = (Get-BodyLines -Lines $cmd -Label 'DoPrivacyCore' -CodeOnly) -join "`n"
+    $iCap = $priv.IndexOf('call :TelemetryBackup')
+    $iSvc = $priv.IndexOf('sc config DiagTrack start= disabled')
+    Assert-True ($iCap -ge 0) ':DoPrivacyCore no longer captures a telemetry undo file (regression).'
+    Assert-True ($iSvc -ge 0) ':DoPrivacyCore no longer disables DiagTrack - routine changed shape?'
+    Assert-True ($iCap -lt $iSvc) ':DoPrivacyCore disables the telemetry services BEFORE capturing their state, so the undo file would record them as already disabled and restore nothing (regression).'
+
+    $tb = (Get-BodyLines -Lines $cmd -Label 'TelemetryBackup' -CodeOnly) -join "`n"
+    Assert-True ($tb.Length -gt 0) ':TelemetryBackup is missing.'
+    Assert-True ($tb -match '(?i)CurrentControlSet.{0,2}Services') ':TelemetryBackup no longer reads service start types from the registry (regression).'
+    Assert-True ($tb -match '(?i)Get-ScheduledTask') ':TelemetryBackup no longer reads task state from Get-ScheduledTask (regression).'
+    Assert-True ($tb -notmatch '(?i)sc qc|schtasks /Query') ':TelemetryBackup parses localized service/task text again - it would capture nothing on a translated Windows and hand back an empty undo file (regression).'
+    Assert-True ($tb -match '(?i)pt_do') ':TelemetryBackup no longer routes the generated restore commands through the counting helper, so the undo file could print a blind [OK] (regression).'
+    Assert-True ($tb -match '_TLBAK_FILE') ':TelemetryBackup lost its one-file-per-visit guard (regression).'
+    Assert-True ($tb -match '(?i)already disabled') ':TelemetryBackup no longer distinguishes "already disabled before sincript" from "disabled by sincript" - reverting would undo the user own earlier choice (regression).'
+
+    # The body slicer stops at any label that does not start with "_", and
+    # :RestoreTelemetryBackup_ask does not - so the half after the prompt, which is where the
+    # undo file is actually run, is invisible unless both halves are concatenated.
+    $rt = ((Get-BodyLines -Lines $cmd -Label 'RestoreTelemetryBackup' -CodeOnly) +
+           (Get-BodyLines -Lines $cmd -Label 'RestoreTelemetryBackup_ask' -CodeOnly)) -join "`n"
+    Assert-True ($rt.Length -gt 0) ':RestoreTelemetryBackup is missing.'
+    Assert-True ($rt -match '(?i)Telemetry_\*\.bat') ':RestoreTelemetryBackup no longer lists the Telemetry_*.bat undo files (regression).'
+    Assert-True ($rt -match '(?i)call "%_tfile%" /q') ':RestoreTelemetryBackup no longer runs the chosen file with /q - the undo file own pause would block the menu (regression).'
+    Assert-True ($rt -match '_RUNTRACK=') ':RestoreTelemetryBackup no longer clears _RUNTRACK, so the next cleanup counts benign failures as real ones (regression).'
+}
+
+Invoke-Test 'Every set /p prompt fits the console width the script asks for' {
+    $cmd = Read-Lines $CmdPath
+    # Read the width out of the script instead of hard-coding it: if `mode con` ever changes,
+    # this follows rather than quietly testing the wrong number.
+    $width = 0
+    foreach ($ln in $cmd) {
+        $m = [regex]::Match($ln, '(?i)^\s*mode con:\s*cols=(\d+)')
+        if ($m.Success) { $width = [int]$m.Groups[1].Value }
+    }
+    Assert-True ($width -gt 0) 'No "mode con: cols=" line found, so there is no width to measure against.'
+
+    $checked = 0
+    $bad = @()
+    foreach ($ln in $cmd) {
+        if ($ln -match '^\s*rem\b') { continue }
+        foreach ($m in [regex]::Matches($ln, '(?i)set\s+/p\s+"([A-Za-z_][A-Za-z0-9_]*)=([^"]*)"')) {
+            # colour variables expand to ANSI escapes, which take no screen columns, and a
+            # doubled %% renders as a single %
+            $vis = [regex]::Replace($m.Groups[2].Value, '%(?:ESC|[A-Za-z][A-Za-z0-9]?|gold)%', '')
+            $vis = $vis.Replace('%%', '%')
+            $checked++
+            if ($vis.Length -ge $width) {
+                $bad += ('{0} ({1} cols)' -f $m.Groups[1].Value, $vis.Length)
+            }
+        }
+    }
+    Assert-True ($checked -gt 80) "Only $checked prompt(s) were measured - the scan is not finding them, so the rest of this test proves nothing."
+    Assert-True ($bad.Count -eq 0) ("A set /p prompt at least as wide as the ${width}-column console makes cmd put the caret at (length mod width) - typing then overwrites the question instead of following it. Too long: " + ($bad -join ', '))
+}
+
+# ---- summary ------------------------------------------------------------------------------
 Write-Host ""
 if ($script:Failures.Count -eq 0) {
     Write-Host ("All {0} test(s) passed." -f $script:Total) -ForegroundColor Green
