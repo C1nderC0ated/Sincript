@@ -77,7 +77,7 @@ harness — see [Release contents](#release-contents).
 | 5 | Network & DNS | TCP tuning, DNS provider switch (Cloudflare / Google / Quad9 / **your own resolver** / back to DHCP), **flush the DNS cache on its own**, full network stack reset |
 | 6 | Apps & files | OpenAsar for Discord, Unity `boot.config`, custom `hosts` file, lightweight Steam launcher, Windows timer resolution, startup-apps manager |
 | 7 | Advanced | At-your-own-risk items: CPU mitigations, boot timers, NVMe flags, IPv6, memory compression, GPU telemetry |
-| 8 | Backups & status | Restore point, full registry export, current-status report, single-value `.reg` restore, **power-settings revert**, backup-folder manager |
+| 8 | Backups & status | Restore point, full registry export, current-status report, preset-backup (JSON) restore, single-value `.reg` restore, **power-settings revert**, **telemetry services/tasks revert**, backup-folder manager |
 | 9 | Apply recommended safe set | One-click core tweaks from categories 1–5 (no prompts) |
 | 10 | Presets | Auto-apply **light / moderate / heavy** preset, build your own **custom** preset, or restore a preset's JSON backup |
 | 11 | What was excluded | Explains what the script deliberately leaves out, and why |
@@ -113,7 +113,7 @@ harness — see [Release contents](#release-contents).
 - **Advanced** — Disable/enable CPU mitigations · set/revert boot (BCD) timers · NVMe feature flags · disable IPv6 · disable memory compression · disable GPU telemetry (NVIDIA telemetry tasks + registry, or the AMD User Experience Program opt-out) · GPU hardware scheduling (HAGS) on/off · set a permanent per-program CPU priority (per `.exe`, via Image File Execution Options).
 - **Presets** — Apply a built-in **light**, **moderate**, or **heavy** preset (no per-item prompts) · apply a **custom** preset from a `.preset` file · **restore** the registry values a preset changed from one of its JSON backups.
 - **System tools** — **Edit PATH** (System or User) with dead-entry and duplicate cleanup · **Find what is locking a file** and optionally close the holder. Both are described under [System tools](#system-tools).
-- **Backups & status** — Create a System Restore Point · export HKLM + HKCU · restore from a preset JSON backup · restore a single value backup (`.reg`) · manage/open the backup folder · show the current state of key tweaks (incl. Game Bar `AppCaptureEnabled` and search-box suggestions), system-drive free space, the active power plan, hibernation, minimum processor state, DNS, TCP autotuning, GPU hardware scheduling (HAGS), memory compression, the `hosts` line count, and whether OpenAsar is installed.
+- **Backups & status** — Create a System Restore Point · export HKLM + HKCU · restore from a preset JSON backup · restore a single value backup (`.reg`) · revert the power plan and timeouts from a `PowerPlan_*.bat` undo file · revert the telemetry services and scheduled tasks from a `Telemetry_*.bat` undo file · manage/open the backup folder · show the current state of key tweaks (incl. Game Bar `AppCaptureEnabled` and search-box suggestions), system-drive free space, the active power plan, hibernation, minimum processor state, DNS, TCP autotuning, GPU hardware scheduling (HAGS), memory compression, the `hosts` line count, and whether OpenAsar is installed.
 
 ---
 
@@ -128,7 +128,7 @@ PerfTweaks.cmd /preset:NAME [/dns:VALUE] [/plan:VALUE] [/norestore]
 | Option | Values | Meaning |
 |---|---|---|
 | `/preset:` | `light` · `moderate` · `heavy` | The built-in presets, exactly as the menu applies them — the two paths share one definition of each, so they cannot drift |
-| `/preset:` | any `NAME` | Applies `sincript_presets\NAME.preset`, parsed by the same validator the menu uses. A bare file name only: separators, wildcards and `..` are refused, so it cannot reach outside that folder |
+| `/preset:` | any `NAME` | Applies `sincript_presets\NAME.preset`, parsed by the same validator the menu uses. The name is held to a whitelist — letters, digits, `_`, `.` and `-` — so separators, wildcards, spaces and `..` are all refused and it cannot reach outside that folder. A preset file whose name contains a space is still selectable from the menu |
 | `/dns:` | `cloudflare` · `google` · `quad9` · an IPv4 | Omit it and DNS is left alone. The interactive presets *ask*; an unattended run must not guess. Overrides a `dns=` key in a custom preset |
 | `/plan:` | `ultimate` · `high` · `balanced` | Which scheme a preset containing `power=1` activates. Unset means `ultimate`. Overrides a `power_plan=` key |
 | `/norestore` | — | Skip the System Restore Point, which is otherwise created first |
@@ -177,8 +177,9 @@ the JSON and, per value, either restores the previous data or deletes the value
 if it didn't exist before.
 
 > The JSON backup covers **registry values only**. The non-registry parts of a
-> preset — power plan, DNS, BCD timers, services/scheduled tasks — are reverted
-> from their own menus (see *Reverting changes*). A System Restore Point
+> preset, the power plan, DNS, BCD timers and the disabled telemetry services and
+> scheduled tasks all have their own revert screens (see *Reverting changes*). The
+> netsh TCP settings are the one part with **no in-app revert**. A System Restore Point
 > (offered before moderate/heavy) rolls back everything at once.
 
 ## Custom presets
@@ -318,9 +319,10 @@ All backups and logs live in **`Documents\PerfTweaks_Backups`** inside your user
 | Edge first-run / sidebar / shopping nudges | Merge the Edge policy `.reg` backups under `Policies\Microsoft\Edge`, or delete those policy values |
 | Minimum processor state | Backups & status → **Revert power settings** (it is captured), or Control Panel → power plan → set back to 100% |
 | Power plan, sleep / disk timeouts, minimum processor state | Backups & status → **Revert power settings**, and pick the `PowerPlan_*.bat` written before the change |
+| Telemetry services (DiagTrack, dmwappushservice) and the telemetry scheduled tasks | Backups & status → **Revert telemetry services / tasks**, and pick the `Telemetry_*.bat` written before Privacy ran. It restores the start types that were in place, starts a service again if it was running, and re-enables the tasks that were enabled — anything you had already disabled yourself is left alone |
 | Removed built-in apps (debloat) | Reinstall from the Microsoft Store |
 | Startup entry enabled/disabled | Flip it again under Apps & files → **Manage startup programs**, merge its `.reg` backup, or use Task Manager → Startup apps |
-| Memory compression | PowerShell: `Enable-MMAgent -MemoryCompression` |
+| Memory compression | PowerShell: `Enable-MMAgent -MemoryCompression -PageCombining` (the action turns both off) |
 | A `PATH` edit | Double-click the `PATH` `.reg` backup written before the edit (in `Documents\PerfTweaks_Backups`) |
 | SysMain / Superfetch | Merge its `.reg` backup, or `sc config SysMain start= auto` |
 | Storage Sense / Delivery Optimization / CPU power throttling | Merge each one's `.reg` backup (they are policy values; the backup restores "not configured") |
@@ -348,7 +350,8 @@ that folder**, and adds a `SteamLight` Desktop shortcut. The launcher starts
 Steam with resource-saving flags (single process / single core, no shaders, no
 shared textures, no Big Picture, high-DPI off, etc.) for lower RAM/CPU use. It
 references `steam.exe` relative to its own folder, so it keeps working even if
-Steam is on another drive. To change the flags, edit the single `_SLFLAGS=` line.
+Steam is on another drive. To change the flags, edit the `start` line in the generated
+`SteamLight.bat`: they are written into that line, not into a variable you can edit.
 
 ---
 
@@ -356,6 +359,9 @@ Steam is on another drive. To change the flags, edit the single `_SLFLAGS=` line
 
 Newest first. Feature details live in the sections above — this is just what changed.
 
+- **Fixed: typing landed *inside* a question instead of after it.** Fourteen `set /p` prompts were longer than the 100-column console the script asks for, and a prompt longer than the line makes cmd put the input caret at *(length mod width)* — so at the Disk Cleanup, firewall-block, Edge and OneDrive questions the first keystroke overwrote the middle of the text. The prompt wording was never the problem; the explanation now sits on its own line above a short question, in the same style the advisories already use, and a new check measures every prompt against the width the script sets.
+- **New: an undo file for the telemetry services and tasks.** Privacy disables two services and nine scheduled tasks, and that was the one corner with nothing captured first — `sc config` and `schtasks /Change` leave no `.reg` behind. A runnable `Telemetry_<stamp>.bat` is now written *before* anything is disabled, on every path that reaches the disables, and **Backups & status → 7** replays it. State comes from the registry and `Get-ScheduledTask`, never from localized `sc qc` text; anything you had already disabled yourself is written as a comment rather than restored.
+- **Audit pass: two dozen fixes, mostly about honest reporting.** `:Run`/`:RunLive` no longer split a path containing a space (doubled quotes meant `del` of `"C:\Program"` and `Files\..."`); `if errorlevel 1` missed negative exit codes, so DISM's HRESULTs logged as OK; the Store re-register, timer-resolution removal and restore-point steps each claimed success without checking; four `for /f` validators accepted anything after a `;`, one of which let a shared `.preset` run PowerShell as admin; 189 typed-input comparisons are late-expanded so a lone `"` cannot abort the script; the power undo records the value actually in effect rather than a comment; and the backup prune keeps the newest of *each* registry hive instead of the two newest files.
 - **Fixed: *Manage startup programs* rendered nothing until a key was pressed.** Two variables in that path were named `_susig` and `_SUSIG` — and `cmd` variable names are **case-insensitive**, so those were one slot: clearing the value blanked the file path. The empty path reached PowerShell as a null `-FilePath`, and `Out-File` **prompts** for a missing mandatory parameter — in a minimized window nobody can answer, so the screen sat waiting. The fingerprint check added alongside it was also silently inert. Renamed, plus a guard so a missing path can never reach `Out-File` at all. **Test 118** now derives every `set "NAME="` in the script and fails on any pair differing only by case; it immediately found a second latent pair (`_src` / `_SRC`) in the OpenAsar installer.
 - **HAGS screen states what HAGS currently is.** The toggle offered on/off without saying which was already stored, so the choice was blind and a second visit could not tell whether the first had worked. It now reads `HwSchMode` and reports on / off / not-set (not-set being the Windows default on 2004+), with a note that the stored value is not necessarily what the GPU is doing until a reboot. One `reg query`, no PowerShell — the screen stays instant. **Test 119.**
 - **Status carries the same machine header as the main menu.** `Build · Win11 · GPU · Machine · Disk` appeared only on the main menu, so Status showed less about the machine than the screen you came from. **Test 119.**
@@ -381,7 +387,7 @@ Newest first. Feature details live in the sections above — this is just what c
 - **Cleanup expansion.** Core cleanup (presets too) now also clears crash dumps, minidumps, and the Delivery Optimization cache — still Prefetch-free and CleanRoot-gated. Interactive Cleanup adds optional shader / NVIDIA Downloader caches, Recycle Bin empty, Disk Cleanup (`cleanmgr`) and Storage Sense settings launches, plus a free-space before/after report. Status shows system-drive free space, `AppCaptureEnabled`, and search-box suggestions. Guarded by **tests 72–75**.
 - **TimerRes remove honesty.** Optional `GlobalTimerResolutionRequests` revert now resets `_FAILS` and finishes via `:Summary` (same bargain as Apply) — no more blind `[OK] Reverted` after a failed HKLM write. Guarded by **test 65**.
 - **Win11 quiet surface + Game Bar residual.** Privacy core now also quiets the remaining Start/lock Content Delivery tips, search-box suggestions, and tailored experiences (still reversible via `:SafeRegAdd`). Performance optionally disables Game Bar / Xbox overlay chrome (`AppCaptureEnabled`, Nexus, startup panel) without uninstalling Xbox — recording stays off in the performance core. Privacy optionally applies documented Edge policies (hide first-run, hubs sidebar off, shopping assistant off). Custom preset keys: `gamebar_off=1`, `edge_nudges_off=1`. Guarded by **tests 69–71**.
-- **Reliability pass (backup / restore / honesty).** Registry writes now refuse to proceed if the per-value `.reg` (or preset JSON temp) did not land — the same bargain PATH and hosts apply already had. Idempotent skip covers **REG_SZ** as well as DWORD, so a re-apply cannot bury the true-original undo. Hosts **reset** aborts without a landed `hosts.bak`; hosts **restore** falls back to Documents `hosts_*.bak` when the local `.bak` is missing. Presets abort if the JSON temp cannot be created. Timer-resolution install reports via `:Summary` / `_FAILS`; Store re-register is elevation-gated with an exit-code check. SteamLight verifies the Desktop `.lnk` before claiming it; memory-compression disable no longer swallows failures (preset path bumps `_FAILS`); NVIDIA telemetry tasks are found by name prefix (`NvTmRep_` / `NvTmMon_` / `NvDriverUpdateCheckDaily_`) instead of hardcoded GUID `\TN` paths. Guarded by **tests 60–68** (plus Store on **test 28**). Static harness is now **121** checks.
+- **Reliability pass (backup / restore / honesty).** Registry writes now refuse to proceed if the per-value `.reg` (or preset JSON temp) did not land — the same bargain PATH and hosts apply already had. Idempotent skip covers **REG_SZ** as well as DWORD, so a re-apply cannot bury the true-original undo. Hosts **reset** aborts without a landed `hosts.bak`; hosts **restore** falls back to Documents `hosts_*.bak` when the local `.bak` is missing. Presets abort if the JSON temp cannot be created. Timer-resolution install reports via `:Summary` / `_FAILS`; Store re-register is elevation-gated with an exit-code check. SteamLight verifies the Desktop `.lnk` before claiming it; memory-compression disable no longer swallows failures (preset path bumps `_FAILS`); NVIDIA telemetry tasks are found by name prefix (`NvTmRep_` / `NvTmMon_` / `NvDriverUpdateCheckDaily_`) instead of hardcoded GUID `\TN` paths. Guarded by **tests 60–68** (plus Store on **test 28**). Static harness is now **125** checks.
 - **VerboseStatus (optional):** Added an opt-in boot/logon diagnostic tweak (`verbosestatus=1`) with honest reporting explaining when `DisableStatusMessages` suppresses it. Guarded by **test 59**.
 - **Disable Widgets / News & Interests, and Windows Spotlight on the lock screen:** Included in the Privacy Core, and presets. Guarded by **test 59**.
 - **Fixed: parentheses in a status message crashed the tool (mitigations).**  `:Summary` printed its message inside a one-line `if ( ) else ( )` block, so the first `)` in the text — e.g. the mitigations line's `(incl. Downfall/GDS)`, or an empty `()` — closed the block early and aborted the script (*"was unexpected at this time"*). `:Summary` is now written with `goto` branching so the message is never inside `( )`; any caller text is safe. Guarded by **test 58**, which fails if the routine is ever put back into a parenthesised block.
@@ -511,7 +517,7 @@ Microsoft's own documentation and left out on the evidence:
 
 Sincript ships with a **static-analysis** harness in `tests/`. `PerfTweaks.cmd`
 is interactive and changes the system, so it can't be safely unit-tested by
-*running* it; instead `tests/Run-Tests.ps1` (121 checks on stock Windows
+*running* it; instead `tests/Run-Tests.ps1` (125 checks on stock Windows
 PowerShell 5.1 — no Pester) parses the script text for invariants that tend to
 break silently, including:
 
@@ -527,7 +533,7 @@ break silently, including:
 - every cleanup delete is gated on a proven root, so an unset variable can never collapse `"%TEMP%\*.*"` into `"\*.*"`
 - Win11 quiet-surface keys stay in privacy core; Game Bar residual and Edge nudges stay **opt-in** (not folded into performance/privacy cores)
 - cleanup core stays Prefetch-free; optional shader/Recycle/cleanmgr buckets stay interactive-only; free-space helpers and Status Disk line stay wired
-- file backups stay **write-once** (`hosts`, `app.asar`, `boot.config`) and the randomized per-run snapshot stays randomized, so a re-run can never bury the original
+- file backups stay **write-once** (`hosts`, `app.asar`, `boot.config`); the `hosts` copies in Documents are one per run, while the Documents copy of `app.asar` is a single fixed-name write-once file — either way a re-run can never bury the original
 - OpenAsar and the Unity `boot.config` refuse to write with no backup landed, and `:StartupWorker` verifies its undo `.reg` before flipping an entry
 - the OneDrive sync block stays **out** of the privacy core and stays wired as an opt-in prompt plus `onedrive_off` preset key
 - the Privacy screen keeps naming what the core actually changes (Widgets feed, Start app-launch tracking, `dmwappushservice`)
@@ -535,11 +541,15 @@ break silently, including:
 - the power action keeps the plan switch separate from the plan-agnostic timeouts, declining the switch still reaches the other options, and `power=1` keeps its original meaning
 - the power undo file is captured **before** anything changes, once per action, read from the registry rather than localized `powercfg` text, and stays reachable from the Backups menu
 - the `AutoEndTasks` trade-off stays on the Performance screen, and `:Status` keeps showing the hardware probes that drive the advisories
-- the main-menu header keeps its `Disk=` marker and probes before printing it, and every separator keeps rendering 83 columns (caret escapes counted as one)
+- the main-menu header keeps its `Disk=` marker and probes before printing it, and every separator keeps rendering 98 columns (caret escapes counted as one)
 - the disk probe stays cached per machine, keyed on the storage hardware, and never persists a failed or malformed result
 - a typed DNS resolver is charset- and range-checked before it reaches a command line, every use is late-expanded, and the preset key runs through the same validator
 - the file stays ASCII-only, uniform CRLF and BOM-free — an editor that quietly normalises the bytes is caught here rather than at the next run
 - every menu dispatches exactly the numbers it prints, so a renumbering cannot leave a dead option or an unreachable branch
+- every `set /p` prompt fits the console width the script asks for — a longer one makes cmd put the input caret at (length mod width), so typing lands *inside* the question
+- every `set /p` variable is compared late-expanded (`!var!`, never `%var%`), so a lone `"` in a typed answer cannot abort the run; the targets are read out of the script, so a new prompt is covered the day it is added
+- the shipped data files (`hosts`, `boot.config`) are ASCII, BOM-free and end with a newline, so the next `>> hosts` cannot glue onto the last blocked name
+- the telemetry undo file is captured **before** the first `sc config`, reads state from the registry and `Get-ScheduledTask` rather than localized `sc qc` / `schtasks /Query` text, and distinguishes "already disabled before Sincript" from "disabled by Sincript"
 - no `reg add` / `reg delete` exists outside `:SafeRegAdd` / `:SafeRegDelete`, so no registry change can skip its backup, its `[FAIL]` line or the `_FAILS` tally
 
 Run from the repository root:
@@ -548,7 +558,7 @@ Run from the repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1
 ```
 
-Exit code `0` means all 121 checks passed; `1` means at least one failed, with
+Exit code `0` means all 125 checks passed; `1` means at least one failed, with
 the offending detail printed. See `tests/tests_README.md` for the full numbered list.
 
 ---
