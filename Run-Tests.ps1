@@ -467,7 +467,7 @@ Invoke-Test ':Summary gates the final line on _FAILS (has [OK] and [WARN] branch
 # ===============================================================================
 Invoke-Test 'Registry actions reset _FAILS and report via :Summary' {
     $cmd = Read-Lines $CmdPath
-    foreach ($r in 'DisableMitigations','EnableMitigations','NvmeFlags','DisableIPv6','GpuAmd','HagsOff','HagsOn') {
+    foreach ($r in 'DisableMitigations','EnableMitigations','NvmeFlags','DisableIPv6','GpuAmd','HagsOff','HagsOn','WuDrvOff','WuDrvOn') {
         $t = ((Get-RoutineBody -Lines $cmd -Label $r) -join "`n")
         Assert-True ($t -match '(?i)set "_FAILS=0"') ":$r does not reset _FAILS before its writes - a stale count would mis-report (regression of Critical #1)."
         Assert-True ($t -match '(?i)call :Summary')  ":$r prints an unconditional status instead of routing through :Summary (regression of Critical #1)."
@@ -519,7 +519,7 @@ Invoke-Test ':ApplyHosts verifies a backup landed before overwriting the system 
     $b = ((Get-RoutineBody -Lines (Read-Lines $CmdPath) -Label 'ApplyHosts') -join "`n").ToLower()
     Assert-True ($b -match '_hbak') ':ApplyHosts no longer tracks whether a hosts backup landed (regression - could overwrite with no backup).'
     $abortIdx = $b.IndexOf('!_hbak!"=="0"')
-    $copyIdx  = $b.IndexOf('%script_dir%hosts')
+    $copyIdx  = $b.IndexOf('copy /y "!script_dir!hosts"')
     Assert-True ($abortIdx -ge 0) ':ApplyHosts has no "if no backup -> abort" guard on _hbak (regression - data-loss window).'
     Assert-True ($copyIdx  -ge 0) ':ApplyHosts no longer copies the bundled hosts over the system hosts - routine changed shape?'
     Assert-True ($abortIdx -lt $copyIdx) ':ApplyHosts overwrites the system hosts BEFORE confirming a backup landed (regression of the data-loss fix).'
@@ -659,7 +659,7 @@ Invoke-Test 'Apostrophe-safe path hand-off via env vars (SteamLight + elevation)
     # the path from breaking the single-quoted PowerShell literals.
     $joinedCmd = $cmd -join "`n"
     Assert-True ($joinedCmd -match '(?im)^\s*set "_SELFPATH=%~f0"') 'The script path is no longer captured before the argument loop - after a shift, %~f0 names an argument rather than this file (regression of F-G1).'
-    Assert-True ($joinedCmd -match '(?im)^\s*set "PT_SELF=%_SELFPATH%"') 'UAC relaunch no longer stages the captured path in PT_SELF - an apostrophe in the script path would break Start-Process (regression).'
+    Assert-True ($joinedCmd -match '(?im)^\s*set "PT_SELF=!_SELFPATH!"') 'UAC relaunch no longer stages the captured path in PT_SELF - an apostrophe in the script path would break Start-Process (regression).'
     # nothing may re-derive %~dp0 / %~f0 after the argument loop has shifted
     $shiftAt = ($cmd | Select-String -Pattern '^\s*shift\s*$' | Select-Object -First 1)
     if ($shiftAt) {
@@ -777,7 +777,8 @@ Invoke-Test 'Machine class detected at startup; advisories warning-only and pre-
 
 # ===============================================================================
 # 31. System tools menu is wired (Pass 1): the main menu offers 12, the
-#     dispatcher routes it, and the submenu routes to both tools and back.
+#     dispatcher routes it, and the submenu routes to all three tools (PATH
+#     editor, lock finder, crash report) and back.
 # ===============================================================================
 Invoke-Test 'System tools menu reachable and wired' {
     $cmd = Read-Lines $CmdPath
@@ -786,6 +787,7 @@ Invoke-Test 'System tools menu reachable and wired' {
     $mtText = (Get-RoutineBody -Lines $cmd -Label 'MenuTools_ask') -join "`n"
     Assert-True ($mtText -match '(?i)if "!sel!"=="1" goto PathEditor') 'MenuTools does not route 1 -> PathEditor.'
     Assert-True ($mtText -match '(?i)if "!sel!"=="2" goto LockFinder') 'MenuTools does not route 2 -> LockFinder.'
+    Assert-True ($mtText -match '(?i)if "!sel!"=="3" goto CrashReport') 'MenuTools does not route 3 -> CrashReport.'
     Assert-True ($mtText -match '(?i)if "!sel!"=="0" goto MainMenu') 'MenuTools has no 0 -> back to MainMenu.'
 }
 
@@ -1195,14 +1197,17 @@ Invoke-Test 'DiagTrack firewall flips the built-in rule group, honestly counted'
 #     RAM saving), ServicesPipeTimeout=30000 (30 s already IS the SCM default, so it
 #     is a no-op, and it would undo a real 60000 fix), EnablePrefetcher=0 (same cost
 #     as clearing the Prefetch folder, which this script already declines, made
-#     permanent). This test guards BOTH halves of "be honest": the reasons stay
-#     visible on the Excluded screen, and no code path ever writes the values.
+#     permanent). TdrDelay / TdrLevel joined them with the crash report: Microsoft
+#     documents them for driver testing and says end users should not change them
+#     (TdrLevel=0 turns detection off); the report names them in echo text only.
+#     This test guards BOTH halves of "be honest": the reasons stay visible on the
+#     Excluded screen, and no code path ever writes the values.
 # ===============================================================================
 Invoke-Test 'Declined tweaks stay declined and stay documented' {
     $cmd = Read-Lines $CmdPath
     $excluded = (Get-RoutineBody -Lines $cmd -Label 'Excluded') -join "`n"
 
-    foreach ($d in 'SvcHostSplitThresholdInKB','ServicesPipeTimeout','EnablePrefetcher') {
+    foreach ($d in 'SvcHostSplitThresholdInKB','ServicesPipeTimeout','EnablePrefetcher','TdrDelay','TdrLevel') {
         Assert-True ($excluded -match [regex]::Escape($d)) ("The Excluded screen no longer explains why $d is left out - the decline became invisible to the user.")
         foreach ($ln in $cmd) {
             $s = $ln.Trim()
@@ -1228,16 +1233,25 @@ Invoke-Test 'Cleanup deletes are gated on a proven root' {
     $text = $code -join "`n"
 
     foreach ($r in 'TEMP','SystemRoot','LocalAppData') {
-        Assert-True ($text -match ('(?i)call :CleanRoot ' + $r + ' "%' + $r + '%"')) ":DoCleanupCore no longer proves $r before deleting under it."
+        # :CleanRoot takes the variable NAME and reads the value itself, late - a path passed as
+        # %2 lost a "!" in the user name (test 133 runs it).
+        Assert-True ($text -match ('(?im)^\s*call :CleanRoot ' + $r + '\s*$')) ":DoCleanupCore no longer proves $r before deleting under it."
     }
 
     # Every delete that interpolates a variable must be gated. A single ungated one
-    # is the whole bug back again.
+    # is the whole bug back again. The deletes under the user profile hand :RunVar the
+    # command by name (test 134) - gated the same way, on the same line.
+    $n = 0
     foreach ($ln in $code) {
-        if ($ln -match '(?i)call :Run "del ') {
+        if ($ln -match '(?i)call :Run "del ' -or $ln -match '(?i)set "_runcmd=del ') {
+            $n++
             Assert-True ($ln -match '(?i)^\s*if defined _clean(TEMP|SystemRoot|LocalAppData)\s') ("Ungated delete in :DoCleanupCore - if its root variable is unset this deletes from a drive root: " + $ln.Trim())
         }
+        if ($ln -match '(?i)set "_runcmd=del ') {
+            Assert-True ($ln -match '(?i)& call :RunVar _runcmd\)\s*$') ("A delete in :DoCleanupCore sets its command but does not run it through :RunVar on the same gated line: " + $ln.Trim())
+        }
     }
+    Assert-True ($n -ge 10) ("Only $n deletes were found in :DoCleanupCore - the scan is not seeing them, so the gating check above proved nothing.")
 }
 
 # ===============================================================================
@@ -1616,10 +1630,10 @@ Invoke-Test ':PresetBegin refuses to run when the JSON temp is unwritable' {
     Assert-True ($pb.Count -gt 0) ':PresetBegin body empty.'
     $joined = $pb -join "`n"
     $code = @($pb | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
-    Assert-True ($joined -match 'if not exist "%PRESET_JSON_TMP%"') ':PresetBegin no longer verifies the JSON temp file landed (regression).'
+    Assert-True ($joined -match 'if not exist "!PRESET_JSON_TMP!"') ':PresetBegin no longer verifies the JSON temp file landed (regression).'
     Assert-True ($code -match 'exit /b 1') ':PresetBegin no longer exits nonzero when the JSON temp is missing (regression).'
     Assert-True ($code -match 'PRESET_MODE=1') ':PresetBegin no longer sets PRESET_MODE=1 on the success path.'
-    $gateAt = $joined.IndexOf('if not exist "%PRESET_JSON_TMP%"')
+    $gateAt = $joined.IndexOf('if not exist "!PRESET_JSON_TMP!"')
     $modeAt = $joined.IndexOf('set "PRESET_MODE=1"')
     Assert-True ($gateAt -ge 0 -and $modeAt -gt $gateAt) ':PresetBegin sets PRESET_MODE before verifying the JSON temp (regression).'
 
@@ -1696,7 +1710,10 @@ Invoke-Test 'SteamLight verifies the Desktop shortcut before claiming it' {
 
 # ===============================================================================
 # 67. Memory-compression disable must not swallow failures, and the preset path
-#     must bump _FAILS so :Summary stays honest.
+#     must bump _FAILS so :Summary stays honest. Each switch has its own try and
+#     the exit code says which failed (1 = compression, 2 = page combining): with
+#     one shared try, a failure in the second call reported that neither change
+#     was made, although memory compression was already off.
 # ===============================================================================
 Invoke-Test 'Memory compression disable reports real outcome (not SilentlyContinue)' {
     $cmd = Read-Lines $CmdPath
@@ -1707,7 +1724,9 @@ Invoke-Test 'Memory compression disable reports real outcome (not SilentlyContin
         $joined = $body -join "`n"
         $code = @($body | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
         Assert-True ($joined -match "ErrorActionPreference='Stop'") ":$r still uses SilentlyContinue - Disable-MMAgent failures would be invisible (regression)."
-        Assert-True ($code -match 'if errorlevel 1') ":$r no longer branches on the PS exit code (regression)."
+        Assert-True ($code -match 'set "_mmrc=%errorlevel%"') ":$r no longer captures the PS exit code (regression)."
+        Assert-True ($code -match '"%_mmrc%"=="1"' -and $code -match '"%_mmrc%"=="2"') ":$r no longer says which switch failed - a partial success would read as a total failure (regression)."
+        Assert-True ($joined -match 'try\{ Disable-MMAgent -MemoryCompression \}catch\{ \$e\+=1 \}' -and $joined -match 'try\{ Disable-MMAgent -PageCombining \}catch\{ \$e\+=2 \}') ":$r shares one try between the two switches again (regression)."
         Assert-True ($code -notmatch 'SilentlyContinue') ":$r still invokes Disable-MMAgent with SilentlyContinue (regression)."
     }
     $dmcBody = Get-RoutineBody -Lines $cmd -Label 'DoMemCompressOff'
@@ -1717,7 +1736,10 @@ Invoke-Test 'Memory compression disable reports real outcome (not SilentlyContin
 
 # ===============================================================================
 # 68. NVIDIA telemetry tasks are disabled by name prefix (like privacy extras),
-#     never via hardcoded schtasks /TN GUID paths.
+#     never via hardcoded schtasks /TN GUID paths - and NvDriverUpdateCheckDaily_
+#     is not one of them: it is NVIDIA's driver-update check, not telemetry, and it
+#     was being turned off unannounced. An undo file is written before anything is
+#     disabled (test 126 runs its generator).
 # ===============================================================================
 Invoke-Test 'NVIDIA telemetry tasks disabled by name, not hardcoded TN paths' {
     $cmd = Read-Lines $CmdPath
@@ -1729,10 +1751,19 @@ Invoke-Test 'NVIDIA telemetry tasks disabled by name, not hardcoded TN paths' {
     Assert-True ($code -match 'Disable-ScheduledTask') ':DisableNvidiaTelemetryTasks no longer disables anything.'
     Assert-True ($code -match 'NvTmRep_') ':DisableNvidiaTelemetryTasks lost the NvTmRep_ name prefix.'
     Assert-True ($code -match 'NvTmMon_') ':DisableNvidiaTelemetryTasks lost the NvTmMon_ name prefix.'
-    Assert-True ($code -match 'NvDriverUpdateCheckDaily_') ':DisableNvidiaTelemetryTasks lost the NvDriverUpdateCheckDaily_ name prefix.'
-    Assert-True ($code -notmatch '(?i)schtasks') ':DisableNvidiaTelemetryTasks INVOKES schtasks - use name lookup like :DisableTelemetryTasks.'
+    Assert-True ($code -notmatch 'NvDriverUpdateCheckDaily_') ':DisableNvidiaTelemetryTasks disables NVIDIA''s driver-update check again - it is not telemetry (regression).'
+    # schtasks appears in the generated undo file's TEXT (call :pt_do schtasks ... /Enable); the
+    # routine itself must never run it.
+    Assert-True ($code -notmatch '(?im)^\s*schtasks\b|call :Run "schtasks') ':DisableNvidiaTelemetryTasks INVOKES schtasks - use name lookup like :DisableTelemetryTasks.'
+    Assert-True ($code -match 'PT_NV_UNDO' -and $code -match '(?i)Telemetry_nvidia_') ':DisableNvidiaTelemetryTasks no longer writes its undo file (regression).'
+    $iUndo = $code.IndexOf('Set-Content -LiteralPath $env:PT_NV_UNDO')
+    $iOff = $code.IndexOf('Disable-ScheduledTask -InputObject')
+    Assert-True ($iUndo -ge 0 -and $iOff -gt $iUndo) ':DisableNvidiaTelemetryTasks disables the tasks BEFORE writing the undo file - it would record them as already disabled (regression).'
+    # echo lines only: the PowerShell payload writes "[OK]" / "[FAIL]" into the undo file as
+    # data, and that line comes first - it is not the routine reporting anything.
     $si = -1; $fi = -1; $oi = -1
     for ($i = 0; $i -lt $b.Count; $i++) {
+        if ($b[$i] -notmatch '(?i)^\s*echo\b') { continue }
         if ($si -lt 0 -and $b[$i] -match '\[SKIP\]') { $si = $i }
         if ($fi -lt 0 -and $b[$i] -match '\[FAIL\]') { $fi = $i }
         if ($oi -lt 0 -and $b[$i] -match '\[OK\]')   { $oi = $i }
@@ -1833,7 +1864,7 @@ Invoke-Test ':DoCleanupCore adds safe regenerating junk; Prefetch stays excluded
     Assert-True ($joined -match '(?i)CrashDumps') ':DoCleanupCore missing CrashDumps cleanup.'
     Assert-True ($joined -match '(?i)Minidump') ':DoCleanupCore missing Minidump cleanup.'
     Assert-True ($joined -match '(?i)DeliveryOptimization\\Cache') ':DoCleanupCore missing DeliveryOptimization\Cache cleanup.'
-    Assert-True ($joined -match '(?i)if defined _cleanLocalAppData if exist "%LocalAppData%\\CrashDumps') ':CrashDumps delete is not gated on _cleanLocalAppData.'
+    Assert-True ($joined -match '(?i)if defined _cleanLocalAppData if exist "!LocalAppData!\\CrashDumps') ':CrashDumps delete is not gated on _cleanLocalAppData.'
     Assert-True ($joined -match '(?i)if defined _cleanSystemRoot if exist "%SystemRoot%\\Minidump') ':Minidump delete is not gated on _cleanSystemRoot.'
     Assert-True ($joined -match '(?i)if defined _cleanSystemRoot if exist "%SystemRoot%\\SoftwareDistribution\\DeliveryOptimization\\Cache') ':DO Cache delete is not gated on _cleanSystemRoot.'
     $bad = @($body | Where-Object { $_ -match '(?i)\bdel\b' -and $_ -match '(?i)Prefetch' })
@@ -1964,7 +1995,7 @@ Invoke-Test ':InstallAsarInto backups are write-once and gate the install' {
     $gate = $code.IndexOf('if "!_hadorig!"=="1" if not defined _bakloc')
     # _asrc, not _src: the callers hold the same path in _SRC and cmd names are
     # case-insensitive, so the old name was literally the same variable (test 118)
-    $write = $code.IndexOf('copy /y "%_asrc%"')
+    $write = $code.IndexOf('copy /y "!_asrc!"')
     Assert-True ($gate -ge 0)             ':InstallAsarInto lost the "no backup landed -> refuse" gate (regression of F4).'
     Assert-True ($write -ge 0)            ':InstallAsarInto install copy not found - routine changed shape?'
     Assert-True ($gate -lt $write)        ':InstallAsarInto gate no longer precedes the install copy - it overwrites first (regression of F4).'
@@ -2095,7 +2126,7 @@ Invoke-Test 'OpenAsar counts per-flavor failures and cleans up the downloaded ni
         $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' }) -join "`n"
         Assert-True ($code -match '(?i)set "_OAFAIL=0"')  ":$r does not reset _OAFAIL before the install loop - a stale tally would carry over (regression of F6)."
         Assert-True ($code -match '(?i)_OAFAIL%"=="0"')   ":$r never reports the failure tally, so a partial install still reads as success (regression of F6)."
-        Assert-True ($code -match '(?i)del /f /q "%_OADL%"') ":$r leaves the downloaded nightly behind in %TEMP% (regression of F7)."
+        Assert-True ($code -match '(?i)del /f /q "!_OADL!"') ":$r leaves the downloaded nightly behind in %TEMP% (regression of F7)."
     }
 }
 
@@ -2330,7 +2361,7 @@ Invoke-Test 'Power undo file is captured once per action' {
 
 # ===============================================================================
 # 93. The undo file is reachable from the UI - a backup nobody can run is not an
-#     undo. Item 6 on Backups & status, with Manage moved to 7.
+#     undo. Item 6 on Backups & status (telemetry is 7, Manage 8).
 # ===============================================================================
 Invoke-Test ':RestorePowerBackup is wired into the Backups menu' {
     $cmd = Read-Lines $CmdPath
@@ -2348,7 +2379,12 @@ Invoke-Test ':RestorePowerBackup is wired into the Backups menu' {
     $r2 = Get-RoutineBody -Lines $cmd -Label 'RestorePowerBackup_ask'
     $rb = (@($r1) + @($r2)) -join "`n"
     Assert-True ($rb -match '(?i)PowerPlan_\*\.bat') ':RestorePowerBackup no longer lists the PowerPlan_*.bat undo files.'
-    Assert-True ($rb -match '(?i)call "%_pfile%" /q')  ':RestorePowerBackup no longer runs the chosen undo file with /q (its own pause would block the menu).'
+    # In a CHILD cmd, never `call`ed: a syntax error in a called batch file ends ALL batch
+    # processing, the caller included - which is how a broken undo file closed sincript
+    # (test 126). /q still suppresses the file's own pause, which would block the menu.
+    $rbCode = (@(Get-BodyLines -Lines $cmd -Label 'RestorePowerBackup' -CodeOnly) + @(Get-BodyLines -Lines $cmd -Label 'RestorePowerBackup_ask' -CodeOnly)) -join "`n"
+    Assert-True ($rbCode -match '(?i)cmd /d /v:off /s /c ""!_pfile!" /q"') ':RestorePowerBackup no longer runs the chosen undo file in a child cmd with /q - `call`ed, a syntax error in it ends sincript too, and without /q its own pause blocks the menu (regression).'
+    Assert-True ($rbCode -notmatch '(?i)\bcall\s+"?[%!]_pfile') ':RestorePowerBackup `call`s the undo file again - a syntax error in it would end sincript too (regression).'
 }
 
 # ===============================================================================
@@ -2941,14 +2977,15 @@ Invoke-Test 'Windows Update reset prunes only OLD leftovers, opt-in, never the l
 #      rot: every temp file a worker writes carries %RANDOM%, and every PT_*
 #      variable handed to a PowerShell child is cleared again afterwards. Fixed
 #      names meant two sincript windows read each other's results - and the first
-#      to finish deleted the file the second was about to read.
+#      to finish deleted the file the second was about to read. TEMP is matched
+#      as %TEMP% and as !TEMP!: the late-read form is what the script uses now.
 # ===============================================================================
 Invoke-Test 'Worker temp files are per-call, and every PT_* handoff variable is cleared' {
     $cmd = Read-Lines $CmdPath
 
     $fixed = @()
     for ($i = 0; $i -lt $cmd.Count; $i++) {
-        foreach ($m in [regex]::Matches($cmd[$i], "(?i)(?:%TEMP%\\|\`$env:TEMP\s+')pt_[a-z0-9_]+\.txt")) {
+        foreach ($m in [regex]::Matches($cmd[$i], "(?i)(?:[%!]TEMP[%!]\\|\`$env:TEMP\s+')pt_[a-z0-9_]+\.txt")) {
             if ($m.Value -notmatch '%RANDOM%') { $fixed += ("line {0}: {1}" -f ($i + 1), $m.Value) }
         }
     }
@@ -3293,7 +3330,7 @@ Invoke-Test 'Flipping a startup entry refuses if the list changed since it was s
 
     # caller side: capture the fingerprint, hand it back, and clear the handoff vars
     $mgr = ((Get-RoutineBody -Lines $cmd -Label 'StartupMgr') -join "`n")
-    Assert-True ($mgr -match '(?i)for /f "usebackq delims=" %%S in \("%_susigf%"\) do set "_susigv=%%S"') ':StartupMgr no longer reads the fingerprint the list pass produced (regression of F-K1).'
+    Assert-True ($mgr -match '(?i)for /f "usebackq delims=" %%S in \("!_susigf!"\) do set "_susigv=%%S"') ':StartupMgr no longer reads the fingerprint the list pass produced (regression of F-K1).'
     $all = $cmd -join "`n"
     Assert-True ($all -match '(?i)set "PT_SU_SIGIN=%_susigv%"') 'The fingerprint is never handed back to the toggle pass, so the check can never fire (regression of F-K1).'
     # a null -FilePath makes Out-File PROMPT for it, in a minimized window nobody can answer
@@ -3352,8 +3389,12 @@ Invoke-Test 'The HAGS screen states the stored value, and Status carries the mai
     Assert-True ($hCode -notmatch '(?i)powershell') ':HagsToggle spawns PowerShell to read one DWORD (regression of F-L1).'
 
     # the two headers must agree; both are built from the same probes
-    $hdr = '(?i)echo   Build %WIN_BUILD%   Win11=%IS_WIN11%   GPU=%GPU%   Machine=%MACHINE%   Disk=%SYSDISK%'
+    $hdr = '(?i)echo   Build %WIN_BUILD%   Win11=%IS_WIN11%   CPU=%CPU%   GPU=%GPU%   Disk=%SYSDISK%'
     Assert-True (([regex]::Matches($all, $hdr)).Count -ge 2) 'The Status screen no longer carries the same machine header as the main menu, so the two can disagree about what was probed (regression of F-L2).'
+    Assert-True (([regex]::Matches($all, '(?i)echo   Machine=%MACHINE%   Undervolt tool: !_uvhdr!')).Count -ge 2) 'The second header line no longer shows Machine= beside the undervolt tool on both screens.'
+    # CPU vendor from the registry value Windows fills in at boot - locale-free, no WMI/PowerShell
+    Assert-True ($all -match '(?i)reg query "HKLM\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0" /v VendorIdentifier') 'CPU= is no longer read from CentralProcessor\0 VendorIdentifier.'
+    Assert-True ($all -match '(?i)if /i "!_cpuv!"=="GenuineIntel" set "CPU=intel"' -and $all -match '(?i)if /i "!_cpuv!"=="AuthenticAMD" set "CPU=amd"') 'The CPU vendor strings no longer map to intel / amd.'
     $st = ((Get-RoutineBody -Lines $cmd -Label 'Status') -join "`n")
     Assert-True ($st -match '(?i)call :DetectSysDisk') ':Status no longer resolves the disk type before printing it (regression of F-L2).'
     Assert-True ($st -match '(?i)call :DetectUndervolt') ':Status no longer resolves the undervolt probe before printing it (regression of F-L2).'
@@ -3469,6 +3510,55 @@ Invoke-Test 'Typed input is compared late-expanded, so a lone quote cannot abort
         }
     }
     Assert-True ($bad.Count -eq 0) ("Typed input is compared with %var% instead of !var!, so a lone double quote at that prompt aborts the script: " + ($bad -join ' | '))
+
+    # A validator that splices the typed value into its own code breaks the same way. In
+    # `for /f "..." %%x in ("%v%")` a quote in the value ends the string early and the line no
+    # longer parses: the timer-resolution prompt closed the script on `"` or `1"2`. And `50!0`
+    # passed as a number there, because delayed expansion dropped the lone `!` after `%v%`
+    # had spliced it in. `!v!` is substituted after parsing and taken verbatim.
+    $spliced = @()
+    $late = 0
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        $ln = $cmd[$i]
+        if ($ln.Trim() -match '^(?i)(rem\b|::)' -or $ln -notmatch '(?i)\bfor\s+/f\b' -or $ln -match '(?i)usebackq') { continue }
+        foreach ($m in [regex]::Matches($ln, '(?i)\bin\s*\(\s*"([%!])([A-Za-z_][A-Za-z0-9_]*)[%!]"\s*\)')) {
+            if (-not $targets.ContainsKey($m.Groups[2].Value.ToLower())) { continue }
+            if ($m.Groups[1].Value -eq '%') { $spliced += ("line {0}: {1}" -f ($i + 1), $ln.Trim()) } else { $late++ }
+        }
+    }
+    Assert-True ($late -ge 1) 'No for /f validator over typed input was found at all - the scan is not seeing them, so the check below proves nothing.'
+    Assert-True ($spliced.Count -eq 0) ("A for /f validator splices typed input in with %var%, so a lone double quote at that prompt aborts the script and a '!' slips past the check: " + ($spliced -join ' | '))
+
+    # Nor may anything between the prompt and the end of the validator's rejection branch read
+    # the value early. With `echo [ERROR] "%v%" ...` inside `if defined bad ( ... )`, a typed
+    # `")` closed the block and aborted the script, and `"&echo X` ran the command (measured).
+    $zones = 0
+    $early = @()
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        $m = [regex]::Match($cmd[$i], '(?i)^\s*for\s+/f\s+"[^"]*"\s+%%\w\s+in\s*\(\s*"!([A-Za-z_][A-Za-z0-9_]*)!"\s*\)\s*do\s+set\s+"([A-Za-z_][A-Za-z0-9_]*)=1"')
+        if (-not $m.Success -or -not $targets.ContainsKey($m.Groups[1].Value.ToLower())) { continue }
+        $v = $m.Groups[1].Value
+        $flag = $m.Groups[2].Value
+        $start = -1
+        for ($k = $i - 1; $k -ge [Math]::Max(0, $i - 30); $k--) {
+            if ($cmd[$k] -match ('(?i)\bset\s+/p\s+"' + [regex]::Escape($v) + '=')) { $start = $k; break }
+        }
+        $open = -1
+        for ($k = $i + 1; $k -le [Math]::Min($cmd.Count - 1, $i + 5); $k++) {
+            if ($cmd[$k] -match ('(?i)^\s*if\s+defined\s+' + [regex]::Escape($flag) + '\s*\(\s*$')) { $open = $k; break }
+        }
+        if ($start -lt 0 -or $open -lt 0) { continue }
+        $end = -1
+        for ($k = $open + 1; $k -lt $cmd.Count; $k++) { if ($cmd[$k].Trim() -eq ')') { $end = $k; break } }
+        if ($end -lt 0) { continue }
+        $zones++
+        for ($k = $start + 1; $k -le $end; $k++) {
+            if ($cmd[$k].Trim() -match '^(?i)(rem\b|::)') { continue }
+            if ($cmd[$k] -match ('(?i)%' + [regex]::Escape($v) + '%')) { $early += ("line {0}: {1}" -f ($k + 1), $cmd[$k].Trim()) }
+        }
+    }
+    Assert-True ($zones -ge 2) ("Found {0} prompt(s) with a for /f validator and a rejection branch - the timer-resolution and Unity job-worker prompts should both be here, so the scan is not seeing them." -f $zones)
+    Assert-True ($early.Count -eq 0) ("Typed input is read with %var% between its prompt and the end of its rejection branch - a quote in it can close the block or run a command: " + ($early -join ' | '))
 }
 
 # ===============================================================================
@@ -3535,10 +3625,17 @@ Invoke-Test 'Telemetry disables are captured first, into a self-checking undo fi
            (Get-BodyLines -Lines $cmd -Label 'RestoreTelemetryBackup_ask' -CodeOnly)) -join "`n"
     Assert-True ($rt.Length -gt 0) ':RestoreTelemetryBackup is missing.'
     Assert-True ($rt -match '(?i)Telemetry_\*\.bat') ':RestoreTelemetryBackup no longer lists the Telemetry_*.bat undo files (regression).'
-    Assert-True ($rt -match '(?i)call "%_tfile%" /q') ':RestoreTelemetryBackup no longer runs the chosen file with /q - the undo file own pause would block the menu (regression).'
+    Assert-True ($rt -match '(?i)cmd /d /v:off /s /c ""!_tfile!" /q"') ':RestoreTelemetryBackup no longer runs the chosen file in a child cmd with /q - `call`ed, a syntax error in it ends sincript too, and without /q its own pause blocks the menu (regression).'
+    Assert-True ($rt -notmatch '(?i)\bcall\s+"?[%!]_tfile') ':RestoreTelemetryBackup `call`s the undo file again - a syntax error in it would end sincript too (regression; see test 126).'
     Assert-True ($rt -match '_RUNTRACK=') ':RestoreTelemetryBackup no longer clears _RUNTRACK, so the next cleanup counts benign failures as real ones (regression).'
 }
 
+# ===============================================================================
+# 125. Every set /p prompt fits the console width the script asks for. cmd puts
+#      the input caret at (prompt length mod console width), so a prompt as wide
+#      as the console puts the caret inside the question, and the first
+#      keystroke overwrites the text the user is reading.
+# ===============================================================================
 Invoke-Test 'Every set /p prompt fits the console width the script asks for' {
     $cmd = Read-Lines $CmdPath
     # Read the width out of the script instead of hard-coding it: if `mode con` ever changes,
@@ -3567,6 +3664,3432 @@ Invoke-Test 'Every set /p prompt fits the console width the script asks for' {
     }
     Assert-True ($checked -gt 80) "Only $checked prompt(s) were measured - the scan is not finding them, so the rest of this test proves nothing."
     Assert-True ($bad.Count -eq 0) ("A set /p prompt at least as wide as the ${width}-column console makes cmd put the caret at (length mod width) - typing then overwrites the question instead of following it. Too long: " + ($bad -join ', '))
+}
+
+# ===============================================================================
+# 126. The undo files are RUN here, not only read (power, telemetry, and the
+#      NVIDIA tasks). Every other test reads the
+#      generators' text, and that is how :PowerBackup came to write a broken
+#      file: its payload reused $q - the double quote the generated lines are
+#      built with - as the cache for the `powercfg /query` fallback, so every
+#      PowerPlan_*.bat ended in `if %~1== pause`, a syntax error. Reached through
+#      `call`, that error ended sincript too, right after the restore.
+#      Both generator payloads run here in a child Windows PowerShell and write
+#      to %TEMP%. `powercfg` and Get-ScheduledTask are faked, so nothing depends
+#      on this machine's plans or tasks, and the fake plan has no stored values:
+#      every setting takes the /query fallback, the path that reused $q.
+#      Anything that could change the system ends the child instead. Each
+#      generated file is then dry-run the way the Backups menu runs it (a child
+#      cmd, /q) with every restore command turned into an echo, and its own
+#      report and exit code are checked. The power generator runs six times,
+#      with Get-ItemProperty answering the hibernation state from the test: on,
+#      off, only Windows' default recorded, and unreadable - then off and on
+#      again with PT_HBOFF set, as when the Power screen turned hibernation off
+#      after a failed capture and a later capture on the same visit retries.
+# ===============================================================================
+Invoke-Test 'The undo-file generators write batch files that run to the end' {
+    $cmd = Read-Lines $CmdPath
+    $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $psExe)) { $psExe = (Get-Process -Id $PID).Path }
+    $cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $tag = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $pwFile = Join-Path ([System.IO.Path]::GetTempPath()) ('PT126_PowerPlan_{0}.bat' -f $tag)
+    $tlFile = Join-Path ([System.IO.Path]::GetTempPath()) ('PT126_Telemetry_{0}.bat' -f $tag)
+    $nvFile = Join-Path ([System.IO.Path]::GetTempPath()) ('PT126_Telemetry_nvidia_{0}.bat' -f $tag)
+    $nvRes = Join-Path ([System.IO.Path]::GetTempPath()) ('PT126_nvres_{0}.txt' -f $tag)
+    $fakeGuid = '1d2c3b4a-0126-4126-8126-000000000126'
+
+    # Runs a program with stdin closed - a stray `pause` then reads end-of-file instead of
+    # hanging the harness - and returns its exit code and output.
+    $runProc = {
+        param([string]$File, [string]$Arguments)
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $File
+        $psi.Arguments = $Arguments
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $p.StandardInput.Close()
+        $err = $p.StandardError.ReadToEndAsync()
+        $out = $p.StandardOutput.ReadToEnd()
+        if (-not $p.WaitForExit(60000)) { $p.Kill(); throw ('test 126: {0} did not finish within 60 s.' -f (Split-Path -Leaf $File)) }
+        [pscustomobject]@{ Code = $p.ExitCode; Out = $out; Err = $err.Result }
+    }
+    $encoded = { param([string]$Text) '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Text)) }
+
+    # Loaded ahead of each payload in the child. The fakes answer for this test's plan and
+    # tasks; everything a generator could use to change the system exits the child with 126.
+    $prelude = @'
+foreach ($n in @('powercfg.exe', 'sc.exe', 'schtasks', 'schtasks.exe', 'reg', 'reg.exe', 'Set-Service', 'Start-Service', 'Stop-Service', 'Restart-Service', 'Enable-ScheduledTask', 'Disable-ScheduledTask', 'Set-ItemProperty', 'New-ItemProperty', 'Remove-ItemProperty', 'Remove-Item', 'Start-Process')) {
+    Set-Item -Path ('function:global:' + $n) -Value ([scriptblock]::Create("[Console]::Error.WriteLine('test 126: the generator tried to run $n'); [Environment]::Exit(126)"))
+}
+function global:powercfg {
+    if ($args[0] -eq '/getactivescheme') { return 'Power Scheme GUID: FAKEGUID  (test 126)' }
+    if ($args[0] -eq '/query') { return @('    Current AC Power Setting Index: 0x0000012c', '    Current DC Power Setting Index: 0x000000b4') }
+    [Console]::Error.WriteLine('test 126: unexpected powercfg ' + ($args -join ' ')); [Environment]::Exit(126)
+}
+function global:Get-ScheduledTask {
+    [CmdletBinding()] param([string]$TaskName)
+    if (-not $TaskName) {
+        return @(
+            [pscustomobject]@{ TaskPath = '\NVIDIA\'; TaskName = 'NvTmRep_PT126'; State = 'Ready' },
+            [pscustomobject]@{ TaskPath = '\NVIDIA\'; TaskName = 'NvTmRep_CrashReport2_PT126'; State = 'Ready' },
+            [pscustomobject]@{ TaskPath = '\NVIDIA\'; TaskName = 'NvTmMon_PT126'; State = 'Disabled' },
+            [pscustomobject]@{ TaskPath = '\NVIDIA\'; TaskName = 'NvDriverUpdateCheckDaily_PT126'; State = 'Ready' },
+            [pscustomobject]@{ TaskPath = '\PT126\'; TaskName = 'Unrelated'; State = 'Ready' })
+    }
+    if ($TaskName -like '*absent*') { return }
+    $state = 'Ready'
+    if ($TaskName -like '*off*') { $state = 'Disabled' }
+    [pscustomobject]@{ TaskPath = '\PT126\'; TaskName = $TaskName; State = $state }
+}
+function global:Get-ItemProperty {
+    [CmdletBinding()] param([string]$LiteralPath)
+    if ($LiteralPath -eq 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -and $global:PT126_HIB) {
+        switch ($global:PT126_HIB) {
+            'on'      { return [pscustomobject]@{ HibernateEnabled = 1; HibernateEnabledDefault = 0 } }
+            'off'     { return [pscustomobject]@{ HibernateEnabled = 0; HibernateEnabledDefault = 1 } }
+            'hbon'    { return [pscustomobject]@{ HibernateEnabled = 1; HibernateEnabledDefault = 0 } }
+            'hboff'   { return [pscustomobject]@{ HibernateEnabled = 0; HibernateEnabledDefault = 1 } }
+            'default' { return [pscustomobject]@{ HibernateEnabledDefault = 1 } }
+            default   { return $null }
+        }
+    }
+    Microsoft.PowerShell.Management\Get-ItemProperty -LiteralPath $LiteralPath -ErrorAction SilentlyContinue
+}
+'@
+    $prelude = $prelude.Replace('FAKEGUID', $fakeGuid)
+
+    # Pull each payload out of its `powershell -Command "..."` line and undo the one thing
+    # cmd does to it: %% becomes %. Anything else cmd would change, this test cannot copy.
+    $payload = @{}
+    foreach ($key in @('PT_PWBAK', 'PT_TLBAK', 'PT_NV_UNDO')) {
+        $hits = @($cmd | Where-Object { $_.TrimStart() -notmatch '^(?i)rem\b' -and $_.Contains('Set-Content -LiteralPath $env:' + $key + ' ') })
+        Assert-True ($hits.Count -eq 1) ('Expected one generator line writing $env:{0}, found {1} - it moved or was split, so this test is not running it.' -f $key, $hits.Count)
+        $m = [regex]::Match($hits[0], '-Command "(.*)"\s*$')
+        Assert-True $m.Success ('The {0} generator lost the -Command "..." shape this test extracts.' -f $key)
+        $raw = $m.Groups[1].Value
+        Assert-True (-not $raw.Contains('"')) ('The {0} payload holds a double quote, which would end cmd''s quoting of it.' -f $key)
+        Assert-True (-not $raw.Contains('!')) ('The {0} payload holds a "!" - delayed expansion would change it before PowerShell saw it, and this test cannot copy that.' -f $key)
+        Assert-True (-not $raw.Replace('%%', '').Contains('%')) ('The {0} payload holds a single "%" that cmd would expand - this test cannot copy that.' -f $key)
+        $payload[$key] = $raw.Replace('%%', '%')
+    }
+
+    # Dry-runs a generated file the way the Backups menu runs it, with every restore command
+    # turned into an echo, after checking that nothing else in it could do anything.
+    $dryRun = {
+        param([string]$File, [string]$Unit)
+        $name = Split-Path -Leaf $File
+        $lines = [System.IO.File]::ReadAllLines($File)
+        $safe = '^(|rem|rem .*|@echo off|setlocal|set "PT_(OK|FAIL)=0"|call :pt_do [^&|<>^]+|if (not )?"?%PT_FAIL%"?=="?0"? echo [^&|<>^]*|if "?%~1"?==(""|) pause|exit /b|exit /b %PT_FAIL%|:pt_do|:pt_bad|%\*|if errorlevel 1 goto :pt_bad|set /a PT_(OK|FAIL)\+=1|echo   \[FAIL\] %\*)$'
+        $unknown = @($lines | Where-Object { $_ -cnotmatch $safe })
+        Assert-True ($unknown.Count -eq 0) ('{0} has line(s) this test does not know to be safe to dry-run - check them, then extend the list: {1}' -f $name, ($unknown -join ' | '))
+        $n = @($lines | Where-Object { $_.StartsWith('call :pt_do ') }).Count
+        Assert-True ($n -ge 2) ('{0} restores {1} thing(s) - too few for the dry run to prove anything.' -f $name, $n)
+        $dry = $File + '.dry.bat'
+        [System.IO.File]::WriteAllLines($dry, [string[]]@($lines | ForEach-Object { $_ -replace '^call :pt_do ', 'call :pt_do echo ' }), [System.Text.Encoding]::ASCII)
+        $r = & $runProc $cmdExe ('/d /v:off /s /c ""' + $dry + '" /q"')
+        $shown = (($r.Out + $r.Err).Trim() -replace '\s*\r?\n\s*', ' | ')
+        Assert-True ($r.Code -eq 0) ('{0}, run the way the Backups menu runs it, ended with exit {1}, not 0: {2}' -f $name, $r.Code, $shown)
+        Assert-True ($r.Out.Contains(('[OK] Restored {0} {1}' -f $n, $Unit))) ('{0} did not report all {1} restore command(s) as done: {2}' -f $name, $n, $shown)
+    }
+
+    try {
+        # ---- power: a plan with nothing stored, so every value takes the /query fallback
+        $r = & $runProc $psExe (& $encoded ($prelude + "`n`$global:PT126_HIB = 'on'`n`$env:PT_HBOFF = `$null`n`$env:PT_PWBAK = '" + $pwFile.Replace("'", "''") + "'`n" + $payload['PT_PWBAK']))
+        Assert-True ($r.Code -ne 126) ('The power generator tried to change the system: ' + $r.Err.Trim())
+        Assert-True ($r.Code -eq 0 -and (Test-Path -LiteralPath $pwFile)) ('The power generator wrote no undo file (exit {0}): {1}' -f $r.Code, $r.Err.Trim())
+        $pw = [System.IO.File]::ReadAllLines($pwFile)
+        Assert-True ($pw -contains 'if "%~1"=="" pause') 'The power undo file''s last check is not `if "%~1"=="" pause` - the generator lost its quote character. It came out as `if %~1== pause` when the /query cache reused $q: a syntax error that ended sincript right after a restore (regression).'
+        $unq = @($pw | Where-Object { $_ -match '^if ' -and $_ -notmatch '^if (not )?"' -and $_ -notmatch '^if errorlevel ' })
+        Assert-True ($unq.Count -eq 0) ('Unquoted comparison(s) in the power undo file: ' + ($unq -join ' | '))
+        $vals = @($pw | Where-Object { $_ -match '^call :pt_do powercfg -set(ac|dc)valueindex ' })
+        $notes = @($pw | Where-Object { $_ -match 'not stored on this plan; this is the value that was in effect' })
+        Assert-True ($vals.Count -ge 2 -and $notes.Count -eq $vals.Count) ('Every value of the fake plan should come from the /query fallback - the path that reused $q - but {0} of {1} did, so this test is not exercising it.' -f $notes.Count, $vals.Count)
+        Assert-True (@($vals | Where-Object { $_ -match ('^call :pt_do powercfg -setacvalueindex {0} \S+ \S+ 300$' -f $fakeGuid) }).Count -ge 1) 'The /query fallback no longer reads 0x0000012c as 300 on AC - the first index is AC.'
+        Assert-True (@($vals | Where-Object { $_ -match ('^call :pt_do powercfg -setdcvalueindex {0} \S+ \S+ 180$' -f $fakeGuid) }).Count -ge 1) 'The /query fallback no longer reads 0x000000b4 as 180 on battery - AC and DC may be swapped.'
+        Assert-True (@($pw | Where-Object { $_ -eq 'call :pt_do powercfg /hibernate on' }).Count -eq 1) 'The power undo file does not turn hibernation back on although it was on at backup time (regression).'
+        Assert-True (@($pw | Where-Object { $_ -match 'HibernateEnabledDefault' }).Count -eq 0) 'The power undo file says it used Windows'' default although HibernateEnabled was set - the stored value must win.'
+        & $dryRun $pwFile 'power setting'
+
+        # ---- power again, three more hibernation states: already off (the user's own choice,
+        #      never reversed), only HibernateEnabledDefault recorded (Windows goes by it), and
+        #      nothing readable (the file must say so and name the manual command, not guess).
+        #      Then PT_HBOFF, set when the Power screen turned hibernation off with no capture
+        #      landed: a retried capture that reads "off" may be reading sincript's own change,
+        #      so it must say the earlier state is unknown, never "already off before sincript";
+        #      one that reads "on" still restores it. The 4th item is a line that must NOT appear.
+        $alreadyOff = 'rem  hibernation was already off before sincript - left alone'
+        foreach ($hc in @(
+                @('off', 0, $alreadyOff, ''),
+                @('default', 1, 'rem  HibernateEnabled was not set, so this is the Windows default (HibernateEnabledDefault).', ''),
+                @('unreadable', 0, 'rem  turn it back on from an elevated prompt with:  powercfg /hibernate on', ''),
+                @('hboff', 0, 'rem  prompt with:  powercfg /hibernate on', $alreadyOff),
+                @('hbon', 1, 'rem  hibernation was on before sincript - turn it back on', 'rem  prompt with:  powercfg /hibernate on'))) {
+            $hf = $pwFile + '.' + $hc[0] + '.bat'
+            $hbEnv = "`$env:PT_HBOFF = `$null"
+            if ($hc[0] -like 'hb*') { $hbEnv = "`$env:PT_HBOFF = '1'" }
+            $r = & $runProc $psExe (& $encoded ($prelude + "`n`$global:PT126_HIB = '" + $hc[0] + "'`n" + $hbEnv + "`n`$env:PT_PWBAK = '" + $hf.Replace("'", "''") + "'`n" + $payload['PT_PWBAK']))
+            Assert-True ($r.Code -ne 126) ('The power generator tried to change the system: ' + $r.Err.Trim())
+            Assert-True ($r.Code -eq 0 -and (Test-Path -LiteralPath $hf)) ('The power generator wrote no undo file with hibernation {0} (exit {1}): {2}' -f $hc[0], $r.Code, $r.Err.Trim())
+            $hl = [System.IO.File]::ReadAllLines($hf)
+            $hon = @($hl | Where-Object { $_ -match '^call :pt_do .*hibernate' }).Count
+            Assert-True ($hon -eq $hc[1]) ('With hibernation {0} at backup time, the power undo file has {1} hibernation restore line(s), not {2} (regression).' -f $hc[0], $hon, $hc[1])
+            Assert-True (@($hl | Where-Object { $_ -eq $hc[2] }).Count -eq 1) ('With hibernation {0} at backup time, the power undo file no longer says: {1}' -f $hc[0], $hc[2])
+            if ($hc[3]) { Assert-True (@($hl | Where-Object { $_ -eq $hc[3] }).Count -eq 0) ('With hibernation {0} at backup time, the power undo file says: {1} (regression).' -f $hc[0], $hc[3]) }
+            & $dryRun $hf 'power setting'
+        }
+
+        # ---- telemetry: a service that is missing, one every Windows runs, and three tasks
+        $setup = "`$env:PT_TLBAK = '" + $tlFile.Replace("'", "''") + "'`n`$env:PT_TL_SVC = 'PT126NoSuchService|EventLog'`n`$env:PT_TL_TASKS = 'PT126 task|PT126 off task|PT126 absent task'`n"
+        $r = & $runProc $psExe (& $encoded ($prelude + "`n" + $setup + $payload['PT_TLBAK']))
+        Assert-True ($r.Code -ne 126) ('The telemetry generator tried to change the system: ' + $r.Err.Trim())
+        Assert-True ($r.Code -eq 0 -and (Test-Path -LiteralPath $tlFile)) ('The telemetry generator wrote no undo file (exit {0}): {1}' -f $r.Code, $r.Err.Trim())
+        $tl = [System.IO.File]::ReadAllLines($tlFile)
+        Assert-True ($tl -contains 'if "%~1"=="" pause') 'The telemetry undo file''s last check is not `if "%~1"=="" pause` - check the quote character in its generator (regression).'
+        Assert-True ($tl -contains 'call :pt_do schtasks /Change /TN "\PT126\PT126 task" /Enable') 'The telemetry undo file no longer re-enables, quoted, a task that was enabled (regression).'
+        Assert-True (@($tl | Where-Object { $_ -like '*PT126 off task was already disabled before sincript*' }).Count -eq 1) 'The telemetry undo file no longer leaves alone a task that was already disabled (regression).'
+        Assert-True (@($tl | Where-Object { $_ -like '*PT126NoSuchService is not on this machine*' }).Count -eq 1) 'The telemetry undo file no longer notes a service that does not exist.'
+        Assert-True (@($tl | Where-Object { $_ -like 'call :pt_do sc config EventLog start= *' }).Count -eq 1) 'The telemetry undo file wrote no start-type restore for EventLog, which every working Windows runs - the service branch of the generator is not being exercised.'
+        & $dryRun $tlFile 'item'
+
+        # ---- NVIDIA tasks: disabling fake task objects is the routine's job, so here - and only
+        #      here - Disable-ScheduledTask is a no-op instead of the guard that ends the child
+        $setup = "`$env:PT_NV_UNDO = '" + $nvFile.Replace("'", "''") + "'`n`$env:PT_NV_RES = '" + $nvRes.Replace("'", "''") + "'`nfunction global:Disable-ScheduledTask { [CmdletBinding()] param(`$InputObject) }`n"
+        $r = & $runProc $psExe (& $encoded ($prelude + "`n" + $setup + $payload['PT_NV_UNDO']))
+        Assert-True ($r.Code -ne 126) ('The NVIDIA tasks generator tried to change the system: ' + $r.Err.Trim())
+        Assert-True ($r.Code -eq 0 -and (Test-Path -LiteralPath $nvFile)) ('The NVIDIA tasks generator wrote no undo file (exit {0}): {1}' -f $r.Code, $r.Err.Trim())
+        $nv = [System.IO.File]::ReadAllLines($nvFile)
+        Assert-True ($nv -contains 'call :pt_do schtasks /Change /TN "\NVIDIA\NvTmRep_PT126" /Enable') 'The NVIDIA undo file no longer re-enables, quoted, a telemetry task that was enabled (regression).'
+        Assert-True (@($nv | Where-Object { $_ -like '*NvTmMon_PT126 was already disabled before sincript*' }).Count -eq 1) 'The NVIDIA undo file no longer leaves alone a task that was already disabled.'
+        Assert-True (@($nv | Where-Object { $_ -match 'NvDriverUpdateCheckDaily|Unrelated' }).Count -eq 0) 'The NVIDIA undo file lists a task the routine must not touch - the driver-update check or an unrelated task (regression).'
+        Assert-True ((Get-Content -LiteralPath $nvRes -Raw).Trim() -eq '3 3 1') ('The NVIDIA worker should report 3 found, 3 disabled, undo file written - it said: ' + (Get-Content -LiteralPath $nvRes -Raw).Trim())
+        & $dryRun $nvFile 'item'
+    }
+    finally {
+        $hibFiles = @('off', 'default', 'unreadable', 'hboff', 'hbon') | ForEach-Object { ($pwFile + '.' + $_ + '.bat'), ($pwFile + '.' + $_ + '.bat.dry.bat') }
+        foreach ($f in @($pwFile, $tlFile, $nvFile, $nvRes, ($pwFile + '.dry.bat'), ($tlFile + '.dry.bat'), ($nvFile + '.dry.bat')) + @($hibFiles)) {
+            if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }
+        }
+    }
+}
+
+# ===============================================================================
+# 127. The script's own path is read late everywhere after its capture. It is
+#      captured with delayed expansion OFF so a "!" in the folder survives - and
+#      then every %SCRIPT_DIR% / %_SELFPATH% read put it back into a line before
+#      delayed expansion ran, which ate the "!" again. Measured from a folder
+#      named "sin!cript test": the elevated relaunch pointed at a file that did
+#      not exist, both cd's failed silently, and hosts, boot.config,
+#      SetTimerResolution.exe, app.asar and every preset file were "not found".
+#      A value built from the path must also not travel as a call argument: the
+#      callee's %~1 is read under delayed expansion and loses the "!" there, so
+#      the three routines that took one read it by reference now.
+# ===============================================================================
+Invoke-Test 'The script''s own path survives a "!" in its folder' {
+    $cmd = Read-Lines $CmdPath
+    $iCap = -1
+    for ($i = 0; $i -lt $cmd.Count; $i++) { if ($cmd[$i] -match '^\s*set "SCRIPT_DIR=%~dp0"\s*$') { $iCap = $i; break } }
+    Assert-True ($iCap -gt 0) 'The SCRIPT_DIR capture is gone or changed shape.'
+    Assert-True ($cmd[$iCap - 1].Trim() -ieq 'setlocal DisableDelayedExpansion') 'SCRIPT_DIR is no longer captured right after "setlocal DisableDelayedExpansion" - with delayed expansion on, a "!" in the folder is eaten at the capture itself (regression).'
+    Assert-True ($cmd[$iCap + 1] -match '^\s*set "_SELFPATH=%~f0"\s*$') '_SELFPATH is no longer captured next to SCRIPT_DIR, under the same setlocal.'
+
+    $early = @()
+    $late = 0
+    $viaCall = @()
+    for ($i = $iCap + 2; $i -lt $cmd.Count; $i++) {
+        $ln = $cmd[$i]
+        if ($ln.Trim() -match '^(?i)(rem\b|::)') { continue }
+        if ($ln -match '(?i)%SCRIPT_DIR%|%_SELFPATH%|(?<!%)%~dp0|(?<!%)%~f0') { $early += ("line {0}: {1}" -f ($i + 1), $ln.Trim()) }
+        $late += ([regex]::Matches($ln, '(?i)!SCRIPT_DIR!|!_SELFPATH!')).Count
+        # the path itself as a call argument - :Log excepted, where a mangled "!" costs a log line
+        if ($ln -match '(?i)\bcall\s+:(\w+)[^\r\n]*[!%](SCRIPT_DIR|_SELFPATH)[!%]' -and $Matches[1] -ine 'Log') { $viaCall += ("line {0}: {1}" -f ($i + 1), $ln.Trim()) }
+    }
+    Assert-True ($late -ge 10) ("Only {0} late read(s) of the script's path were found - the scan is not seeing them, so the checks below prove nothing." -f $late)
+    Assert-True ($early.Count -eq 0) ("The script's own path is read with % after its capture, so a ""!"" in the folder is eaten again: " + ($early -join ' | '))
+    Assert-True ($viaCall.Count -eq 0) ("The script's path is handed to a routine as a call argument, where the callee's %~1 loses a ""!"" to delayed expansion: " + ($viaCall -join ' | '))
+
+    # The three routines that used to take such a value as %N read it by reference now.
+    $ia = @(Get-BodyLines -Lines $cmd -Label 'InstallAsarInto' -CodeOnly) -join "`n"
+    Assert-True ($ia -match '(?i)set "_asrc=!_SRC!"') ':InstallAsarInto no longer reads the source .asar from _SRC by reference (regression).'
+    Assert-True ($ia -notmatch '%~3') ':InstallAsarInto reads a %~3 again - a bundled app.asar in a folder with "!" would not survive it (regression).'
+    $iaCalls = @($cmd | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' -and $_ -match '(?i)call :InstallAsarInto\b' })
+    Assert-True ($iaCalls.Count -ge 2) 'Expected both OpenAsar install loops to call :InstallAsarInto.'
+    Assert-True (@($iaCalls | Where-Object { $_ -match '(?i)call :InstallAsarInto\s+"[^"]*"\s+"[^"]*"\s+\S' }).Count -eq 0) 'A caller passes :InstallAsarInto a third argument again - the source path belongs in _SRC.'
+
+    $pb = @(Get-BodyLines -Lines $cmd -Label 'PrepareBootConfig' -CodeOnly) -join "`n"
+    Assert-True ($pb.Length -gt 0) ':PrepareBootConfig is missing.'
+    Assert-True ($pb -notmatch '%~[123]') ':PrepareBootConfig reads its paths from call arguments again - the source sits in the script folder, and a "!" in it is lost that way (regression).'
+    $pbCall = @($cmd | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' -and $_ -match '(?i)call :PrepareBootConfig\b' })
+    Assert-True ($pbCall.Count -ge 1 -and @($pbCall | Where-Object { $_ -notmatch '(?i)call :PrepareBootConfig\s*$' }).Count -eq 0) ':PrepareBootConfig is called with arguments again - the caller must set PT_SRC / PT_OUT / PT_JW instead.'
+    Assert-True (@($cmd | Where-Object { $_ -match '^\s*set "PT_SRC=!SCRIPT_DIR!boot\.config"' }).Count -eq 1) 'The Unity caller no longer hands the bundled boot.config over in PT_SRC, read late.'
+
+    $lw = @(Get-BodyLines -Lines $cmd -Label 'LockWorker' -CodeOnly) -join "`n"
+    Assert-True ($lw -match 'PT_LF_FILE') ':LockWorker no longer reads PT_LF_FILE.'
+    Assert-True ($lw -notmatch '(?i)set "PT_LF_FILE=%~2"') ':LockWorker takes the file path from %~2 again - a typed path like Wow!.pdf loses its "!" there (regression).'
+    $lwCalls = 0
+    $lwBad = @()
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        if ($cmd[$i].Trim() -match '^(?i)rem\b' -or $cmd[$i] -notmatch '(?i)call :LockWorker\b') { continue }
+        $lwCalls++
+        if ($cmd[$i - 1] -notmatch '^\s*set "PT_LF_FILE=!_lfpath!"\s*$') { $lwBad += ("line {0}" -f ($i + 1)) }
+    }
+    Assert-True ($lwCalls -ge 2) 'Expected both lock-finder passes to call :LockWorker.'
+    Assert-True ($lwBad.Count -eq 0) ("A :LockWorker call is not preceded by set ""PT_LF_FILE=!_lfpath!"": " + ($lwBad -join ', '))
+    $lf = @(Get-BodyLines -Lines $cmd -Label 'LockFinder' -CodeOnly) -join "`n"
+    Assert-True ($lf -match '(?i)if not exist "!_lfpath!"') ':LockFinder no longer checks the typed path late - "Wow!.pdf" would be "No such file" (regression).'
+
+    $pc = @(Get-BodyLines -Lines $cmd -Label 'PresetCustom' -CodeOnly) -join "`n"
+    Assert-True ($pc -match '(?i)set "_pnm\[!_pn!\]=%%~nxF"') ':PresetCustom no longer stores the preset names - routine changed shape?'
+    Assert-True ($pc -notmatch '(?i)%%~fF') ':PresetCustom stores full paths from %%~fF again - they carry the script folder into a delayed-expansion line, and a "!" in it is eaten (regression).'
+}
+
+# ===============================================================================
+# 128. SteamLight keeps Steam's browser sandbox unless the user turns it off. Its
+#      launch flags included -cef-disable-sandbox and -no-cef-sandbox, and
+#      -cef-single-process does the same less visibly: Chromium's docs say
+#      single-process mode "prevents the use of the sandbox". None of it was on the
+#      screen, which sold the flags as RAM and CPU savings. The three now come only
+#      from an explicit, disclosed opt-in whose safe answer is No, and the Excluded
+#      screen - which says security-weakening changes are left out - names it.
+# ===============================================================================
+Invoke-Test 'SteamLight keeps Steam''s browser sandbox unless the user turns it off' {
+    $cmd = Read-Lines $CmdPath
+    $flags = @('-cef-single-process', '-cef-disable-sandbox', '-no-cef-sandbox')
+    $sl = @(Get-BodyLines -Lines $cmd -Label 'SteamLight')
+    Assert-True ($sl.Count -gt 20) ':SteamLight is missing or truncated.'
+    $base = @($sl | Where-Object { $_ -match '^\s*set "_SLFLAGS=-' })
+    Assert-True ($base.Count -eq 1) 'Expected exactly one default "set _SLFLAGS=" line in :SteamLight.'
+    foreach ($f in $flags) {
+        Assert-True ($base[0] -notmatch [regex]::Escape($f)) ("The default SteamLight flags include $f again - Steam's web pages would run without the sandbox for everyone (regression).")
+    }
+    # The opt-in: a cleared variable, the trade-off on screen before the question, a Y-only branch.
+    $iAsk = -1
+    $v = ''
+    for ($i = 0; $i -lt $sl.Count; $i++) {
+        if ($sl[$i] -match '(?i)^\s*set /p "(_\w+)=[^"]*sandbox') { $iAsk = $i; $v = $Matches[1]; break }
+    }
+    Assert-True ($iAsk -gt 0) 'SteamLight no longer asks, naming the sandbox, before turning it off.'
+    $before = @($sl[0..($iAsk - 1)])
+    Assert-True (@($before | Where-Object { $_ -match ('^\s*set "' + [regex]::Escape($v) + '="\s*$') }).Count -ge 1) ("The sandbox question's variable $v is not cleared before the prompt - a stale Y from earlier would answer it.")
+    Assert-True (@($before | Where-Object { $_ -match '(?i)^\s*echo\b.*sandbox' }).Count -ge 1) 'The screen no longer explains the sandbox trade-off before asking.'
+    $optin = @($sl | Where-Object { $_ -match ('(?i)^\s*if /i "!' + [regex]::Escape($v) + '!"=="Y" set "_SLFLAGS=!_SLFLAGS! ') })
+    Assert-True ($optin.Count -eq 1) 'The sandbox-off flags are no longer added only on an explicit Y.'
+    foreach ($f in $flags) { Assert-True ($optin[0] -match [regex]::Escape($f)) ("The opt-in no longer adds $f - the combination the flags were tested in changed.") }
+    $elsewhere = @($cmd | Where-Object { $_.Trim() -notmatch '^(?i)(rem|echo)\b' -and $_ -match '(?i)-cef-single-process|-cef-disable-sandbox|-no-cef-sandbox' -and -not $_.Contains('"!' + $v + '!"=="Y"') })
+    Assert-True ($elsewhere.Count -eq 0) ('A sandbox-off Steam flag appears outside the opt-in: ' + ($elsewhere -join ' | '))
+    $ex = @(Get-BodyLines -Lines $cmd -Label 'Excluded') -join "`n"
+    Assert-True ($ex -match '(?i)SteamLight') 'The "What was excluded" screen no longer names SteamLight''s single-process mode among the opt-in exceptions - it would claim every security-weakening change is left out.'
+}
+
+# ===============================================================================
+# 129. Four maintenance actions report what happened. Windows Update reset,
+#      Compact WinSxS and DISM + SFC printed "[OK] ... finished. See the output
+#      above" whenever the window was elevated - but :Run swallows the output, so
+#      there was nothing above to see - and Cleanup ended in "[OK] Cleanup done."
+#      even when clearing the event logs, its one irreversible step, had failed.
+#      Each now checks its own critical step. The reset's renames are checked
+#      BEFORE the services start (they recreate the folders); DISM's exit code
+#      decides DISM's line, 3010 counting as done; SFC's codes are undocumented,
+#      so it is pointed to its own verdict rather than guessed at.
+# ===============================================================================
+Invoke-Test 'Maintenance actions report what happened, not a blanket [OK]' {
+    $cmd = Read-Lines $CmdPath
+    $next = {
+        param([string[]]$Body, [string]$Pattern)
+        for ($i = 0; $i -lt $Body.Count - 1; $i++) { if ($Body[$i] -match $Pattern) { return $Body[$i + 1].Trim() } }
+        return $null
+    }
+    foreach ($r in 'WUReset', 'CompactWinSxS', 'SfcDism', 'Cleanup') {
+        $b = @(Get-BodyLines -Lines $cmd -Label $r -CodeOnly)
+        Assert-True ($b.Count -gt 5) ":$r is missing or truncated."
+        Assert-True ((($b -join "`n") -notmatch '(?i)see the output above')) ":$r points at 'the output above' again - :Run swallows the output, so there is nothing there (regression)."
+    }
+
+    $wu = @(Get-BodyLines -Lines $cmd -Label 'WUReset' -CodeOnly) -join "`n"
+    $iRen  = $wu.IndexOf('ren ""%SystemRoot%\SoftwareDistribution""')
+    $iChk1 = $wu.IndexOf('if exist "%SystemRoot%\SoftwareDistribution\"')
+    $iChk2 = $wu.IndexOf('if exist "%SystemRoot%\System32\catroot2\"')
+    $iStart = $wu.IndexOf('call :Run "net start %%S"')
+    Assert-True ($iRen -ge 0 -and $iStart -ge 0) ':WUReset lost its rename or its service restart - routine changed shape?'
+    Assert-True ($iChk1 -gt $iRen -and $iChk2 -gt $iRen) ':WUReset no longer checks that SoftwareDistribution and catroot2 were actually renamed (regression).'
+    Assert-True ($iChk1 -lt $iStart -and $iChk2 -lt $iStart) ':WUReset checks the renames AFTER the services start - they recreate both folders, so the check proves nothing there (regression).'
+    Assert-True ($wu -match '(?i)if defined _wufail \(\s*\n\s*echo \[FAIL\]') ':WUReset has no [FAIL] branch for a rename that did not land.'
+    Assert-True ($wu.IndexOf('if defined _wufail') -lt $wu.IndexOf('echo [OK] Windows Update reset')) ':WUReset prints [OK] before checking the renames (regression).'
+
+    $cw = @(Get-BodyLines -Lines $cmd -Label 'CompactWinSxS' -CodeOnly)
+    Assert-True ((& $next $cw 'call :Run "dism /online /cleanup-image /startcomponentcleanup"') -eq 'set "_cwrc=!_runrc!"') ':CompactWinSxS no longer captures DISM''s exit code straight after it runs.'
+    Assert-True ((& $next $cw 'call :Run "compact\.exe /compactos:always"') -eq 'if /i "!_co!"=="Y" set "_corc=!_runrc!"') ':CompactWinSxS no longer captures CompactOS''s exit code straight after it runs.'
+    $cwj = $cw -join "`n"
+    Assert-True ($cwj -match '"!_cwrc!"=="3010"') ':CompactWinSxS no longer treats DISM''s 3010 (done, restart to finish) as success - it would report a failure that is not one.'
+    Assert-True ($cwj -match '(?i)echo \[FAIL\] DISM component cleanup' -and $cwj -match '(?i)echo \[FAIL\] CompactOS') ':CompactWinSxS lost a [FAIL] line - a failed step would read as success (regression).'
+
+    $sd = @(Get-BodyLines -Lines $cmd -Label 'SfcDism' -CodeOnly)
+    Assert-True ((& $next $sd 'call :RunLive "dism /online /cleanup-image /restorehealth"') -eq 'set "_dismrc=!_runrc!"') ':SfcDism no longer captures DISM''s exit code straight after it runs.'
+    $sdj = $sd -join "`n"
+    Assert-True ($sdj -match '"!_dismrc!"=="3010"' -and $sdj -match '(?i)echo \[FAIL\] DISM RestoreHealth') ':SfcDism no longer maps DISM''s exit code to [OK] / [FAIL] (regression).'
+    Assert-True ($sdj -notmatch '(?i)\[OK\] DISM \+ SFC finished') ':SfcDism prints the blanket "[OK] DISM + SFC finished" again (regression).'
+    Assert-True ($sdj -match '(?i)SFC reports its own result') ':SfcDism no longer points to SFC''s own verdict - its exit codes are undocumented, so that is the only honest source.'
+
+    $cl = @(Get-BodyLines -Lines $cmd -Label 'Cleanup' -CodeOnly)
+    $clj = $cl -join "`n"
+    # Pinned on the counting line itself: _evok / _evbad also appear where they are set to 0 and
+    # reported, so their mere presence survived deleting the count (mutation-tested).
+    Assert-True ($clj -match '(?i)wevtutil cl') ':Cleanup no longer clears the event logs - routine changed shape?'
+    Assert-True ($clj -match '(?im)^\s*if "!_runrc!"=="0" \(set /a _evok\+=1\) else \(set /a _evbad\+=1\)\s*$') ':Cleanup no longer counts each event log by its own exit code (regression) - the report would print numbers nothing incremented.'
+    Assert-True ($clj -match '(?i)echo\s+\[FAIL\] No event log could be cleared') ':Cleanup has no [FAIL] line for an event-log clear that did nothing.'
+    Assert-True (@($cl | Where-Object { $_.Trim() -eq 'echo [OK] Cleanup done.' }).Count -eq 0) ':Cleanup ends in the unconditional "[OK] Cleanup done." again (regression).'
+    Assert-True ($clj -match '(?i)echo \[WARN\] Cleanup ran without Administrator rights') ':Cleanup no longer says when it ran without the rights to clean the Windows folders.'
+}
+
+# ===============================================================================
+# 130. Partial and failed results are reported as such (audit, low findings).
+#      OneDrive's uninstaller returning non-zero printed [OK]; choosing Ultimate
+#      silently activated High Performance when Ultimate was unavailable; the lock
+#      finder said "free" when its Restart Manager query failed; a failed preset
+#      JSON conversion showed the PREVIOUS preset's backup path; the backup prune
+#      counted delete attempts as deletions; and the exit screen said "Log saved
+#      to" when no log could be written.
+# ===============================================================================
+Invoke-Test 'Partial and failed results are reported as such' {
+    $cmd = Read-Lines $CmdPath
+
+    $od = @(Get-BodyLines -Lines $cmd -Label 'DebloatOneDrive' -CodeOnly) -join "`n"
+    Assert-True ($od -match '(?i)else if not "!_odrc!"=="0" \(') ':DebloatOneDrive no longer separates a non-zero uninstaller exit from success - "[OK] ... uninstaller exit 1" is back (regression).'
+    Assert-True ($od -notmatch '(?i)\[OK\][^\r\n]*uninstaller exit') ':DebloatOneDrive prints [OK] with the uninstaller exit code in it again (regression).'
+
+    $sw = @(Get-BodyLines -Lines $cmd -Label 'DoPowerPlanSwitch' -CodeOnly) -join "`n"
+    Assert-True ($sw -notmatch 'e9a42b02-d5df-448d-aa00-03f14749eb61 >nul 2>&1 \|\| powercfg') ':DoPowerPlanSwitch falls back from Ultimate to High silently again (|| on one line) (regression).'
+    Assert-True ($sw -match '(?i)echo\s+\[WARN\] Ultimate Performance could not be activated') ':DoPowerPlanSwitch no longer says when High Performance was activated instead of Ultimate (regression).'
+
+    $lw = @(Get-BodyLines -Lines $cmd -Label 'LockWorker' -CodeOnly) -join "`n"
+    Assert-True ($lw -match 'RmStartSession\(\[ref\]\$h,0,\$key\) -ne 0\)\{ exit 4 \}') ':LockWorker no longer exits 4 when the Restart Manager session cannot start (regression).'
+    Assert-True ($lw -match '\}catch\{ \$bad=\$true \}' -and $lw -match 'if\(\$bad\)\{ exit 4 \}; \$out \| Wu8 \$env:PT_LF_LIST') ':LockWorker writes a list after a failed query again - an empty list reads as "free" (regression).'
+    Assert-True ($lw -notmatch '@\(\) \| (Out-File|Wu8)') ':LockWorker writes an empty list on failure again (regression).'
+    $la = @(Get-BodyLines -Lines $cmd -Label 'LockFinder_ask' -CodeOnly) -join "`n"
+    Assert-True ($la -match '(?i)if not exist "!_lflist!" goto _lfRecheckFail') ':LockFinder''s re-check no longer tells a failed query from "nothing holds the file" (regression).'
+
+    $pe = @(Get-BodyLines -Lines $cmd -Label 'PresetEnd' -CodeOnly) -join "`n"
+    Assert-True ($pe -match '(?i):_presetEndKeep[\s\S]*set "PRESET_LAST="[\s\S]*:_presetEndClear') ':PresetEnd no longer clears PRESET_LAST when the conversion fails - the next line names the previous preset''s backup (regression).'
+    $shows = @($cmd | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' -and $_ -match 'Registry backup: !PRESET_LAST!' })
+    Assert-True ($shows.Count -ge 5) ('Expected the five preset screens to show the backup path, found {0}.' -f $shows.Count)
+    Assert-True (@($shows | Where-Object { $_ -notmatch '^\s*if defined PRESET_LAST \(' }).Count -eq 0) 'A "Registry backup:" line prints PRESET_LAST without checking it is defined (regression).'
+
+    $pr = @(Get-BodyLines -Lines $cmd -Label '_mbPrune' -CodeOnly)
+    Assert-True (@($pr | Where-Object { $_.Trim() -eq 'set /a _delN+=1' }).Count -eq 0) ':_mbPrune counts a delete attempt as a deletion again (regression).'
+    Assert-True (@($pr | Where-Object { $_ -match '(?i)^\s*if not exist "!BACKUP_DIR!\\!_prN!" set /a _delN\+=1' }).Count -eq 1) ':_mbPrune no longer counts only the files that are actually gone (regression).'
+
+    $ex = @(Get-BodyLines -Lines $cmd -Label 'ExitScript' -CodeOnly) -join "`n"
+    Assert-True ($ex -match '(?i)if exist "!LOGFILE!" \(echo   Log saved to:') ':ExitScript says "Log saved to" without checking the log exists (regression).'
+    Assert-True ($ex -notmatch '(?im)^\s*echo\s+Log saved to:') ':ExitScript prints an unconditional "Log saved to" again (regression).'
+}
+
+# ===============================================================================
+# 131. Small correctness fixes stay fixed (audit, low findings). The HKCU copy
+#      of the Storage Sense policy did nothing - Microsoft's Policy CSP lists
+#      AllowStorageSenseGlobal as device scope only - yet printed its own [REG]
+#      line; `call :Log "... 5%%"` logged "5", because call parses its arguments
+#      a second time; the debloat screen called Microsoft.Xbox.TCUI "the Xbox
+#      game-bar component"; and %y% / %w% were used but never defined.
+# ===============================================================================
+Invoke-Test 'Small correctness fixes stay fixed' {
+    $cmd = Read-Lines $CmdPath
+    $code = @($cmd | Where-Object { $_.Trim() -notmatch '^(?i)(rem\b|::)' })
+    Assert-True ($code.Count -gt 1000) 'The script body was not read - the scans below would prove nothing.'
+
+    $hkcu = @($code | Where-Object { $_ -match '(?i)"HKCU\\[^"]*StorageSense"\s+"AllowStorageSenseGlobal"' })
+    Assert-True ($hkcu.Count -eq 0) 'AllowStorageSenseGlobal is written under HKCU again - the policy is device scope, so that write does nothing but print a [REG] line and leave a backup (regression).'
+    Assert-True (@($code | Where-Object { $_ -match '(?i)"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\StorageSense"\s+"AllowStorageSenseGlobal"' }).Count -eq 1) 'The machine-wide Storage Sense policy write is gone - routine changed shape?'
+
+    $logPct = @($code | Where-Object { $_ -match '(?i)\bcall :Log "[^"]*%%' })
+    Assert-True ($logPct.Count -eq 0) ('A call :Log argument holds %% - call parses its arguments a second time and the log loses the percent sign: ' + ($logPct -join ' | '))
+
+    $dbo = @(Get-BodyLines -Lines $cmd -Label 'DebloatOpt') -join "`n"
+    Assert-True ($dbo -match 'Microsoft\.Xbox\.TCUI') ':DebloatOpt no longer removes Microsoft.Xbox.TCUI - routine changed shape?'
+    Assert-True ($dbo -notmatch '(?i)game-bar component') ':DebloatOpt calls Microsoft.Xbox.TCUI "the Xbox game-bar component" again - that is Microsoft.XboxGamingOverlay, which it does not remove (regression).'
+
+    # The script defines no colour variables, so a short %x% / %xy% is always an undefined one.
+    $short = @()
+    foreach ($ln in $code) { foreach ($m in [regex]::Matches($ln, '(?<!%)%([A-Za-z][A-Za-z0-9]?)%(?!%)')) { $short += $m.Value } }
+    $defined = @($short | Where-Object { $n = $_.Trim('%'); @($cmd | Where-Object { $_ -match ('(?i)^\s*set\s+"?' + [regex]::Escape($n) + '=') }).Count -gt 0 })
+    Assert-True (@($short | Where-Object { $defined -notcontains $_ }).Count -eq 0) ('Short variable(s) used but never defined - they expand to nothing: ' + (($short | Sort-Object -Unique) -join ', '))
+}
+
+# ===============================================================================
+# 132. Profile paths are read late everywhere. TEMP, LocalAppData, USERPROFILE,
+#      the Documents / backup folder and every file built from them live under
+#      the Windows user name, and a %X% read put such a path into its line before
+#      delayed expansion ran - which ate a "!" in the name: "Bo!b" became "Bob"
+#      (test 133 shows what that deleted). The set of profile-derived variables is
+#      rebuilt from the script's own set lines, so a new one is covered the day it
+#      is added. DOCS / BACKUP_DIR are captured with delayed expansion off, next to
+#      SCRIPT_DIR; the routines that take a value as %~1 read it with delayed
+#      expansion off; :CleanRoot and :InstallAsarInto take a name, not a path.
+# ===============================================================================
+Invoke-Test 'Profile paths are read late everywhere (a "!" in the user name survives)' {
+    $cmd = Read-Lines $CmdPath
+    $isCode = { param($s) $s.Trim() -notmatch '^(?i)(rem\b|::)' }
+    $derived = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in 'TEMP','TMP','USERPROFILE','LOCALAPPDATA','APPDATA','HOMEPATH','ONEDRIVE','USERNAME','DOCS') { [void]$derived.Add($n) }
+    $grew = $true
+    while ($grew) {
+        $grew = $false
+        foreach ($s in $cmd) {
+            if (-not (& $isCode $s)) { continue }
+            foreach ($m in [regex]::Matches($s, '(?i)\bset\s+"?([A-Za-z_]\w*)(\[[^\]]*\])?=(.*)')) {
+                $n = $m.Groups[1].Value
+                if ($derived.Contains($n)) { continue }
+                foreach ($r in [regex]::Matches($m.Groups[3].Value, '[%!]([A-Za-z_]\w*)(\[[^\]]*\])?(?::[^%!]*)?[%!]')) {
+                    if ($derived.Contains($r.Groups[1].Value)) { [void]$derived.Add($n); $grew = $true; break }
+                }
+            }
+        }
+    }
+    Assert-True ($derived.Count -ge 50) ("Only {0} profile-derived variables were found - the scan is not seeing them, so the rest of this test proves nothing." -f $derived.Count)
+
+    $iDE = [Array]::IndexOf($cmd, 'setlocal EnableDelayedExpansion')
+    Assert-True ($iDE -gt 0) 'The top "setlocal EnableDelayedExpansion" is gone - the capture block changed shape.'
+    $early = @()
+    $late = 0
+    for ($i = $iDE + 1; $i -lt $cmd.Count; $i++) {
+        $s = $cmd[$i]
+        if (-not (& $isCode $s)) { continue }
+        foreach ($m in [regex]::Matches($s, '(?<!%)%([A-Za-z_]\w*)(?::[^%]*)?%(?!%)')) {
+            if ($derived.Contains($m.Groups[1].Value)) { $early += ("line {0}: {1}" -f ($i + 1), $s.Trim()) }
+        }
+        foreach ($m in [regex]::Matches($s, '!([A-Za-z_]\w*)(?::[^!]*)?!')) { if ($derived.Contains($m.Groups[1].Value)) { $late++ } }
+    }
+    Assert-True ($late -ge 200) ("Only {0} late reads of profile paths were found - the scan is not seeing them." -f $late)
+    Assert-True ($early.Count -eq 0) ("A profile path is read with %X% under delayed expansion - a ""!"" in the user name is eaten there: " + (($early | Select-Object -First 5) -join ' | '))
+
+    # DOCS / BACKUP_DIR are captured with delayed expansion OFF, and only there
+    $iDDE = [Array]::IndexOf($cmd, 'setlocal DisableDelayedExpansion')
+    foreach ($v in 'DOCS', 'BACKUP_DIR') {
+        $sets = @(for ($i = 0; $i -lt $cmd.Count; $i++) { if ((& $isCode $cmd[$i]) -and $cmd[$i] -match ('(?i)^\s*(call\s+)?set\s+"' + $v + '=')) { $i } })
+        Assert-True ($sets.Count -ge 1) "$v is never set - the capture changed shape."
+        Assert-True (@($sets | Where-Object { $_ -lt $iDDE -or $_ -gt $iDE }).Count -eq 0) ("$v is set outside the delayed-expansion-off capture block (line {0}) - a ""!"" in the Documents path would be eaten there (regression)." -f (($sets | Where-Object { $_ -lt $iDDE -or $_ -gt $iDE } | Select-Object -First 1) + 1))
+    }
+
+    # the routines that take a value as %~1 read it with delayed expansion off, then only late
+    foreach ($r in 'Log', 'Run', 'RunLive') {
+        $b = @(Get-BodyLines -Lines $cmd -Label $r -CodeOnly)
+        $j = -1
+        for ($k = 0; $k -lt $b.Count - 2; $k++) {
+            if ($b[$k].Trim() -eq 'setlocal DisableDelayedExpansion' -and $b[$k + 1] -match '^\s*set "_\w+=%~1"\s*$' -and $b[$k + 2].Trim() -eq 'setlocal EnableDelayedExpansion') { $j = $k; break }
+        }
+        Assert-True ($j -ge 0) ":$r no longer reads %~1 with delayed expansion off - a ""!"" in the path it is given is eaten (regression)."
+        Assert-True (@($b | Where-Object { $_ -match '%_cmd(log)?(:[^%]*)?%' }).Count -eq 0) ":$r reads its command with %_cmd% again - that puts it into the line before delayed expansion runs (regression)."
+    }
+    $lw = @(Get-BodyLines -Lines $cmd -Label '_LogWrite' -CodeOnly) -join "`n"
+    Assert-True ($lw -match '>>"!LOGFILE!"') ':_LogWrite no longer writes to !LOGFILE! - with %LOGFILE% the log goes to another user''s Documents (regression).'
+    foreach ($r in 'Run', 'RunLive') {
+        $b = @(Get-BodyLines -Lines $cmd -Label $r -CodeOnly) -join "`n"
+        Assert-True ($b -match '(?m)^endlocal & endlocal & set "_runrc=%_runrc%" & set "_FAILS=%_FAILS%"\s*$') ":$r no longer hands back only the exit code and the failure tally across its two endlocals."
+    }
+
+    # :CleanRoot and :InstallAsarInto take a name, not a path
+    $cr = @(Get-BodyLines -Lines $cmd -Label 'CleanRoot' -CodeOnly) -join "`n"
+    Assert-True ($cr -match 'set "_crv=!%~1!"') ':CleanRoot no longer reads the root late from its NAME (regression).'
+    Assert-True (@($cmd | Where-Object { (& $isCode $_) -and $_ -match '(?i)call :CleanRoot \w+\s+"' }).Count -eq 0) 'A caller hands :CleanRoot the path itself again - a "!" in it is lost in %~2 (regression).'
+    $ia = @(Get-BodyLines -Lines $cmd -Label 'InstallAsarInto' -CodeOnly) -join "`n"
+    Assert-True ($ia -match '(?i)set "_base=!LOCALAPPDATA!\\%~1"') ':InstallAsarInto no longer builds its base folder late from LOCALAPPDATA (regression).'
+    Assert-True (@($cmd | Where-Object { (& $isCode $_) -and $_ -match '(?i)call :InstallAsarInto "[^"]*"\s+"' }).Count -eq 0) 'A caller hands :InstallAsarInto a path again - a "!" in LocalAppData is lost in %~1 (regression).'
+}
+
+# ===============================================================================
+# 133. A "!", "%", "^" or "&" in the user name reaches the user's own folders -
+#      RUN, not read. With every profile path read as %X% under delayed expansion,
+#      a user "Bo!b" had the cleanup delete the temp files of a user "Bob", if one
+#      existed, and write the log into Bob's Documents; sincript runs elevated, so
+#      nothing stopped it. A "&" did worse: the old :Run cut every delete at the
+#      "&", so for "Bob & Co" it ran on C:\Users\Bob instead and emptied that
+#      profile, hidden files too. A "%" was lost where the path rode a call
+#      argument, so "Bo%b & Co" cleaned "Bob & Co"; a "^" was doubled there, so
+#      nothing was cleaned. This runs the real :DoCleanupCore, :CleanRoot, :RunVar,
+#      :Run, :Log and :LogVar for the users "Bo!b & Co", "Bo%b & Co" and
+#      "Bo^b & Co", each in a fake profile tree under %TEMP% next to "Bob & Co"
+#      and "Bob" (where the old code landed). TEMP, LocalAppData and SystemRoot all
+#      point inside the tree, the driver refuses to run unless they do, and it runs
+#      in the tree. The tree's path may hold no space, because a cut path would
+#      split there as well. The driver takes the backup folder from USERPROFILE,
+#      never from its own text, where a "%" would be lost. ipconfig /flushdns and
+#      the free-space probes are stubbed out.
+# ===============================================================================
+Invoke-Test 'A "!", "%", "^" or "&" in the user name reaches the user''s own folders (cleanup run in a fake profile)' {
+    # TEMP is usually LocalAppData\Temp under its 8.3 short name: that folder is cleaned once, not twice
+    $cc0 = @(Get-BodyLines -Lines (Read-Lines $CmdPath) -Label 'DoCleanupCore' -CodeOnly) -join "`n"
+    Assert-True ($cc0 -match 'if /i "%%~fsA"=="%%~fsB" set "_tmpsame=1"' -and $cc0 -match 'if defined _cleanTEMP if not defined _tmpsame \(') ':DoCleanupCore deletes TEMP again when it is LocalAppData\Temp under its short name (regression).'
+    $cmd = Read-Lines $CmdPath
+    $tmp = [System.IO.Path]::GetTempPath()
+    if ($tmp -match '\s') { $tmp = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($tmp).ShortPath }
+    Assert-True ($tmp -notmatch '\s') ("test 133 cannot run safely here: the temp folder path holds a space and has no short name ({0})." -f $tmp)
+    $base = Join-Path $tmp ('PT133_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    # a routine: from ":Label" to the next label that is not one of its own (listed) sub-labels
+    $grab = {
+        param([string]$Label, [string[]]$Own)
+        $i = [Array]::IndexOf($cmd, ':' + $Label)
+        if ($i -lt 0) { throw "test 133: :$Label not found." }
+        $j = $i + 1
+        while ($j -lt $cmd.Count) {
+            if ($cmd[$j] -match '^:(\w+)' -and -not ($Own -contains $Matches[1])) { break }
+            $j++
+        }
+        $cmd[$i..($j - 1)]
+    }
+    $core = @(& $grab 'DoCleanupCore' @('_clCoreBody') | ForEach-Object { $_ -replace 'call :Run "ipconfig /flushdns"', 'rem (flushdns stubbed)' })
+    $body = @('@echo off', 'setlocal DisableDelayedExpansion', 'set "BACKUP_DIR=%USERPROFILE%\Documents\PerfTweaks_Backups"',
+              'setlocal EnableDelayedExpansion', 'set "LOGFILE=!BACKUP_DIR!\PerfTweaks_t133.log"', 'set "_CLEAN_OUTER=1"', 'set "_ELEV=1"',
+              'for %%V in (TEMP LocalAppData SystemRoot) do if "!%%V:PT133_=!"=="!%%V!" (echo refusing: %%V is outside the fake tree& exit /b 99)',
+              'call :DoCleanupCore', 'exit /b 0') +
+            $core + @(& $grab 'CleanRoot' @()) + @(& $grab 'RunVar' @()) + @(& $grab 'Run' @('_runBody', '_runLate', '_runRc')) +
+            @(& $grab 'Log' @()) + @(& $grab '_LogWrite' @()) + @(& $grab 'LogVar' @()) +
+            @(':FreeSpaceSnap', 'exit /b 0', ':FreeSpaceReport', 'exit /b 0')
+    try {
+        $k = 0
+        foreach ($name in 'Bo!b & Co', 'Bo%b & Co', 'Bo^b & Co') {
+            $k++
+            $root = Join-Path $base $k
+            $user = Join-Path $root ('Users\' + $name)
+            $other = Join-Path $root 'Users\Bob & Co'
+            $bob = Join-Path $root 'Users\Bob'
+            foreach ($u in $user, $other) {
+                foreach ($sub in 'AppData\Local\Temp', 'AppData\Local\Microsoft\Windows\Explorer', 'Documents\PerfTweaks_Backups') {
+                    [void](New-Item -ItemType Directory -Force -Path (Join-Path $u $sub))
+                }
+                [System.IO.File]::WriteAllText((Join-Path $u 'AppData\Local\Temp\tmp.txt'), 'x')
+                [System.IO.File]::WriteAllText((Join-Path $u 'AppData\Local\Microsoft\Windows\Explorer\thumbcache_1.db'), 'x')
+            }
+            [void](New-Item -ItemType Directory -Force -Path (Join-Path $bob 'Documents'))
+            [System.IO.File]::WriteAllText((Join-Path $bob 'Documents\thesis.docx'), 'x')
+            [System.IO.File]::WriteAllText((Join-Path $bob 'hidden.ini'), 'x')
+            [System.IO.File]::SetAttributes((Join-Path $bob 'hidden.ini'), [System.IO.FileAttributes]::Hidden)
+            [void](New-Item -ItemType Directory -Force -Path (Join-Path $root 'Windows\Temp'))
+            $drv = Join-Path $root 'drv.cmd'
+            [System.IO.File]::WriteAllLines($drv, [string[]]$body, [System.Text.Encoding]::ASCII)
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+            $psi.Arguments = '/d /c "' + $drv + '"'
+            $psi.WorkingDirectory = $root
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.EnvironmentVariables['USERPROFILE'] = $user
+            $psi.EnvironmentVariables['TEMP'] = Join-Path $user 'AppData\Local\Temp'
+            $psi.EnvironmentVariables['TMP'] = Join-Path $user 'AppData\Local\Temp'
+            $psi.EnvironmentVariables['LOCALAPPDATA'] = Join-Path $user 'AppData\Local'
+            $psi.EnvironmentVariables['SystemRoot'] = Join-Path $root 'Windows'
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $p.StandardInput.Close()
+            $err = $p.StandardError.ReadToEndAsync()
+            $out = $p.StandardOutput.ReadToEnd()
+            if (-not $p.WaitForExit(120000)) { $p.Kill(); throw ('test 133: the cleanup driver for "{0}" did not finish within 120 s.' -f $name) }
+            Assert-True ($p.ExitCode -ne 99) ('test 133 refused to run for "{0}" - a root was outside the fake tree: {1}' -f $name, $out.Trim())
+            Assert-True ($p.ExitCode -eq 0) ('The cleanup driver for "{0}" failed (exit {1}): {2} {3}' -f $name, $p.ExitCode, $out.Trim(), $err.Result.Trim())
+            $ownLeft = @(Get-ChildItem -LiteralPath $user -Recurse -File | Where-Object { $_.Extension -in '.txt', '.db' })
+            $otherLeft = @(Get-ChildItem -LiteralPath $other -Recurse -File | Where-Object { $_.Extension -in '.txt', '.db' })
+            Assert-True ($otherLeft.Count -eq 2) ('Cleanup for "{0}" deleted files of ANOTHER user ("Bob & Co") - part of the name was lost and the path pointed at the wrong profile (regression). Left there: {1}' -f $name, (($otherLeft | ForEach-Object Name) -join ', '))
+            $bobLeft = @(Get-ChildItem -LiteralPath $bob -Recurse -File -Force)
+            Assert-True ($bobLeft.Count -eq 2) ('Cleanup for "{0}" emptied ANOTHER profile ("Bob") - a delete was cut at the "&" and ran on ...\Users\Bob instead (regression). Left there: {1}' -f $name, (($bobLeft | ForEach-Object Name) -join ', '))
+            Assert-True ($ownLeft.Count -eq 0) ('Cleanup did not clean the own folders of "{0}" - a special character in the name broke the delete (regression). Left: {1}' -f $name, (($ownLeft | ForEach-Object Name) -join ', '))
+            $log = Join-Path $user 'Documents\PerfTweaks_Backups\PerfTweaks_t133.log'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $other 'Documents\PerfTweaks_Backups\PerfTweaks_t133.log'))) ('The log for "{0}" was written into ANOTHER user''s Documents (regression).' -f $name)
+            Assert-True (Test-Path -LiteralPath $log) ('The log for "{0}" was not written into the user''s own backup folder (regression).' -f $name)
+            Assert-True ((Get-Content -LiteralPath $log -Raw) -match [regex]::Escape($name)) ('The log lost part of the user name "{0}" in the paths it recorded - a call argument parsed it a second time (regression).' -f $name)
+        }
+        Assert-True ($k -eq 3) 'test 133 did not run all three user names.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $base) { Remove-Item -LiteralPath $base -Recurse -Force }
+    }
+}
+
+# ===============================================================================
+# 134. No path under the profile or the script's folder rides a call argument, so
+#      a "%" or "^" in the user name survives. call parses its arguments a second
+#      time: it swallows a "%" and doubles a quoted "^" - for a user "Bo%b" the
+#      cleanup deletes pointed at C:\Users\Bob and the log said "Bob". Such values
+#      go by name instead: :RunVar for commands (its child cmd expands the command
+#      late, /v:on), :LogVar for log lines. The Documents capture keeps its
+#      "call set" only for a value the registry returned unexpanded (test 135 runs
+#      it). The variables are rebuilt from the script's own set lines, as in 132,
+#      with the script's own folder added - it usually sits under the profile too.
+# ===============================================================================
+Invoke-Test 'No profile path rides a call argument (a "%" or "^" in the user name survives)' {
+    $cmd = Read-Lines $CmdPath
+    $isCode = { param($s) $s.Trim() -notmatch '^(?i)(rem\b|::)' }
+    $derived = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in 'TEMP','TMP','USERPROFILE','LOCALAPPDATA','APPDATA','HOMEPATH','ONEDRIVE','USERNAME','DOCS','SCRIPT_DIR','_SELFPATH') { [void]$derived.Add($n) }
+    $grew = $true
+    while ($grew) {
+        $grew = $false
+        foreach ($s in $cmd) {
+            if (-not (& $isCode $s)) { continue }
+            foreach ($m in [regex]::Matches($s, '(?i)\bset\s+"?([A-Za-z_]\w*)(\[[^\]]*\])?=(.*)')) {
+                $n = $m.Groups[1].Value
+                if ($derived.Contains($n)) { continue }
+                # a value read by NAME ("!%~1!", as :CleanRoot reads a root) can be any of them
+                if ($m.Groups[3].Value -match '!%~?[0-9]!') { [void]$derived.Add($n); $grew = $true; continue }
+                foreach ($r in [regex]::Matches($m.Groups[3].Value, '[%!]([A-Za-z_]\w*)(\[[^\]]*\])?(?::[^%!]*)?[%!]')) {
+                    if ($derived.Contains($r.Groups[1].Value)) { [void]$derived.Add($n); $grew = $true; break }
+                }
+            }
+        }
+    }
+    Assert-True ($derived.Count -ge 50) ("Only {0} path variables were found - the scan is not seeing them, so the rest of this test proves nothing." -f $derived.Count)
+
+    $capture = 'if "%DOCS:~0,1%"=="%%" call set "DOCS=%DOCS%"'
+    $calls = 0
+    $bad = @()
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        $s = $cmd[$i]
+        if (-not (& $isCode $s) -or $s.Trim() -eq $capture) { continue }
+        foreach ($m in [regex]::Matches($s, '(?i)(?:^|[\s(&|])call\s+(\S+)(.*)')) {
+            $calls++
+            foreach ($r in [regex]::Matches($m.Groups[2].Value, '[%!]([A-Za-z_]\w*)(?:\[[^\]]*\])?(?::[^%!]*)?[%!]')) {
+                if ($derived.Contains($r.Groups[1].Value)) { $bad += ("line {0}: {1}" -f ($i + 1), $s.Trim()); break }
+            }
+        }
+    }
+    Assert-True ($calls -ge 400) ("Only {0} call statements were found - the scan is not seeing them." -f $calls)
+    Assert-True ($bad.Count -eq 0) ('A path under the profile or the script''s folder rides a call argument - call parses it a second time and loses a "%" in the user name: ' + (($bad | Select-Object -First 5) -join ' | '))
+
+    # the capture calls "call set" only for an unexpanded value, and nothing else uses call set
+    $cs = @($cmd | Where-Object { (& $isCode $_) -and $_ -match '(?i)\bcall\s+set\b' })
+    Assert-True ($cs.Count -eq 1 -and $cs[0].Trim() -eq $capture) ('The Documents capture no longer limits "call set" to an unexpanded registry value - an expanded path loses a "%" in the user name there (regression): ' + ($cs -join ' | '))
+
+    # :RunVar and :LogVar take a NAME and read it late; the child cmd gets the command unparsed
+    $rv = @(Get-BodyLines -Lines $cmd -Label 'RunVar' -CodeOnly | ForEach-Object { $_.Trim() })
+    Assert-True ($rv -contains 'set "_cmd=!%~1!"' -and $rv -contains 'set "_runlate=1"' -and $rv -contains 'goto _runBody') ':RunVar no longer reads its command by name and joins the body of :Run (regression).'
+    $run = @(Get-BodyLines -Lines $cmd -Label 'Run' -CodeOnly | ForEach-Object { $_.Trim() })
+    Assert-True ($run -contains 'set "_runlate="' -and $run -contains 'if defined _runlate goto _runLate') ':Run no longer keeps its own commands on the re-parsing child and :RunVar''s on the late one (regression).'
+    Assert-True ($run -contains 'cmd /d /v:on /s /c "^!_cmd^!" >nul 2>&1') ':RunVar''s command no longer reaches the child cmd unparsed - "^!_cmd^!" with /v:on lets the child expand it late (regression).'
+    $lv = @(Get-BodyLines -Lines $cmd -Label 'LogVar' -CodeOnly | ForEach-Object { $_.Trim() })
+    Assert-True ($lv -contains 'set "_LOGLN=!%~1!"' -and $lv -contains 'call :_LogWrite 2>nul') ':LogVar no longer copies its message by name into :_LogWrite (regression).'
+    foreach ($r in 'Run', 'RunLive') {
+        $b = @(Get-BodyLines -Lines $cmd -Label $r -CodeOnly) -join "`n"
+        Assert-True ($b -notmatch '(?i)\bcall :Log\b') (":$r logs its command through a call argument again - a ""%"" in it is lost there (regression).")
+        Assert-True (([regex]::Matches($b, '(?i)call :LogVar _runlog')).Count -eq 3) (":$r no longer logs EXEC, FAIL and OK by name.")
+    }
+
+    # the deletes under the profile go through :RunVar
+    $core = @(Get-BodyLines -Lines $cmd -Label 'DoCleanupCore' -CodeOnly) -join "`n"
+    foreach ($p in '!TEMP!\*.*', '!LocalAppData!\Temp\*.*', '!LocalAppData!\Microsoft\Windows\Explorer\*.db', '!LocalAppData!\Microsoft\Windows\WebCache\*.*', '!LocalAppData!\CrashDumps\*.*') {
+        Assert-True ($core -match ('set "_runcmd=del [^"]*"' + [regex]::Escape($p) + '"" & call :RunVar _runcmd\)')) ("The :DoCleanupCore delete of $p no longer goes to :RunVar by name (regression).")
+    }
+}
+
+# ===============================================================================
+# 135. The Documents capture keeps a "!", "%", "^" and "&" in the user name - RUN,
+#      not read. Its "call set" once took every value, and call parses its
+#      arguments a second time: for a user "Bo%b" the backups and the log went to
+#      C:\Users\Bob\Documents. This runs the script's own capture lines, with the
+#      registry answer faked by a file: an unexpanded "%USERPROFILE%\Documents"
+#      (call set must expand it), expanded paths holding the special characters or
+#      a "%OS%" (it must leave them alone), and no answer at all.
+# ===============================================================================
+Invoke-Test 'The Documents capture keeps "!", "%", "^" and "&" in the user name (run with a faked registry)' {
+    $cmd = Read-Lines $CmdPath
+    $i0 = [Array]::IndexOf($cmd, 'set "DOCS=%USERPROFILE%\Documents"')
+    $i1 = [Array]::IndexOf($cmd, 'set "BACKUP_DIR=%DOCS%\PerfTweaks_Backups"')
+    Assert-True ($i0 -gt 0 -and $i1 -gt $i0 -and ($i1 - $i0) -lt 12) 'The Documents capture changed shape - test 135 cannot find it.'
+    $reg = '''reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders" /v Personal 2^>nul ^| findstr /I "Personal"'''
+    $block = @($cmd[$i0..$i1])
+    Assert-True (@($block | Where-Object { $_.Contains($reg) }).Count -eq 1) 'The capture no longer asks the registry the way test 135 fakes it.'
+    # the fake answer's path is written into the driver's text, where a "%" would be lost
+    $tmp = [System.IO.Path]::GetTempPath()
+    if ($tmp -match '[\s%]') { $tmp = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($tmp).ShortPath }
+    $dir = Join-Path $tmp ('PT135_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    Assert-True ($dir -notmatch '%') ("test 135 cannot run here: the temp folder path holds a ""%"" and has no short name ({0})." -f $dir)
+    $prof = Join-Path $dir 'Users\Bo!b %x^y & Co'
+    try {
+        [void](New-Item -ItemType Directory -Force -Path $dir)
+        $fake = Join-Path $dir 'reg.txt'
+        $drv = Join-Path $dir 'drv.cmd'
+        $lines = @('@echo off', 'setlocal DisableDelayedExpansion') + @($block | ForEach-Object { $_.Replace($reg, "'type ""$fake""'") }) +
+                 @('setlocal EnableDelayedExpansion', 'echo [!BACKUP_DIR!]')
+        [System.IO.File]::WriteAllLines($drv, [string[]]$lines, [System.Text.Encoding]::ASCII)
+        $cases = @(
+            @('%USERPROFILE%\Documents', "$prof\Documents"),
+            @("$prof\Documents", "$prof\Documents"),
+            @('D:\Sync\50%OS%x\Documents', 'D:\Sync\50%OS%x\Documents'),
+            @('', "$prof\Documents"))
+        foreach ($c in $cases) {
+            $answer = if ($c[0]) { "`r`n    Personal    REG_SZ    " + $c[0] + "`r`n" } else { '' }
+            [System.IO.File]::WriteAllText($fake, $answer, [System.Text.Encoding]::ASCII)
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+            $psi.Arguments = '/d /c "' + $drv + '"'
+            $psi.WorkingDirectory = $dir
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.EnvironmentVariables['USERPROFILE'] = $prof
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $p.StandardInput.Close()
+            $err = $p.StandardError.ReadToEndAsync()
+            $out = $p.StandardOutput.ReadToEnd()
+            if (-not $p.WaitForExit(60000)) { $p.Kill(); throw 'test 135: the capture driver did not finish within 60 s.' }
+            $got = @($out -split "`r?`n" | Where-Object { $_.StartsWith('[') })
+            $want = '[' + $c[1] + '\PerfTweaks_Backups]'
+            Assert-True ($got.Count -eq 1 -and $got[0] -eq $want) ('The Documents capture turned the registry answer "{0}" into {1}, not {2} (regression). {3}' -f $c[0], ($got -join ' '), $want, $err.Result.Trim())
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+    }
+}
+
+# ===============================================================================
+# 136. The DNS screen states its real undo and lists every typed-in resolver,
+#      named by adapter, IPv4 and IPv6 - RUN with a faked registry. It said
+#      "Fully reversible." while the only way back is option 4 (DHCP), which
+#      keeps nothing the user typed in, and its one "Currently set" line kept
+#      only the LAST NameServer the /s scan printed: on a real machine that was
+#      a Wi-Fi Direct adapter's value, and it hid the router address on the
+#      adapter actually in use. An unreadable registry must give a [WARN], never
+#      "none - DHCP", and a value it cannot name must be counted, not hidden.
+# ===============================================================================
+Invoke-Test 'The DNS screen states its real undo and lists every typed-in resolver (run with a faked registry)' {
+    $cmd = Read-Lines $CmdPath
+    $menu = @(Get-BodyLines -Lines $cmd -Label 'MenuDns' -CodeOnly)
+    $menuEcho = @($menu | Where-Object { $_.Trim() -match '^(?i)echo\b' }) -join "`n"
+    Assert-True ($menu.Count -gt 5 -and $menuEcho.Length -gt 200) ':MenuDns did not unroll, or lost its text.'
+    Assert-True ($menuEcho -match '(?i)option 4' -and $menuEcho -cmatch 'NOT saved') ':MenuDns no longer says that option 4 (DHCP) is the undo and that a typed-in server is NOT saved (regression).'
+    Assert-True ($menuEcho -notmatch '(?i)fully reversible') ':MenuDns claims "Fully reversible." again - option 4 goes back to DHCP and a typed-in resolver is saved nowhere (regression).'
+    Assert-True ($menuEcho -match '(?i)physical') ':MenuDns no longer says it changes the physical adapters (connected or not) and leaves virtual ones alone.'
+    $iShow = -1; $iOpt = -1
+    for ($i = 0; $i -lt $menu.Count; $i++) {
+        if ($iShow -lt 0 -and $menu[$i] -match '(?i)^\s*call :ShowCurrentDns\s*$') { $iShow = $i }
+        if ($iOpt -lt 0 -and $menu[$i] -match '^echo\s+1\.\s') { $iOpt = $i }
+    }
+    Assert-True ($iShow -ge 0 -and $iOpt -gt $iShow) ':MenuDns no longer lists the typed-in resolvers BEFORE offering to replace them (regression).'
+    # the preset DNS picker replaces them too, so it lists them first as well
+    $pd = @(Get-BodyLines -Lines $cmd -Label 'PresetDnsChoice' -CodeOnly)
+    $iShow = -1; $iAsk = -1
+    for ($i = 0; $i -lt $pd.Count; $i++) {
+        if ($iShow -lt 0 -and $pd[$i] -match '(?i)^\s*call :ShowCurrentDns\s*$') { $iShow = $i }
+        if ($iAsk -lt 0 -and $pd[$i] -match '(?i)set /p "_dc=') { $iAsk = $i }
+    }
+    Assert-True ($iShow -ge 0 -and $iAsk -gt $iShow) ':PresetDnsChoice replaces the DNS servers without listing the current ones first (regression).'
+    Assert-True ((@($pd | Where-Object { $_.Trim() -match '^(?i)echo\b' }) -join "`n") -match '(?i)keeps them') ':PresetDnsChoice no longer says that 4 (skip) keeps the servers it just listed.'
+    foreach ($r in 'ApplyDns', 'DnsAuto') {
+        $b = @(Get-BodyLines -Lines $cmd -Label $r -CodeOnly)
+        $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)echo\b' }) -join "`n"
+        Assert-True ($code -match '(?i)Get-NetAdapter -Physical') ":$r no longer selects Get-NetAdapter -Physical - make its screen text match what it changes now."
+    }
+    foreach ($r in 'ApplyDns', 'DnsAuto', 'DnsResult') {
+        $echo = @(Get-BodyLines -Lines $cmd -Label $r -CodeOnly | Where-Object { $_ -match '(?i)(^|\s)echo(\s|\.)' }) -join "`n"
+        Assert-True ($echo -match '(?i)physical') ":$r lost its text, or no longer names the physical adapters it works on."
+        Assert-True ($echo -notmatch '(?i)\bactive (network )?adapter') ":$r says 'active adapter' again, but -Physical includes disconnected adapters and skips VPN ones (regression)."
+    }
+    $scd = (@('ShowCurrentDns', '_scdScan', '_scdShow', '_scdTrim') | ForEach-Object { Get-BodyLines -Lines $cmd -Label $_ -CodeOnly }) -join "`n"
+    Assert-True ($scd -match '(?i)Tcpip\\Parameters\\Interfaces' -and $scd -match '(?i)Tcpip6\\Parameters\\Interfaces') ':ShowCurrentDns no longer reads both the IPv4 and the IPv6 interface keys (regression).'
+    Assert-True ($scd -notmatch '(?i)powershell') ':ShowCurrentDns starts PowerShell on every DNS menu draw - measured 1.9 s just to start, 4.7 s with Get-NetAdapter.'
+    Assert-True ($scd -notmatch '(?i)dnsservers') ':ShowCurrentDns parses localized netsh output (pitfall 26).'
+
+    # ---- run it: each reg query becomes a "type" of a fake answer. The folder travels in an
+    #      environment variable, read late, so a "^", "&" or "!" in the temp path stays data.
+    $i0 = [Array]::IndexOf($cmd, ':ShowCurrentDns')
+    Assert-True ($i0 -ge 0) ':ShowCurrentDns not found.'
+    $j = $i0 + 1
+    while ($j -lt $cmd.Count -and -not ($cmd[$j] -match '^:' -and $cmd[$j] -notmatch '^:_scd')) { $j++ }
+    $routine = @($cmd[$i0..($j - 1)])
+    Assert-True (@($routine | Where-Object { $_ -match '^:_scd(Scan|Show|Trim)\s*$' }).Count -eq 3) 'The listing''s helpers moved away from :ShowCurrentDns - test 136 cannot extract them.'
+    $scan = '''reg query "!_scdRoot!" /s /v NameServer 2^>nul'''
+    $name = '''reg query "HKLM\SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}\!_scdGuid!\Connection" /v Name 2^>nul'''
+    foreach ($c in $scan, $name) {
+        Assert-True (@($routine | Where-Object { $_.Contains($c) }).Count -eq 1) ('The listing no longer asks the registry the way test 136 fakes it: ' + $c)
+    }
+    $tmp = [System.IO.Path]::GetTempPath()
+    if ($tmp -match '[\s%]') { $tmp = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($tmp).ShortPath }
+    $dir = Join-Path $tmp ('PT136_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    Assert-True ($dir -notmatch '%') ('test 136 cannot run here: the temp folder path holds a "%" and has no short name ({0}).' -f $dir)
+    try {
+        [void](New-Item -ItemType Directory -Force -Path $dir)
+        $body = $routine | ForEach-Object { $_.Replace($scan, '''type "!PT136_DIR!\scan_!_scdFam!.txt" 2^>nul''').Replace($name, '''type "!PT136_DIR!\name_!_scdGuid!.txt" 2^>nul''') }
+        $drv = Join-Path $dir 'drv.cmd'
+        [System.IO.File]::WriteAllLines($drv, [string[]](@('@echo off', 'setlocal EnableDelayedExpansion', 'call :ShowCurrentDns', 'exit /b 0') + $body), [System.Text.Encoding]::ASCII)
+        $run = {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+            # /s and doubled quotes: with plain /c "...", cmd strips the quotes when the path holds
+            # an & or ^, and the path then splits (measured with a TEMP named c^d&e!f).
+            $psi.Arguments = '/d /s /c ""' + $drv + '""'
+            $psi.WorkingDirectory = $dir
+            $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+            $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+            $psi.EnvironmentVariables['PT136_DIR'] = $dir
+            $p = [System.Diagnostics.Process]::Start($psi); $p.StandardInput.Close()
+            $err = $p.StandardError.ReadToEndAsync(); $out = $p.StandardOutput.ReadToEnd()
+            if (-not $p.WaitForExit(30000)) { $p.Kill(); throw 'test 136: the listing driver did not finish within 30 s.' }
+            [pscustomobject]@{ Lines = @($out -split "`r?`n" | Where-Object { $_ -ne '' }); Err = $err.Result.Trim() }
+        }
+        $k4 = 'HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\'
+        $k6 = 'HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\'
+        $kn = 'HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}\'
+        $g1 = '{11111111-0136-4136-8136-000000000001}'   # live adapter, nothing typed in
+        $g2 = '{22222222-0136-4136-8136-000000000002}'   # adapter in use: IPv4, and IPv6 padded with spaces
+        $g3 = '{33333333-0136-4136-8136-000000000003}'   # per-network record nested under g2
+        $g4 = '{44444444-0136-4136-8136-000000000004}'   # removed adapter - sorts LAST, as on the real machine
+        $w = { param($f, $t) [System.IO.File]::WriteAllText((Join-Path $dir $f), $t, [System.Text.Encoding]::ASCII) }
+        & $w "name_$g1.txt" ("`r`n$kn$g1\Connection`r`n    Name    REG_SZ    Ethernet`r`n")
+        & $w "name_$g2.txt" ("`r`n$kn$g2\Connection`r`n    Name    REG_SZ    Wi-Fi (home) & Co`r`n")
+        $cases = @(
+            @('every typed-in value, named by adapter, with the unnamed ones counted',
+              ("`r`n$k4$g1`r`n    NameServer    REG_SZ    `r`n`r`n$k4$g2`r`n    NameServer    REG_SZ    8.8.8.8,9.9.9.9,192.168.0.1`r`n`r`n$k4$g2\$g3`r`n    NameServer    REG_SZ    10.9.9.9`r`n`r`n$k4$g4`r`n    NameServer    REG_SZ    10.1.1.1`r`n`r`nEnd of search: 4 match(es) found.`r`n"),
+              ("`r`n$k6$g2`r`n    NameServer    REG_SZ    fd00::53,fd00::54        `r`n`r`nEnd of search: 1 match(es) found.`r`n"),
+              @(' DNS servers typed in by hand, per adapter - write down any you want to keep:',
+                '   IPv4  8.8.8.8,9.9.9.9,192.168.0.1   (Wi-Fi (home) & Co)',
+                '   IPv6  fd00::53,fd00::54   (Wi-Fi (home) & Co)',
+                '   (not shown: 2 stored for no adapter in Network Connections now)')),
+            @('nothing typed in on any adapter',
+              ("`r`n$k4$g1`r`n    NameServer    REG_SZ    `r`n`r`n$k4$g2`r`n    NameServer    REG_SZ    `r`n"), '',
+              @(' DNS servers typed in by hand: none - every adapter gets its DNS from DHCP.')),
+            @('a value only on a removed adapter',
+              ("`r`n$k4$g1`r`n    NameServer    REG_SZ    `r`n`r`n$k4$g4`r`n    NameServer    REG_SZ    10.1.1.1`r`n"), '',
+              @(' DNS servers typed in by hand: none on a current adapter. Not shown: 1 stored for no',
+                ' adapter in Network Connections now (removed adapters, per-network records).')),
+            # nothing skipped: the "(not shown: N ...)" note must stay away, not read "0"
+            @('values only on current adapters',
+              ("`r`n$k4$g1`r`n    NameServer    REG_SZ    `r`n`r`n$k4$g2`r`n    NameServer    REG_SZ    192.168.0.1`r`n"), '',
+              @(' DNS servers typed in by hand, per adapter - write down any you want to keep:',
+                '   IPv4  192.168.0.1   (Wi-Fi (home) & Co)')),
+            @('a registry read that printed nothing', '', '',
+              @(' [WARN] Could not read the IPv4 DNS settings from the registry, so they are not listed.',
+                '        Note your DNS servers in Windows'' network settings before changing anything.')))
+        foreach ($c in $cases) {
+            & $w 'scan_IPv4.txt' $c[1]
+            & $w 'scan_IPv6.txt' $c[2]
+            $r = & $run
+            Assert-True (($r.Lines -join "`n") -ceq ($c[3] -join "`n")) ('With {0}, the DNS listing printed [{1}], not [{2}] (regression). {3}' -f $c[0], ($r.Lines -join ' | '), ($c[3] -join ' | '), $r.Err)
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+    }
+}
+
+# ===============================================================================
+# 137. The power revert screen names, on screen, every power change its undo
+#      file does not cover, and the file captures hibernation. It said
+#      "Hibernation and CPU power throttling are the separate items - see
+#      'Reverting changes' in the README", whose table had no hibernation row -
+#      and the README is not on the machine the menu runs on. Hibernation is now
+#      captured before it is turned off (test 126 runs that capture six ways),
+#      and the capture's failure [WARN] names the one command that brings it back.
+#      When that capture fails, :SetMinProcState retries it later on the same
+#      visit, and the retry read sincript's own "off" as "already off before
+#      sincript": a flag, handed to the payload as PT_HBOFF, now stops that.
+# ===============================================================================
+Invoke-Test 'The power revert screen names what its undo file does not cover, and hibernation is captured first' {
+    $cmd = Read-Lines $CmdPath
+    $rp = @(Get-BodyLines -Lines $cmd -Label 'RestorePowerBackup' -CodeOnly)
+    $rpEcho = @($rp | Where-Object { $_.Trim() -match '^(?i)echo\b' }) -join "`n"
+    Assert-True ($rpEcho.Length -gt 200) ':RestorePowerBackup did not unroll, or lost its text.'
+    Assert-True ($rpEcho -match '(?i)powercfg /hibernate on') ':RestorePowerBackup no longer says how to turn hibernation back on when the file cannot (regression).'
+    Assert-True ($rpEcho -match '(?i)could not read it') ':RestorePowerBackup no longer says that a file which could not read hibernation does not restore it.'
+    Assert-True ($rpEcho -match '(?i)its earlier\s+(echo\s+)?state is unknown') ':RestorePowerBackup no longer says that a file which calls the earlier hibernation state unknown does not restore it.'
+    Assert-True ($rpEcho -match '(?i)Restore a single value backup') ':RestorePowerBackup no longer points CPU power throttling at its value backup (regression).'
+    Assert-True ($rpEcho -notmatch '(?i)README') ':RestorePowerBackup sends the user to the README for an undo again (regression).'
+    $pw = @(Get-BodyLines -Lines $cmd -Label 'Power' -CodeOnly)
+    $iHb = -1
+    for ($i = 0; $i -lt $pw.Count; $i++) { if ($pw[$i] -match '(?i)set /p "_hb=') { $iHb = $i; break } }
+    Assert-True ($iHb -gt 0) ':Power lost its hibernation prompt - routine changed shape?'
+    Assert-True ($pw[$iHb - 1] -match '(?i)^\s*echo\b.*(hibernate on|undo file)') ':Power asks to disable hibernation without saying, right above the question, how it is undone (regression).'
+    $iCap = -1; $offs = @()
+    for ($i = 0; $i -lt $pw.Count; $i++) {
+        if ($pw[$i].Trim() -match '^(?i)echo\b') { continue }
+        if ($iCap -lt 0 -and $pw[$i] -match '^\s*if /i "!_hb!"=="Y" call :PowerBackup\s*$') { $iCap = $i }
+        if ($pw[$i] -match '(?i)powercfg /hibernate off') { $offs += $i }
+    }
+    Assert-True ($offs.Count -eq 1) (':Power should turn hibernation off in exactly one place, found {0}.' -f $offs.Count)
+    Assert-True ($iCap -ge 0 -and $offs[0] -gt $iCap) ':Power turns hibernation off without capturing it into the power undo file first (regression).'
+    $iClr = -1; $iFlag = -1
+    for ($i = 0; $i -lt $pw.Count; $i++) {
+        if ($iClr -lt 0 -and $pw[$i] -match '^\s*set "_PWHBOFF="\s*$') { $iClr = $i }
+        if ($pw[$i] -match '^\s*if /i "!_hb!"=="Y" if not defined _PWBAK_FILE set "_PWHBOFF=1"\s*$') { $iFlag = $i }
+    }
+    Assert-True ($iClr -ge 0 -and $iClr -lt $iCap) ':Power does not clear _PWHBOFF before its hibernation capture - the flag of an earlier visit would carry over (regression).'
+    Assert-True ($iFlag -gt $offs[0]) ':Power no longer flags a hibernation off that ran with no capture landed - the capture :SetMinProcState retries would write "already off before sincript" about sincript''s own change (regression).'
+    $pbAll = @(Get-BodyLines -Lines $cmd -Label 'PowerBackup' -CodeOnly)
+    $pb = @($pbAll | Where-Object { $_.Trim() -notmatch '^(?i)echo\b' }) -join "`n"
+    $pbEcho = @($pbAll | Where-Object { $_.Trim() -match '^(?i)echo\b' }) -join "`n"
+    Assert-True ($pb.Length -gt 1000 -and $pbEcho.Length -gt 0) ':PowerBackup did not unroll, or lost its payload.'
+    Assert-True ($pb -match '\$hb\.HibernateEnabled\b') ':PowerBackup no longer reads HibernateEnabled, so the undo file cannot put hibernation back (regression).'
+    Assert-True ($pb -match '\$hb\.HibernateEnabledDefault\b') ':PowerBackup no longer falls back to HibernateEnabledDefault when HibernateEnabled is absent - the file would say it could not read a state Windows does record (regression).'
+    Assert-True ($pb.Contains("'call :pt_do powercfg /hibernate on'")) ':PowerBackup no longer emits a counted hibernation restore (regression).'
+    Assert-True ($pb.Contains("'rem  turn it back on from an elevated prompt with:  powercfg /hibernate on'")) ':PowerBackup no longer names the manual command when it cannot read the hibernation state.'
+    Assert-True ($pbEcho -match '(?i)powercfg /hibernate on') ':PowerBackup''s failure [WARN] no longer names the command that turns hibernation back on - Control Panel has no switch for it.'
+    Assert-True ($pbEcho -notmatch '(?i)remain reversible') ':PowerBackup''s failure [WARN] says power options "remain reversible" through Control Panel again - hibernation is not (regression).'
+    $iSet = -1; $iGen = -1; $iUnset = -1
+    for ($i = 0; $i -lt $pbAll.Count; $i++) {
+        if ($iSet -lt 0 -and $pbAll[$i] -match '^\s*set "PT_HBOFF=!_PWHBOFF!"\s*$') { $iSet = $i }
+        if ($iGen -lt 0 -and $pbAll[$i].Contains('Set-Content -LiteralPath $env:PT_PWBAK ')) { $iGen = $i }
+        if ($iUnset -lt 0 -and $pbAll[$i] -match '^\s*set "PT_HBOFF="\s*$') { $iUnset = $i }
+    }
+    Assert-True ($iSet -ge 0 -and $iGen -gt $iSet -and $iUnset -gt $iGen) ':PowerBackup no longer hands _PWHBOFF to its payload as PT_HBOFF (set before the generator, cleared after) - a retried capture cannot tell sincript''s own "off" from the user''s (regression).'
+    Assert-True ($pb.Contains('elseif($env:PT_HBOFF){')) ':PowerBackup''s payload no longer reads PT_HBOFF, so a retried capture writes "already off before sincript" about sincript''s own change (regression).'
+}
+
+# ===============================================================================
+# 138. No screen promises an undo the code does not have. An audit found
+#      "reversible", "harmless", "revert from their own menus", "old one saved as
+#      hosts.bak" and "enough for a full restore" on screens where the code did
+#      not back them, and one-way actions (TCP tuning, the network-stack reset)
+#      that did not say so. Each rule requires the replacement wording AND bans
+#      the false wording, so a rule cannot pass on a routine that lost its text.
+# ===============================================================================
+Invoke-Test 'Screens promise no undo the code does not have' {
+    $cmd = Read-Lines $CmdPath
+    $never = '(?!)'   # a rule whose screen had nothing false, only something missing
+    $rules = @(
+        @(@('MenuAdvanced'),                               '(?i)\bReversible,',                                       '(?i)no in-app undo'),
+        @(@('MenuTools'),                                  '(?i)reversible',                                          '(?i)cannot be undone'),
+        @(@('CompactWinSxS'),                              '(?i)reversible',                                          '(?is)cleanup cannot.*compactos:never'),
+        @(@('Performance'),                                '(?i)pick this to undo',                                   '(?i)exact value you'),
+        @(@('Power'),                                      '(?i)Balanced undoes|pick this to undo|Reset it under',    '(?i)Revert power settings'),
+        @(@('NetworkApply'),                               $never,                                                    '(?s)NOT saved.*netsh int tcp show global.*netsh int tcp show heuristics'),
+        @(@('NetReset'),                                   $never,                                                    '(?i)cannot be undone'),
+        @(@('DnsCustom'),                                  '(?i)left exactly as it is|puts everything back',          '(?i)does not bring back'),
+        @(@('ApplyHosts'),                                 '(?i)next to it AND',                                      '(?i)never overwrite'),
+        @(@('ResetHostsDefault'),                          '(?i)old one saved as hosts\.bak',                         '(?i)The file it replaced'),
+        @(@('DisableMitigations'),                         '(?i)Reversible \(option 2\)',                             '(?i)Memory_Management_'),
+        @(@('BcdTimers'),                                  '(?i)Reversible \(option 4\)',                             '(?i)Windows defaults'),
+        @(@('NvmeFlags'),                                  '(?i)harmless',                                            '(?i)then reboot'),
+        @(@('DisableIPv6'),                                '(?i)delete that value or set it to 0',                    '(?i)single value backup'),
+        @(@('ApplyRecommended'),                           $never,                                                    '(?i)Ultimate Performance'),
+        @(@('CliHelp'),                                    '(?i)aggressive-but-reversible',                           '(?i)/preset:heavy'),
+        @(@('Debloat'),                                    '(?i)to get an app back you|reinstall it from the Microsoft Store', '(?i)LTSC editions have no Store'),
+        @(@('DebloatDone'),                                '(?i)Any removed app',                                     '(?i)OneDrive comes back'),
+        @(@('PathEditor'),                                 '(?i)whole PATH value',                                    '(?i)whole Environment key'),
+        @(@('LaptopAdvisory'),                             '(?i)reversible',                                          '\[ADVISORY\]'),
+        @(@('MenuPresets'),                                '(?i)from their own menu',                                 '(?is)TCP tuning.*deletes files for good'),
+        @(@('PresetLight'),                                '(?i)reversible',                                          '(?is)TCP tuning is not saved.*deletes files for good'),
+        @(@('PresetHeavy'),                                '(?i)but reversible|from their own menu',                  '(?is)Enable-MMAgent.*deletes files for good'),
+        @(@('RestorePresetJson', 'RestorePresetJson_ask'), '(?i)from their own menu',                                 '(?is)TCP tuning.*memory compression.*Not restored here'),
+        @(@('ManageBackups'),                              '(?i)enough for a full restore',                           '(?i)only copy of values')
+    )
+    foreach ($rule in $rules) {
+        $lines = @($rule[0] | ForEach-Object { Get-BodyLines -Lines $cmd -Label $_ -CodeOnly })
+        $said = @($lines | Where-Object { $_ -match '(?i)(^|\s)echo(\s|\.|\()' }) -join "`n"
+        $who = ':' + ($rule[0] -join ' / :')
+        Assert-True ($said -match $rule[2]) ("$who lost the wording that says what its undo really is (expected /{0}/), or the routine changed shape." -f $rule[2])
+        Assert-True ($said -notmatch $rule[1]) ("$who promises an undo the code does not have again (matched /{0}/)." -f $rule[1])
+    }
+
+    # The hosts reset names the file that really holds what it replaced. hosts.bak is write-once,
+    # so after the first run the replaced file is only the snapshot - or nowhere, if that copy
+    # failed - while the message still said "saved as hosts.bak". And _hbakdoc is set by
+    # :ApplyHosts too, so without clearing it a stale snapshot could be named.
+    $rh = @(Get-BodyLines -Lines $cmd -Label 'ResetHostsDefault' -CodeOnly)
+    Assert-True ($rh.Count -gt 20) ':ResetHostsDefault did not unroll.'
+    $iClr = -1; $iNew = -1; $iSet = -1
+    for ($i = 0; $i -lt $rh.Count; $i++) {
+        if ($iClr -lt 0 -and $rh[$i] -match '^\s*set "_hbakdoc="\s*$') { $iClr = $i }
+        if ($iNew -lt 0 -and $rh[$i] -match '^\s*set "_hbnew="\s*$') { $iNew = $i }
+        if ($iSet -lt 0 -and $rh[$i] -match 'set "_hbakdoc=!BACKUP_DIR!') { $iSet = $i }
+    }
+    Assert-True ($iClr -ge 0 -and $iNew -ge 0 -and $iSet -gt $iClr -and $iSet -gt $iNew) ':ResetHostsDefault does not clear _hbakdoc and _hbnew before it may set them - the reset message could name the snapshot an earlier Apply hosts took (regression).'
+    Assert-True (@($rh | Where-Object { $_ -match '(?i)^\s*if not exist "%_HOSTS%\.bak" copy /y "%_HOSTS%" "%_HOSTS%\.bak" >nul 2>&1 && set "_hbnew=1"\s*$' }).Count -eq 1) ':ResetHostsDefault no longer records (on the copy''s own success) that THIS run wrote hosts.bak - the message cannot tell a fresh hosts.bak from an old one (regression).'
+    $gates = @(
+        @('The file it replaced is saved as !_hbakdoc!', @('if exist "!_hbakdoc!"')),
+        @('The file it replaced is saved as hosts.bak',  @('if not exist "!_hbakdoc!"', 'if defined _hbnew')),
+        @('The file it replaced could NOT be saved',      @('if not exist "!_hbakdoc!"', 'if not defined _hbnew')))
+    foreach ($g in $gates) {
+        $hit = @($rh | Where-Object { $_.Contains($g[0]) })
+        Assert-True ($hit.Count -eq 1) (':ResetHostsDefault should say "{0}" on exactly one line, found {1}.' -f $g[0], $hit.Count)
+        foreach ($cond in $g[1]) {
+            Assert-True ($hit[0].Contains($cond)) (':ResetHostsDefault says "{0}" without the gate {1} - it can name a file that does not hold the replaced hosts (regression).' -f $g[0], $cond)
+        }
+    }
+}
+
+# ===============================================================================
+# 139. The Windows Update driver toggle writes ONE documented policy, spelled the
+#      one way Windows reads it, under the one key it reads it from - and "on"
+#      DELETES the value ("Not configured", the Windows default) instead of writing
+#      0 (the policy's "Disabled" state). Both halves read the value back and COUNT
+#      a wrong or unreadable end state into _FAILS before :Summary, so an inline
+#      [FAIL] can never sit above an [OK]; only then do they ask whether the Group
+#      Policy Editor will write its own value back (the write path, nowhere else).
+#      The toggle stays menu-only: no preset, no safe set, no /preset:.
+# ===============================================================================
+Invoke-Test 'Windows Update driver toggle: one documented policy, deleted to turn back on, end state counted, menu-only' {
+    $cmd = Read-Lines $CmdPath
+    $all = $cmd -join "`n"
+    $key = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    $val = 'ExcludeWUDriversInQualityUpdate'
+
+    # One spelling everywhere, comments included. Microsoft's Autopatch pages print the registry
+    # name as ...From...Updates; Windows reads nothing by that name, so a write of it would print
+    # [OK] and change nothing.
+    $names = @([regex]::Matches($all, '(?i)ExcludeWUDrivers\w*') | ForEach-Object { $_.Value })
+    Assert-True ($names.Count -ge 6) ("Only {0} mention(s) of {1} - the feature is missing or the scan broke." -f $names.Count, $val)
+    $wrong = @($names | Where-Object { $_ -ine $val } | Sort-Object -Unique)
+    Assert-True ($wrong.Count -eq 0) ("Misspelled driver-policy name(s): {0}. Windows reads only {1} (regression)." -f ($wrong -join ', '), $val)
+
+    $off = @(Get-BodyLines -Lines $cmd -Label 'WuDrvOff' -CodeOnly | ForEach-Object { $_.Trim() })
+    $on  = @(Get-BodyLines -Lines $cmd -Label 'WuDrvOn' -CodeOnly | ForEach-Object { $_.Trim() })
+    Assert-True ($off.Count -gt 10 -and $on.Count -gt 10) ':WuDrvOff / :WuDrvOn are missing or did not unroll.'
+    $offj = $off -join "`n"; $onj = $on -join "`n"
+    Assert-True ($offj -match ('(?i)call :SafeRegAdd "' + [regex]::Escape($key) + '" "' + $val + '" REG_DWORD 1 "')) ':WuDrvOff no longer writes REG_DWORD 1 to the documented key through :SafeRegAdd (regression).'
+    Assert-True ($onj -match ('(?i)call :SafeRegDelete "' + [regex]::Escape($key) + '" "' + $val + '" "')) ':WuDrvOn no longer DELETES the value through :SafeRegDelete - "on" means Not configured, the Windows default (regression).'
+    $writes = @($cmd | Where-Object { $_.Trim() -notmatch '^(?i)(rem|echo)\b' -and $_ -match ('(?i)call :SafeReg(Add|Delete)\s+"[^"]*"\s+"' + $val + '"') })
+    Assert-True ($writes.Count -eq 2) ("Expected exactly two writes of {0} (block, unblock), found {1}: {2}" -f $val, $writes.Count, ($writes -join ' | '))
+    foreach ($w in $writes) {
+        Assert-True ($w -match ('(?i)"' + [regex]::Escape($key) + '"\s')) ("{0} is written under the wrong key - Windows reads it only from {1} (the AU subkey is a different policy set): {2}" -f $val, $key, $w.Trim())
+        Assert-True ($w -notmatch '(?i)REG_DWORD\s+0\b') ("{0} is written as 0 - that is the policy's Disabled state; turning drivers back on must delete it: {1}" -f $val, $w.Trim())
+    }
+
+    # The end state, read back and COUNTED, then the Group Policy Editor check, then :Summary.
+    foreach ($r in @(@{ n = 'WuDrvOff'; b = $off; want = 'blocked' }, @{ n = 'WuDrvOn'; b = $on; want = 'unset' })) {
+        $b = $r.b
+        $iReset = [Array]::IndexOf($b, 'set "_FAILS=0"')
+        $iWrite = -1; for ($i = 0; $i -lt $b.Count; $i++) { if ($b[$i] -match '^(?i)call :SafeReg(Add|Delete) ') { $iWrite = $i; break } }
+        $iRead  = [Array]::IndexOf($b, 'call :WuDrvRead')
+        $iCheck = [Array]::IndexOf($b, ('if "%_FAILS%"=="0" if not "!_wdst!"=="' + $r.want + '" ('))
+        $iGp    = [Array]::IndexOf($b, ('if "%_FAILS%"=="0" call :WuDrvGpCheck ' + $r.want))
+        $iSum   = -1; for ($i = 0; $i -lt $b.Count; $i++) { if ($b[$i] -match '^(?i)call :Summary "') { $iSum = $i; break } }
+        Assert-True ($iReset -ge 0 -and $iReset -lt $iWrite) (":{0} does not reset _FAILS before its write (regression)." -f $r.n)
+        Assert-True ($iRead -gt $iWrite -and $iCheck -gt $iRead -and $iCheck -lt $iSum) (":{0} does not read the value back and check it is '{1}' before :Summary - its [OK] would report the absence of an error, not the end state (regression)." -f $r.n, $r.want)
+        Assert-True ($iCheck + 3 -lt $b.Count -and $b[$iCheck + 1] -match '^echo\s+\[FAIL\]\s' -and $b[$iCheck + 2] -eq 'set /a _FAILS+=1' -and $b[$iCheck + 3] -eq ')') (":{0} no longer counts a wrong read-back into _FAILS inside its check - the user would see an inline [FAIL] and then :Summary's [OK] (regression)." -f $r.n)
+        Assert-True ($iGp -gt $iCheck + 3 -and $iGp -lt $iSum) (":{0} no longer asks, once the value is in place and before :Summary, whether the Group Policy Editor sets it too - Group Policy would write its value back after an [OK] (regression)." -f $r.n)
+        Assert-True (@($b | Where-Object { $_ -match '^(?i)echo\s+\[OK\]' }).Count -eq 0) (":{0} echoes a bare [OK] instead of going through :Summary (regression)." -f $r.n)
+    }
+
+    # Where the effect cannot be vouched for, only "written" is honest: an edition Microsoft does
+    # not list (Home, unread), a build before 1607, or MDM telling Windows Update to ignore Group
+    # Policy. Each branch is taken before the one summary that promises the effect.
+    $iPromise = -1; for ($i = 0; $i -lt $off.Count; $i++) { if ($off[$i] -match '^call :Summary "Windows Update will stop offering drivers') { $iPromise = $i; break } }
+    Assert-True ($iPromise -gt 0) ':WuDrvOff lost its summary for the case where the block is documented to work.'
+    foreach ($g in 'if defined _wdign goto _wdOffIgnored', 'if not "!_wdedc!"=="listed" goto _wdOffUnverified', 'if defined WIN_BUILD if !WIN_BUILD! LSS 14393 goto _wdOffUnverified') {
+        $ig = [Array]::IndexOf($off, $g)
+        Assert-True ($ig -ge 0 -and $ig -lt $iPromise) (":WuDrvOff promises the block works without first ruling out '{0}' - there only ""written"" is honest (regression)." -f $g)
+    }
+    $unv = @($off | Where-Object { $_ -match '^call :Summary "' -and $_ -notmatch 'will stop offering drivers' -and $_ -notmatch 'Group Policy Editor' })
+    Assert-True ($unv.Count -eq 2 -and @($unv | Where-Object { $_ -match 'unverified' }).Count -eq 2) (':WuDrvOff should have exactly two "written ... unverified" summaries besides the promise and the Group Policy Editor one, found: ' + ($unv -join ' | '))
+    Assert-True ([Array]::IndexOf($on, 'if defined _wdign goto _wdOnIgnored') -ge 0) ':WuDrvOn no longer says, where MDM tells Windows Update to ignore Group Policy, that removing the local value decides nothing (regression).'
+
+    # A Group Policy Editor conflict is decided FIRST. The value was written and read back, so the
+    # promise ("will stop offering ... restart Windows") and the other summaries are wrong there - a
+    # restart is when Group Policy writes its value back. Its flag is cleared before each write,
+    # because the check that sets it is skipped after a failed write. Each conflict summary hands
+    # :Summary a cause (_SUMCAUSE), which replaces the "could NOT be applied ... protected keys" tail.
+    $okOn = -1; for ($i = 0; $i -lt $on.Count; $i++) { if ($on[$i] -match '^call :Summary "Driver updates back to the Windows default') { $okOn = $i; break } }
+    Assert-True ($okOn -gt 0) ':WuDrvOn lost its summary for the plain "back to the default" case.'
+    foreach ($r in @(@{ n = 'WuDrvOff'; b = $off; first = @('if defined _wdgpc goto _wdOffGp'); gates = @('if defined _wdign goto _wdOffIgnored', 'if not "!_wdedc!"=="listed" goto _wdOffUnverified', 'if defined WIN_BUILD if !WIN_BUILD! LSS 14393 goto _wdOffUnverified'); promise = $iPromise; nGp = 1 },
+                     @{ n = 'WuDrvOn'; b = $on; first = @('if "!_wdgpc!"=="keep" goto _wdOnGpKeep', 'if "!_wdgpc!"=="block" goto _wdOnGpBlock', 'if defined _wdgpc goto _wdOnGp'); gates = @('if defined _wdign goto _wdOnIgnored'); promise = $okOn; nGp = 3 })) {
+        $b = $r.b
+        $iReset = [Array]::IndexOf($b, 'set "_FAILS=0"'); $iClr = [Array]::IndexOf($b, 'set "_wdgpc="')
+        $iWrite = -1; for ($i = 0; $i -lt $b.Count; $i++) { if ($b[$i] -match '^(?i)call :SafeReg(Add|Delete) ') { $iWrite = $i; break } }
+        Assert-True ($iClr -gt $iReset -and $iClr -lt $iWrite) (":{0} no longer clears _wdgpc before its write - after a failed write the check is skipped, and an earlier conflict would pick this summary (regression)." -f $r.n)
+        $iGp = -1; for ($i = 0; $i -lt $b.Count; $i++) { if ($b[$i] -match '^if "%_FAILS%"=="0" call :WuDrvGpCheck ') { $iGp = $i; break } }
+        foreach ($f in $r.first) {
+            $iF = [Array]::IndexOf($b, $f)
+            Assert-True ($iF -gt $iGp -and $iF -lt $r.promise) (":{0} no longer routes a Group Policy Editor conflict ('{1}') after the check and before its normal summary (regression)." -f $r.n, $f)
+            foreach ($g in $r.gates) { Assert-True ($iF -lt [Array]::IndexOf($b, $g)) (":{0} tests '{1}' before the Group Policy Editor conflict - the conflict must decide the summary first (regression)." -f $r.n, $g) }
+        }
+        $gpSum = @(); for ($i = 1; $i -lt $b.Count; $i++) { if ($b[$i] -match '^call :Summary "[^"]*Group Policy Editor') { $gpSum += $i } }
+        Assert-True ($gpSum.Count -eq $r.nGp) (":{0} should have {1} Group Policy Editor summar(ies), found {2}." -f $r.n, $r.nGp, $gpSum.Count)
+        foreach ($i in $gpSum) {
+            Assert-True ($b[$i - 1] -match '^set "_SUMCAUSE=[^"]+"$') (":{0}: the Group Policy Editor summary is not preceded by its cause - :Summary would print ""could NOT be applied ... protected or held by Windows"" under a value that was written and read back (regression): {1}" -f $r.n, $b[$i])
+            Assert-True ($b[$i] -notmatch '(?i)restart Windows|will stop offering|back to the Windows default') (":{0}: the Group Policy Editor summary promises the effect or says ""restart Windows"" - a restart is when Group Policy writes its own value back (regression): {1}" -f $r.n, $b[$i])
+        }
+    }
+
+    # "That MDM value now applies" only when the read-back shows the Group Policy value GONE: while
+    # it is still there (a failed delete), Group Policy still wins by default.
+    $applies = @($on | Where-Object { $_ -match '(?i)now applies' })
+    Assert-True ($applies.Count -eq 1) (':WuDrvOn should say on exactly one line that the MDM value now applies, found {0}.' -f $applies.Count)
+    Assert-True ($applies[0] -match '^if defined _wdmdm if "!_wdst!"=="unset" if not defined _wdgpc echo\s') (':WuDrvOn says the MDM value "now applies" without checking that the read-back shows the local value gone and that the Group Policy Editor will not write one back - either way Group Policy wins, contradicting the [WARN] above it (regression): ' + $applies[0])
+
+    # The Group Policy Editor check starts PowerShell, so it is called from the two handlers only.
+    $gpCalls = @()
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        if ($cmd[$i].Trim() -match '^(?i)rem\b' -or $cmd[$i] -notmatch '(?i)call :WuDrvGpCheck\b') { continue }
+        $own = '<none>'
+        for ($j = $i; $j -ge 0; $j--) { if ($cmd[$j] -match '^:(\w+)' -and $Matches[1] -notmatch '^_') { $own = $Matches[1]; break } }
+        $gpCalls += $own
+    }
+    Assert-True ($gpCalls.Count -eq 2 -and $gpCalls -contains 'WuDrvOff' -and $gpCalls -contains 'WuDrvOn') ('The Group Policy Editor check must be called by :WuDrvOff and :WuDrvOn only (the write path) - it starts PowerShell. Callers found: ' + ($gpCalls -join ', '))
+
+    # Menu-only. Every code line that names the value, or jumps to its handlers, must live in the
+    # toggle's own routines - never in a preset body, a core, the safe set or :CliRun.
+    $allowed = 'WuDrivers_ask', 'WuDrvOff', 'WuDrvOn', 'WuDrvRead', 'WuDrvGpCheck'
+    $seen = 0; $bad = @()
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        $s = $cmd[$i].Trim()
+        if ($s -match '^(?i)(rem|echo)\b') { continue }
+        if ($s -notmatch ('(?i)' + $val + '|\bgoto\s+WuDrv(Off|On)\b|\bcall\s+:WuDrv(Off|On)\b|\b(goto\s+|call\s+:)WuDrivers\b')) { continue }
+        $seen++
+        $own = '<none>'
+        for ($j = $i; $j -ge 0; $j--) { if ($cmd[$j] -match '^:(\w+)' -and $Matches[1] -notmatch '^_') { $own = $Matches[1]; break } }
+        if ($allowed -notcontains $own -and -not ($own -eq 'MenuAdvanced_ask' -and $s -eq 'if "!sel!"=="11" goto WuDrivers')) { $bad += ("line {0} in :{1}: {2}" -f ($i + 1), $own, $s) }
+    }
+    Assert-True ($seen -ge 7) "Only $seen code line(s) reference the driver policy or its screens - the scan is not seeing them."
+    Assert-True ($bad.Count -eq 0) ("The driver policy is reachable outside its own menu screen - the author kept it out of presets, the safe set and /preset: (regression): " + ($bad -join ' | '))
+    $pcl = (Get-BodyLines -Lines $cmd -Label 'PresetCheckLine' -CodeOnly) -join "`n"
+    Assert-True ($pcl.Length -gt 0) ':PresetCheckLine is missing - the preset-key half of this check proves nothing.'
+    Assert-True ($pcl -notmatch '(?i)"[%!]_k[%!]"=="[^"]*driver') 'A preset key for driver updates exists - the toggle was meant to stay menu-only (regression).'
+    if (Test-Path -LiteralPath $PresetPath) {
+        # Setting lines only, as test 3 reads them: every non-comment line, plus commented "key=value"
+        # examples (the ones people uncomment). Prose saying why there is no driver key is fine.
+        $presetLines = Read-Lines $PresetPath
+        $settings = @()
+        foreach ($raw in $presetLines) {
+            $t = $raw.Trim()
+            if ($t -eq '') { continue }
+            if ($t.StartsWith('#') -or $t.StartsWith(';')) {
+                $t = $t.TrimStart('#', ';').Trim()
+                if ($t -notmatch '^[A-Za-z_][A-Za-z0-9_]*\s*=') { continue }
+            }
+            $settings += $t
+        }
+        Assert-True ($settings.Count -ge 10) ("Only {0} setting line(s) found in example.preset - the driver-key check would prove nothing." -f $settings.Count)
+        $drv = @($settings | Where-Object { $_ -match '(?i)driver' })
+        Assert-True ($drv.Count -eq 0) ('example.preset has a driver setting - the toggle was meant to stay menu-only (regression): ' + ($drv -join ' | '))
+    }
+    $ask = @(Get-BodyLines -Lines $cmd -Label 'MenuAdvanced_ask' -CodeOnly | ForEach-Object { $_.Trim() })
+    Assert-True ($ask -contains 'if "!sel!"=="11" goto WuDrivers') 'Advanced item 11 no longer dispatches to :WuDrivers (regression).'
+    # _SUMCAUSE turns :Summary's "a write failed" tail into "not a failed write". It belongs only to the
+    # Group Policy Editor conflict outcomes, where the change DID land and was read back - anywhere else it
+    # would explain away a real failure. Each set sits directly under a :_wd*Gp* label and directly above a
+    # :Summary that names the Group Policy Editor.
+    $causes = @(for ($i = 0; $i -lt $cmd.Count; $i++) { if ($cmd[$i] -match '^\s*set "_SUMCAUSE=.+"') { $i } })
+    Assert-True ($causes.Count -ge 1) 'No code sets _SUMCAUSE - the Group Policy Editor outcomes lost their explanation.'
+    foreach ($i in $causes) {
+        Assert-True ($i -gt 0 -and $cmd[$i - 1] -match '^:_wd(Off|On)Gp\w*$') ("line {0} sets _SUMCAUSE outside a Group Policy Editor outcome - it would explain away a real failure (regression)." -f ($i + 1))
+        Assert-True ($cmd[$i + 1] -match '^\s*call :Summary ".*Group Policy Editor') ("line {0}: _SUMCAUSE is not followed directly by the Group Policy Editor summary it belongs to (regression)." -f ($i + 1))
+    }
+}
+
+# ===============================================================================
+# 140. The driver-policy screen says what it costs BEFORE it asks: the whole driver
+#      offer (firmware included), Microsoft's recommendation, what it does not undo
+#      and what still gets through, that the Group Policy Editor writes its own
+#      value back - and the stored value, read with no PowerShell. Its advisories
+#      are warning-only. The Group Policy Editor check reads Registry.pol (a binary
+#      file, not localized text) and runs on the write path only. Status reads the
+#      value through the same routines, "What was excluded" tells this one scoped
+#      policy apart from disabling Windows Update, and the menus fit the console.
+# ===============================================================================
+Invoke-Test 'The driver-policy screen discloses before it asks; the gpedit check is write-path only; Status, Excluded and the menus agree' {
+    $cmd = Read-Lines $CmdPath
+    $width = 0; $height = 0
+    foreach ($ln in $cmd) { $m = [regex]::Match($ln, '(?i)^\s*mode con:\s*cols=(\d+)\s+lines=(\d+)'); if ($m.Success) { $width = [int]$m.Groups[1].Value; $height = [int]$m.Groups[2].Value } }
+    Assert-True ($width -gt 0 -and $height -gt 0) 'No "mode con: cols=N lines=M" line - nothing to measure against.'
+    $unesc = { param([string]$s) [regex]::Replace($s, '\^(.)', '$1') }
+
+    $scr = @(Get-BodyLines -Lines $cmd -Label 'WuDrivers' -CodeOnly | ForEach-Object { $_.Trim() })
+    Assert-True ($scr.Count -gt 15) ':WuDrivers is missing or did not unroll.'
+    $iOpt = -1
+    for ($i = 0; $i -lt $scr.Count; $i++) { if ($scr[$i] -match '^echo\s+1\.\s') { $iOpt = $i; break } }
+    Assert-True ($iOpt -gt 0) ':WuDrivers no longer prints its numbered choices - screen changed shape?'
+    $before = $scr[0..($iOpt - 1)]
+    # the disclosure as it reads on screen: line breaks become spaces, carets are gone
+    $disc = (@($before | Where-Object { $_ -match '^(?i)echo\s' } | ForEach-Object { (& $unesc ($_ -replace '^(?i)echo\s+', '')) }) -join ' ')
+    foreach ($p in 'OFFERING drivers', 'firmware', 'security fixes', 'Microsoft recommends leaving driver updates on', 'does not remove what is installed', 'feature update', 'not affected', 'Group Policy Editor (gpedit.msc)', 'writes its own value back', 'reboot') {
+        Assert-True ($disc.Contains($p)) ("The driver-policy screen no longer says '{0}' before its choices - the user would decide without it (regression)." -f $p)
+    }
+    foreach ($c in 'call :WuDrvRead', 'call :WuDrvStateLine', 'call :WuDrvEditionNote', 'call :WuDrvFirmwareAdvisory') {
+        Assert-True (@($before | Where-Object { $_ -eq $c }).Count -eq 1) ("The driver-policy screen no longer runs '{0}' before its choices (regression)." -f $c)
+    }
+    Assert-True (@($before | Where-Object { $_ -match '^if defined WIN_BUILD if !WIN_BUILD! LSS 14393 echo\s+\[ADVISORY\]' }).Count -eq 1) 'The driver-policy screen no longer warns, before its choices, on a build older than 1607 (14393), where Microsoft does not list the policy (regression).'
+
+    # No PowerShell on the screen or the reader: it is one DWORD and a few strings, and Status runs
+    # it too. The one PowerShell worker, the Group Policy Editor check, stays off the draw path.
+    foreach ($r in 'WuDrivers', 'WuDrivers_ask', 'WuDrvOff', 'WuDrvOn', 'WuDrvRead', 'WuDrvStateLine', 'WuDrvEditionNote', 'WuDrvFirmwareAdvisory') {
+        $b = (Get-BodyLines -Lines $cmd -Label $r -CodeOnly) -join "`n"
+        Assert-True ($b.Length -gt 0) ":$r is missing."
+        Assert-True ($b -notmatch '(?i)powershell|Add-Type') (":{0} spawns PowerShell - reading a registry value must stay instant (regression)." -f $r)
+    }
+    foreach ($r in 'WuDrivers', 'WuDrvRead', 'WuDrvStateLine', 'WuDrvEditionNote', 'WuDrvFirmwareAdvisory', 'Status') {
+        $b = (Get-BodyLines -Lines $cmd -Label $r -CodeOnly) -join "`n"
+        Assert-True ($b -notmatch '(?i)WuDrvGpCheck') (":{0} runs the Group Policy Editor check - it starts PowerShell and belongs to the write path only (regression)." -f $r)
+    }
+    $gp = @(Get-BodyLines -Lines $cmd -Label 'WuDrvGpCheck' -CodeOnly | ForEach-Object { $_.Trim() })
+    Assert-True ($gp.Count -gt 10) ':WuDrvGpCheck is missing or did not unroll.'
+    $gpj = $gp -join "`n"
+    $ps = @($gp | Where-Object { $_ -match '(?i)\bpowershell\b' })
+    Assert-True ($ps.Count -eq 1 -and $ps[0].StartsWith('start "" /min /wait powershell -NoProfile -Command "')) ':WuDrvGpCheck should run exactly one house-pattern worker (start "" /min /wait powershell).'
+    Assert-True ($gpj -notmatch '(?i)Add-Type') ':WuDrvGpCheck compiles C# - a byte search needs none.'
+    Assert-True ($gp -contains 'set "_wdpolsrc=!SystemRoot!\System32\GroupPolicy\Machine\Registry.pol"') ':WuDrvGpCheck no longer reads the local Group Policy file (System32\GroupPolicy\Machine\Registry.pol).'
+    foreach ($p in 'ReadAllBytes($env:PT_WDPOLSRC)', 'catch [IO.FileNotFoundException]', 'GetEncoding(28591)', '[Text.Encoding]::Unicode', "'**del.'", "'**delvals'", 'OrdinalIgnoreCase', "'[Software\Policies\Microsoft\Windows\WindowsUpdate'") {
+        Assert-True ($ps[0].Contains($p)) (":WuDrvGpCheck's worker no longer contains '{0}' - it must read Registry.pol as bytes, find the UTF-16 key and value (and both delete markers) case-insensitively, and tell a missing file from an unreadable one." -f $p)
+    }
+    # the answer file is deleted once it is read - every Block or Allow would leave one in %TEMP%
+    $iRd = -1; for ($i = 0; $i -lt $gp.Count; $i++) { if ($gp[$i] -match '^if exist "!_wdpolf!" for /f ') { $iRd = $i; break } }
+    Assert-True ($iRd -ge 0 -and $iRd + 1 -lt $gp.Count -and $gp[$iRd + 1] -eq 'del "!_wdpolf!" >nul 2>&1') ':WuDrvGpCheck no longer deletes its answer file right after reading it - each change would leave a pt_wdpol_*.txt in %TEMP% (regression).'
+    Assert-True ($ps[0] -notmatch '[!%^]') ':WuDrvGpCheck''s worker holds a "!", "%" or "^" - cmd would eat it before PowerShell sees the command.'
+
+    # The reader: MDM from current\device (never \default, which exists everywhere), the ignore
+    # switch, the edition, the type before the number, and "unread" when reg answered nothing.
+    $rd = @(Get-BodyLines -Lines $cmd -Label 'WuDrvRead' -CodeOnly | ForEach-Object { $_.Trim() })
+    $rdj = $rd -join "`n"
+    Assert-True ($rdj -match '(?i)PolicyManager\\current\\device\\Update" /v ExcludeWUDriversInQualityUpdate') ':WuDrvRead no longer looks for an MDM value - a managed PC would be told nothing about its organization''s setting (regression).'
+    Assert-True ($rdj -match '(?i)PolicyManager\\current\\device\\Update" /v IgnoreWindowsUpdateGroupPolicies') ':WuDrvRead no longer reads IgnoreWindowsUpdateGroupPolicies - where MDM tells Windows Update to ignore Group Policy, a local block reads back as BLOCKED and does nothing (regression).'
+    Assert-True ($rdj -notmatch '(?i)PolicyManager\\default') ':WuDrvRead reads PolicyManager\default - that key holds this policy''s metadata on every machine, so every PC would look managed.'
+    Assert-True ($rdj -match '(?i)"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion" /v EditionID') ':WuDrvRead no longer reads EditionID - Home could not be told apart (regression).'
+    Assert-True ($rdj -match '(?i)if /i not "!_wdtype!"=="REG_DWORD" goto') ':WuDrvRead compares the number without checking the type first - a REG_SZ "1" would read as blocked (regression).'
+    Assert-True ($rd -contains 'if not defined _wded if "!_wdst!"=="unset" set "_wdst=unread"') ':WuDrvRead reports "not set - the Windows default" when the registry could not be read at all (EditionID missing too) - "none found" for a failed read (regression).'
+
+    # One vocabulary. Every word a caller compares _wdst / _wdedc against must be one :WuDrvRead
+    # can set - a caller testing for a word the reader never produces is a branch that never runs.
+    # _wdgpc the same way, against :WuDrvGpCheck - the handlers pick their summary by its words.
+    foreach ($vv in @(@{ v = '_wdst'; src = $rdj; min = 4; who = 'WuDrvRead'; must = 'unread'; umin = 4 }, @{ v = '_wdedc'; src = $rdj; min = 4; who = 'WuDrvRead'; must = 'unread'; umin = 4 }, @{ v = '_wdgpc'; src = $gpj; min = 3; who = 'WuDrvGpCheck'; must = 'keep'; umin = 2 })) {
+        $v = $vv.v
+        $made = @([regex]::Matches($vv.src, ('(?i)set "' + $v + '=(\w+)"')) | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        Assert-True ($made.Count -ge $vv.min) ("Found only {0} value(s) :{1} assigns to {2} - the scan is not seeing them." -f $made.Count, $vv.who, $v)
+        Assert-True ($made -contains $vv.must) (":{0} can no longer set {1} to '{2}' (regression)." -f $vv.who, $v, $vv.must)
+        $used = @()
+        foreach ($ln in $cmd) {
+            if ($ln.Trim() -match '^(?i)rem\b') { continue }
+            foreach ($m in [regex]::Matches($ln, ('(?i)"!' + $v + '!"=="(\w+)"'))) { $used += $m.Groups[1].Value }
+        }
+        Assert-True ($used.Count -ge $vv.umin) ("Found only {0} comparison(s) against {1} - the scan is not seeing them." -f $used.Count, $v)
+        $dead = @($used | Where-Object { $made -notcontains $_ } | Sort-Object -Unique)
+        Assert-True ($dead.Count -eq 0) ("{0} is compared against value(s) :{1} never sets: {2} (it sets {3}) - those branches can never run (regression)." -f $v, $vv.who, ($dead -join ', '), ($made -join ', '))
+    }
+
+    # Warning-only helpers: they print; they never ask, write, run or leave the screen.
+    foreach ($a in 'WuDrvStateLine', 'WuDrvEditionNote', 'WuDrvFirmwareAdvisory') {
+        foreach ($ln in @(Get-BodyLines -Lines $cmd -Label $a -CodeOnly)) {
+            Assert-True ($ln -notmatch '(?i)set /p|call :SafeReg|call :Run|\breg\s+(add|delete)\b|goto\s+(Main)?Menu|powershell') (":{0} is no longer warning-only - it contains: {1}" -f $a, $ln.Trim())
+        }
+    }
+    $fw = (Get-BodyLines -Lines $cmd -Label 'WuDrvFirmwareAdvisory' -CodeOnly) -join "`n"
+    Assert-True ($fw -match '(?i)if /i not "%MACHINE%"=="laptop" goto :eof') ':WuDrvFirmwareAdvisory is no longer gated on the laptop probe (regression).'
+    Assert-True ($fw -match '\[ADVISORY\]' -and $fw -match '(?i)firmware') ':WuDrvFirmwareAdvisory lost its [ADVISORY] firmware line (regression).'
+
+    # Every fixed line the feature prints fits the console, and none holds an unescaped redirect
+    # or command separator (an "echo ... > 11" writes a file named 11 and prints nothing).
+    # Variables are counted at a stated maximum: edition 26, a DWORD 10, a type name 30
+    # (REG_RESOURCE_REQUIREMENTS_LIST), a build 5, the gpedit value 26; test 141 measures the
+    # real rendered lines.
+    $maxv = @{ '_wded' = 26; '_wdmdm' = 10; '_wdraw' = 10; '_wdtype' = 30; 'WIN_BUILD' = 5; '_wdgpd' = 26 }
+    $lines = @()
+    foreach ($r in 'WuDrivers', 'WuDrvOff', 'WuDrvOn', 'WuDrvStateLine', 'WuDrvEditionNote', 'WuDrvFirmwareAdvisory', 'WuDrvGpCheck') {
+        foreach ($ln in @(Get-BodyLines -Lines $cmd -Label $r -CodeOnly)) { $lines += ,@($r, $ln.Trim()) }
+    }
+    $st = @(Get-BodyLines -Lines $cmd -Label 'Status' -CodeOnly | ForEach-Object { $_.Trim() })
+    $stHdr = @($st | Where-Object { $_ -match '^echo \[Windows Update drivers\]' })
+    Assert-True ($stHdr.Count -eq 1) ':Status lost its [Windows Update drivers] section.'
+    $lines += ,@('Status', $stHdr[0])
+    $ex = @(Get-BodyLines -Lines $cmd -Label 'Excluded' | Where-Object { $_ -match '(?i)Fully disabling Windows Update' } | ForEach-Object { $_.Trim() })
+    Assert-True ($ex.Count -eq 1) '"What was excluded" no longer lists fully disabling Windows Update (regression).'
+    $lines += ,@('Excluded', $ex[0])
+    $mm = @(Get-BodyLines -Lines $cmd -Label 'MainMenu' -CodeOnly | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^echo\s+7\.\s+Advanced\b' })
+    Assert-True ($mm.Count -eq 1) 'The main menu lost its Advanced line.'
+    $lines += ,@('MainMenu', $mm[0])
+    $wide = @(); $ops = @(); $n = 0; $nCause = 0
+    foreach ($pair in $lines) {
+        $t = $pair[1]
+        $txt = $null
+        $em = [regex]::Match($t, '(?i)^(?:if\s.*?\s)?echo\s(.*)$')
+        if ($em.Success) { $txt = $em.Groups[1].Value }
+        $sm = [regex]::Match($t, '(?i)call :Summary "([^"]*)"')
+        # measured as the longer [WARN] form: a Group Policy Editor summary prints only as [WARN],
+        # and with a _SUMCAUSE there is no generic tail after it - its cause line comes next
+        if ($sm.Success) { $txt = '[WARN] ' + $sm.Groups[1].Value }
+        $cm = [regex]::Match($t, '(?i)^set "_SUMCAUSE=([^"]*)"$')
+        if ($cm.Success) { $txt = '       ' + $cm.Groups[1].Value; $nCause++ }
+        if ($null -eq $txt) { continue }
+        $n++
+        if ($em.Success) {
+            $bare = [regex]::Replace([regex]::Replace($txt, '\^.', ''), '"[^"]*"', '')
+            if ($bare -match '[<>|&]') { $ops += ('{0}: {1}' -f $pair[0], $t) }
+        }
+        $txt = & $unesc $txt
+        $txt = [regex]::Replace($txt, '!(\w+)!', { param($m) if ($maxv.ContainsKey($m.Groups[1].Value)) { 'x' * $maxv[$m.Groups[1].Value] } else { 'x' * 30 } })
+        if ($txt.Length -ge $width) { $wide += ('{0} ({1} cols): {2}' -f $pair[0], $txt.Length, $t.Substring(0, [Math]::Min(50, $t.Length))) }
+    }
+    Assert-True ($n -ge 50) "Only $n printed line(s) measured - the scan is not seeing the feature."
+    Assert-True ($nCause -ge 4) "Only $nCause _SUMCAUSE line(s) measured - the Group Policy Editor summaries lost their cause, or the scan is not seeing them."
+    Assert-True ($wide.Count -eq 0) ("Driver-policy line(s) as wide as the ${width}-column console wrap onto the next row: " + ($wide -join ' | '))
+    Assert-True ($ops.Count -eq 0) ('Driver-policy echo line(s) with an unescaped < > | or & - cmd would redirect or split them: ' + ($ops -join ' | '))
+
+    # Status: same reader, same wording as the screen.
+    $iR = [Array]::IndexOf($st, 'call :WuDrvRead'); $iL = [Array]::IndexOf($st, 'call :WuDrvStateLine')
+    Assert-True ($iR -ge 0 -and $iL -gt $iR) ':Status no longer shows the driver policy through :WuDrvRead then :WuDrvStateLine - the two screens could describe the same value differently (regression).'
+    Assert-True ($st -contains 'if "!_wdst!"=="blocked" if not "!_wdedc!"=="listed" call :WuDrvEditionNote') ':Status no longer adds the edition note when the block is on for an edition Microsoft does not list.'
+
+    # What was excluded: the scoped policy is not "fully disabling Windows Update".
+    Assert-True ((& $unesc $ex[0]) -match 'Advanced > 11' -and $ex[0] -match 'DRIVER') '"What was excluded" no longer tells the driver-only policy under Advanced > 11 apart from disabling Windows Update (regression).'
+
+    # The menus: the main-menu hint names it, Advanced prints it, and Advanced still fits.
+    Assert-True ($mm[0] -match 'WU drivers') 'The main menu''s Advanced hint no longer names the Windows Update driver toggle.'
+    $adv = @(Get-BodyLines -Lines $cmd -Label 'MenuAdvanced' -CodeOnly | ForEach-Object { $_.Trim() })
+    Assert-True (@($adv | Where-Object { $_ -match '^echo\s+11\.\s+Windows Update driver installs' }).Count -eq 1) 'The Advanced menu no longer prints item 11, Windows Update driver installs.'
+    $logo = @(Get-BodyLines -Lines $cmd -Label 'Logo' -CodeOnly | Where-Object { $_.Trim() -match '^(?i)echo[ .]' }).Count
+    $advN = @($adv | Where-Object { $_ -match '^(?i)echo[ .]' }).Count
+    Assert-True ($logo -ge 5 -and $advN -ge 12) "The Advanced menu or the logo did not unroll (logo $logo, menu $advN)."
+    Assert-True (($logo + $advN + 1) -le $height) ("The Advanced menu needs {0} rows with its prompt; the console has {1} (regression)." -f ($logo + $advN + 1), $height)
+}
+
+# ===============================================================================
+# 141. The driver-policy screen is RUN, with the registry faked, for twenty stored
+#      states: only a REG_DWORD 1 reads as blocked (not a REG_SZ "1", not 0x10, not a
+#      saturated 0xffffffff, not a DWORD with no data, not a big-endian DWORD); Home
+#      is told apart from the editions Microsoft lists; with no Group Policy value an
+#      MDM value is what the state line reports; a registry that answered nothing
+#      reads as UNKNOWN, never "not set"; MDM's ignore-Group-Policy switch is named;
+#      a build before 1607 gets its advisory; and the rendered screen - logo,
+#      disclosure, state, advisories, choices and prompt - fits the console the
+#      script sets, in rows and in columns. The four reg queries in :WuDrvRead are
+#      replaced by `type` of files (the folder travels in an environment variable,
+#      read late); the driver refuses to run if a real reg command or PowerShell
+#      survives, and :WuDrivers is cut before its prompt. One child cmd runs them all.
+# ===============================================================================
+Invoke-Test 'The driver-policy screen classifies and fits the console (run with a faked registry)' {
+    $cmd = Read-Lines $CmdPath
+    $width = 0; $height = 0
+    foreach ($ln in $cmd) { $m = [regex]::Match($ln, '(?i)^\s*mode con:\s*cols=(\d+)\s+lines=(\d+)'); if ($m.Success) { $width = [int]$m.Groups[1].Value; $height = [int]$m.Groups[2].Value } }
+    Assert-True ($width -gt 0 -and $height -gt 0) 'test 141: no "mode con: cols=N lines=M" line - there is no screen size to measure against.'
+
+    $q = [ordered]@{
+        gp  = 'reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v ExcludeWUDriversInQualityUpdate'
+        mdm = 'reg query "HKLM\SOFTWARE\Microsoft\PolicyManager\current\device\Update" /v ExcludeWUDriversInQualityUpdate'
+        ign = 'reg query "HKLM\SOFTWARE\Microsoft\PolicyManager\current\device\Update" /v IgnoreWindowsUpdateGroupPolicies'
+        ed  = 'reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v EditionID'
+    }
+    $read = @(Get-BodyLines -Lines $cmd -Label 'WuDrvRead')
+    Assert-True ($read.Count -gt 10) ':WuDrvRead is missing or did not unroll.'
+    foreach ($k in $q.Keys) {
+        $n = @($read | Where-Object { $_.Contains($q[$k]) }).Count
+        Assert-True ($n -eq 1) ("test 141: :WuDrvRead no longer asks the registry the way this test fakes it ({0} x {1}) - the test would read the real registry." -f $n, $q[$k])
+    }
+    $sub = { param([string[]]$L) @($L | ForEach-Object { $s = $_; foreach ($k in $q.Keys) { $s = $s.Replace($q[$k], ('type "!PT141_CASE!\{0}.txt"' -f $k)) }; $s }) }
+    $screen = @(Get-BodyLines -Lines $cmd -Label 'WuDrivers' | ForEach-Object { if ($_.Trim() -ieq 'cls') { 'rem cls stubbed' } else { $_ } })
+    Assert-True ($screen.Count -gt 15) ':WuDrivers is missing or did not unroll.'
+    Assert-True (@($screen | Where-Object { $_ -match '(?i)^\s*set\s+/p' }).Count -eq 0) 'test 141: the :WuDrivers slice reaches a prompt - it would block (the menu must stay in :WuDrivers_ask).'
+    $helpers = @()
+    foreach ($h in 'Logo', 'WuDrvRead', 'WuDrvStateLine', 'WuDrvEditionNote', 'WuDrvFirmwareAdvisory') {
+        $helpers += ':' + $h
+        $helpers += @(& $sub @(Get-BodyLines -Lines $cmd -Label $h))
+    }
+
+    $regOut = { param([string]$Key, [string]$Name, [string]$Type, [string]$Data) "`r`n$Key`r`n    $Name    $Type    $Data`r`n`r`n" }
+    $v = 'ExcludeWUDriversInQualityUpdate'
+    $kGp = 'HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    $kMdm = 'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\PolicyManager\current\device\Update'
+    $kEd = 'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+    # gp: $null = absent, else @(type, data); mdm / ign / ed: $null = absent; b = WIN_BUILD ($null = unset).
+    # st / edc / ign = what :WuDrvRead must conclude; has / hasnt = what the screen must (not) say.
+    $cases = @(
+        @{ gp = $null;                          mdm = $null; ign = $null; ed = 'Professional';            m = 'desktop'; b = '26100'; st = 'unset';   edc = 'listed'; ig = ''; has = @('Currently: ALLOWED  (not set - the Windows default)', '[i] Windows edition: Professional - Microsoft documents'); hasnt = @('[ADVISORY]', 'MDM', 'Microsoft lists this policy from') },
+        @{ gp = @('REG_DWORD','0x1');           mdm = $null; ign = $null; ed = 'Core';                    m = 'laptop';  b = '22631'; st = 'blocked'; edc = 'home';   ig = ''; has = @('Currently: BLOCKED  (ExcludeWUDriversInQualityUpdate = 1)', '[ADVISORY] Windows edition: Core - a Home edition', '[ADVISORY] This machine looks like a laptop'); hasnt = @() },
+        @{ gp = @('REG_DWORD','0x0');           mdm = '0x1'; ign = $null; ed = 'CoreCountrySpecific';     m = 'laptop';  b = '19045'; st = 'allow0';  edc = 'home';   ig = ''; has = @('0 = "Disabled", as the Group Policy Editor writes it', 'Your organization also sets this policy to 0x1', 'By default Group Policy wins over MDM'); hasnt = @('BLOCKED') },
+        @{ gp = @('REG_SZ','1');                mdm = $null; ign = $null; ed = 'IoTEnterpriseS';          m = 'desktop'; b = '26100'; st = 'badtype'; edc = 'listed'; ig = ''; has = @('Currently: UNKNOWN  (not a DWORD: REG_SZ'); hasnt = @('BLOCKED') },
+        @{ gp = @('REG_SZ','x REG_DWORD 0x1');  mdm = $null; ign = $null; ed = 'EnterpriseS';             m = 'desktop'; b = $null;   st = 'badtype'; edc = 'listed'; ig = ''; has = @('UNKNOWN'); hasnt = @('BLOCKED', 'Microsoft lists this policy from') },
+        @{ gp = @('REG_QWORD','0x1');           mdm = $null; ign = $null; ed = 'Education';               m = 'desktop'; b = '26100'; st = 'badtype'; edc = 'listed'; ig = ''; has = @('not a DWORD: REG_QWORD'); hasnt = @('BLOCKED') },
+        @{ gp = @('REG_DWORD','0x10');          mdm = $null; ign = $null; ed = 'ProfessionalWorkstation'; m = 'unknown'; b = '26100'; st = 'other';   edc = 'listed'; ig = ''; has = @('Currently: ALLOWED  (value 0x10'); hasnt = @('BLOCKED', '[ADVISORY]') },
+        @{ gp = @('REG_DWORD','0xffffffff');    mdm = $null; ign = $null; ed = 'ServerRdsh';              m = 'desktop'; b = '26100'; st = 'other';   edc = 'other';  ig = ''; has = @('does not list it for this policy'); hasnt = @('BLOCKED') },
+        @{ gp = @('REG_DWORD','0x2');           mdm = $null; ign = $null; ed = 'CloudEdition';            m = 'desktop'; b = '26100'; st = 'other';   edc = 'other';  ig = ''; has = @('[i] Windows edition: CloudEdition'); hasnt = @() },
+        @{ gp = @('REG_DWORD','0x1');           mdm = '0x0'; ign = $null; ed = $null;                     m = 'laptop';  b = '26100'; st = 'blocked'; edc = 'unread'; ig = ''; has = @('The Windows edition could not be read', 'Your organization also sets this policy to 0x0'); hasnt = @() },
+        @{ gp = @('REG_DWORD','0x1');           mdm = '0x1'; ign = '0x0'; ed = 'ServerAzureStackHCICorN'; m = 'laptop';  b = '26100'; st = 'blocked'; edc = 'other';  ig = ''; has = @('BLOCKED', 'By default Group Policy wins over MDM'); hasnt = @('ignore Group Policy') },
+        @{ gp = @('REG_DWORD','');              mdm = $null; ign = $null; ed = 'Professional';            m = 'desktop'; b = '26100'; st = 'other';   edc = 'listed'; ig = ''; has = @('ALLOWED'); hasnt = @('"Disabled"') },
+        @{ gp = $null;                          mdm = '0x1'; ign = $null; ed = 'Enterprise';              m = 'desktop'; b = '26100'; st = 'unset';   edc = 'listed'; ig = ''; has = @('Currently: BLOCKED by your organization  (no local value; its MDM policy sets 1)'); hasnt = @('(not set - the Windows default)', 'By default Group Policy wins') },
+        @{ gp = $null;                          mdm = '0x0'; ign = $null; ed = 'Enterprise';              m = 'desktop'; b = '26100'; st = 'unset';   edc = 'listed'; ig = ''; has = @('Currently: ALLOWED  (no local value; your organization''s MDM policy sets 0x0)'); hasnt = @('(not set - the Windows default)', 'BLOCKED') },
+        @{ gp = @('REG_DWORD_BIG_ENDIAN','0x01000000'); mdm = $null; ign = $null; ed = 'Professional';    m = 'desktop'; b = '26100'; st = 'badtype'; edc = 'listed'; ig = ''; has = @('Currently: UNKNOWN  (not a DWORD: REG_DWORD_BIG_ENDIAN'); hasnt = @('BLOCKED') },
+        @{ gp = $null;                          mdm = $null; ign = $null; ed = $null;                     m = 'desktop'; b = '26100'; st = 'unread';  edc = 'unread'; ig = ''; has = @('Currently: UNKNOWN - the registry could not be read.'); hasnt = @('ALLOWED', 'BLOCKED') },
+        @{ gp = @('REG_DWORD','0x1');           mdm = '0x1'; ign = '0x1'; ed = 'Professional';            m = 'desktop'; b = '26100'; st = 'blocked'; edc = 'listed'; ig = '1'; has = @('Your organization also sets this policy to 0x1', 'set Windows Update to ignore Group Policy: a local value does nothing'); hasnt = @('By default Group Policy wins') },
+        @{ gp = $null;                          mdm = $null; ign = '0x1'; ed = 'Professional';            m = 'desktop'; b = '26100'; st = 'unset';   edc = 'listed'; ig = '1'; has = @('Currently: ALLOWED  (not set', 'ignore Group Policy'); hasnt = @('MDM') },
+        @{ gp = $null;                          mdm = $null; ign = $null; ed = 'Professional';            m = 'desktop'; b = '10586'; st = 'unset';   edc = 'listed'; ig = ''; has = @('[ADVISORY] Microsoft lists this policy from Windows 10 1607 (build 14393); this is build 10586.'); hasnt = @() },
+        # the tallest screen that can happen: Disabled + MDM + Home + an old build + a laptop
+        @{ gp = @('REG_DWORD','0x0');           mdm = '0x1'; ign = $null; ed = 'CoreSingleLanguage';      m = 'laptop';  b = '10240'; st = 'allow0';  edc = 'home';   ig = ''; has = @('[ADVISORY] Windows edition: CoreSingleLanguage', 'this is build 10240', '[ADVISORY] This machine looks like a laptop'); hasnt = @() }
+    )
+
+    $tmp = [System.IO.Path]::GetTempPath()
+    if ($tmp -match '[\s%]') { $tmp = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($tmp).ShortPath }
+    $dir = Join-Path $tmp ('PT141_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    Assert-True ($dir -notmatch '%') ('test 141 cannot run here: the temp folder path holds a "%" and has no short name ({0}).' -f $dir)
+    try {
+        [void](New-Item -ItemType Directory -Force -Path $dir)
+        $w = { param($f, $t) [System.IO.File]::WriteAllText($f, $t, [System.Text.Encoding]::ASCII) }
+        $drvCases = @()
+        for ($k = 1; $k -le $cases.Count; $k++) {
+            $c = $cases[$k - 1]
+            $cd = Join-Path $dir ("c$k")
+            [void](New-Item -ItemType Directory -Force -Path $cd)
+            & $w (Join-Path $cd 'gp.txt')  $(if ($c.gp) { & $regOut $kGp $v $c.gp[0] $c.gp[1] } else { '' })
+            & $w (Join-Path $cd 'mdm.txt') $(if ($c.mdm) { & $regOut $kMdm $v 'REG_DWORD' $c.mdm } else { '' })
+            & $w (Join-Path $cd 'ign.txt') $(if ($c.ign) { & $regOut $kMdm 'IgnoreWindowsUpdateGroupPolicies' 'REG_DWORD' $c.ign } else { '' })
+            & $w (Join-Path $cd 'ed.txt')  $(if ($c.ed) { & $regOut $kEd 'EditionID' 'REG_SZ' $c.ed } else { '' })
+            $drvCases += ('set "PT141_CASE=!PT141_DIR!\c{0}"' -f $k)
+            $drvCases += ('set "MACHINE={0}"' -f $c.m)
+            $drvCases += $(if ($c.b) { 'set "WIN_BUILD={0}"' -f $c.b } else { 'set "WIN_BUILD="' })
+            $drvCases += ('echo [CASE#{0}]' -f $k)
+            $drvCases += 'call :WuDrivers'
+            $drvCases += ('echo [STATE#{0}#!_wdst!#!_wdedc!#!_wdign!#]' -f $k)
+        }
+        $body = @('@echo off', 'setlocal EnableDelayedExpansion') + $drvCases + @('exit /b 0', ':WuDrivers') + $screen + @('goto :eof') + $helpers
+        $live = @($body | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' -and $_ -match '(?i)\breg\s+(query|add|delete)\b|powershell' })
+        Assert-True ($live.Count -eq 0) ('test 141: the driver still contains a real reg command or PowerShell - refusing to run it: ' + ($live -join ' | '))
+        $drv = Join-Path $dir 'drv.cmd'
+        [System.IO.File]::WriteAllLines($drv, [string[]]$body, [System.Text.Encoding]::ASCII)
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+        $psi.Arguments = '/d /s /c ""' + $drv + '""'
+        $psi.WorkingDirectory = $dir
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $psi.EnvironmentVariables['PT141_DIR'] = $dir
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $p.StandardInput.Close()
+        $err = $p.StandardError.ReadToEndAsync()
+        $out = $p.StandardOutput.ReadToEnd()
+        if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'test 141: the screen driver did not finish within 120 s.' }
+        Assert-True ($p.ExitCode -eq 0) ("test 141: the screen driver failed (exit {0}): {1}" -f $p.ExitCode, $err.Result.Trim())
+        Assert-True ($err.Result.Trim() -eq '') ("test 141: the screen wrote to stderr: {0}" -f $err.Result.Trim())
+        $all = @($out -split "`r?`n")
+        $tallest = 0
+        for ($k = 1; $k -le $cases.Count; $k++) {
+            $c = $cases[$k - 1]
+            $i0 = [Array]::IndexOf($all, ('[CASE#{0}]' -f $k))
+            $i1 = -1; for ($i = [Math]::Max($i0, 0); $i -lt $all.Count; $i++) { if ($all[$i].StartsWith(('[STATE#{0}#' -f $k))) { $i1 = $i; break } }
+            Assert-True ($i0 -ge 0 -and $i1 -gt $i0) "test 141 case ${k}: no state line - the screen did not run to the end."
+            $f = $all[$i1].Split('#')
+            $what = $(if ($c.gp) { $c.gp -join ' ' } else { 'no value' })
+            Assert-True ($f[2] -eq $c.st)  ("test 141 case {0}: {1} (MDM {2}, edition {3}) read as state '{4}', expected '{5}' (regression)." -f $k, $what, $c.mdm, $c.ed, $f[2], $c.st)
+            Assert-True ($f[3] -eq $c.edc) ("test 141 case {0}: edition '{1}' classified '{2}', expected '{3}' (regression)." -f $k, $c.ed, $f[3], $c.edc)
+            Assert-True ($f[4] -eq $c.ig)  ("test 141 case {0}: IgnoreWindowsUpdateGroupPolicies {1} read as '{2}', expected '{3}' (regression)." -f $k, $c.ign, $f[4], $c.ig)
+            $scr = @($all[($i0 + 1)..($i1 - 1)])
+            $text = $scr -join "`n"
+            foreach ($h in $c.has)   { Assert-True ($text.Contains($h))      ("test 141 case {0}: the screen does not say '{1}'." -f $k, $h) }
+            foreach ($h in $c.hasnt) { Assert-True (-not $text.Contains($h)) ("test 141 case {0}: the screen says '{1}' and must not." -f $k, $h) }
+            $wide = @($scr | Where-Object { $_.Length -ge $width })
+            Assert-True ($wide.Count -eq 0) ("test 141 case {0}: line(s) as wide as the {1}-column console wrap: {2}" -f $k, $width, ($wide -join ' | '))
+            $rows = $scr.Count + 1   # + the "Choose: " prompt line in :WuDrivers_ask
+            if ($rows -gt $tallest) { $tallest = $rows }
+            Assert-True ($rows -le $height) ("test 141 case {0}: the screen needs {1} rows with its prompt; the console has {2} - its top, the disclosure, scrolls away before the user chooses." -f $k, $rows, $height)
+        }
+        Assert-True ($tallest -ge 30) "test 141: the tallest screen measured only $tallest rows - the driver did not render the advisories."
+    }
+    finally { if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force } }
+}
+
+# ===============================================================================
+# 142. The toggle's two handlers are RUN, with :SafeRegAdd / :SafeRegDelete
+#      stubbed (they only rewrite a fake answer file - nothing here can write the
+#      real policy), the real :WuDrvRead, :WuDrvGpCheck and :Summary, :LogVar
+#      stubbed into a per-case file, the registry faked by files and Registry.pol
+#      faked under a fake SystemRoot. A write that reads back as intended ends in
+#      [OK]; one that does not - a wrong value, an unreadable registry - ends in
+#      [FAIL] and [WARN], never [OK]; a failed write skips the Group Policy Editor
+#      check; "that value now applies" appears only when the Group Policy value is
+#      really gone and gpedit will not write one back; a Group Policy Editor setting
+#      that differs from the change is a counted, logged [WARN] whose summary says
+#      what Group Policy will do - never "restart Windows", "could NOT be applied"
+#      or "protected keys", and no stale conflict reaches the next run.
+#      :WuDrvGpCheck also runs alone against seventeen Registry.pol files: missing,
+#      header-only, empty, a DWORD 0 / 1, two values (the last wins), the delete
+#      marker, a marker / value / marker run, "**DelVals" after a value and
+#      "**delvals." before one, another key, other letter case, a string, a later
+#      marker after a value, and a file locked so it cannot be read. Each case runs
+#      with TEMP pointing into its own folder, which must hold no pt_wdpol_* file
+#      afterwards. The worker's own command text is run in a fresh runspace in this
+#      process for every case (PowerShell takes about 2 s to start here), so it sees
+#      none of this test's variables, and its answer is handed to the batch through
+#      a file; one case starts the real worker line from cmd, which proves the text
+#      reaches PowerShell intact.
+# ===============================================================================
+Invoke-Test 'The driver toggle reports the end state, and the gpedit check reads Registry.pol right (run with stubbed writes)' {
+    $cmd = Read-Lines $CmdPath
+    $q = [ordered]@{
+        gp  = 'reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v ExcludeWUDriversInQualityUpdate'
+        mdm = 'reg query "HKLM\SOFTWARE\Microsoft\PolicyManager\current\device\Update" /v ExcludeWUDriversInQualityUpdate'
+        ign = 'reg query "HKLM\SOFTWARE\Microsoft\PolicyManager\current\device\Update" /v IgnoreWindowsUpdateGroupPolicies'
+        ed  = 'reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v EditionID'
+    }
+    $worker = 'start "" /min /wait powershell -NoProfile -Command'
+    $payload = $null
+    $code = @()
+    foreach ($h in 'WuDrvOff', 'WuDrvOn', 'WuDrvRead', 'WuDrvGpCheck', 'Summary') {
+        $b = @(Get-BodyLines -Lines $cmd -Label $h)
+        Assert-True ($b.Count -gt 5) ":$h is missing or did not unroll."
+        if ($h -eq 'WuDrvRead') { foreach ($k in $q.Keys) { Assert-True (@($b | Where-Object { $_.Contains($q[$k]) }).Count -eq 1) ('test 142: :WuDrvRead no longer asks the registry the way this test fakes it: ' + $q[$k]) } }
+        if ($h -eq 'WuDrvGpCheck') {
+            Assert-True (@($b | Where-Object { $_.Contains('!SystemRoot!') }).Count -eq 2) 'test 142: :WuDrvGpCheck no longer builds the Registry.pol path from !SystemRoot! (System32 and Sysnative) the way this test redirects it.'
+            $wl = @($b | Where-Object { $_.Contains($worker) })
+            Assert-True ($wl.Count -eq 1) 'test 142: :WuDrvGpCheck no longer starts its worker the way this test runs it.'
+            $pm = [regex]::Match($wl[0], '-Command "([^"]+)"\s*$')
+            Assert-True ($pm.Success) 'test 142: the worker''s -Command "..." text could not be isolated.'
+            $payload = $pm.Groups[1].Value
+        }
+        $code += ':' + $h
+        foreach ($s in $b) {
+            foreach ($k in $q.Keys) { $s = $s.Replace($q[$k], ('type "!PT142_CASE!\{0}.txt"' -f $k)) }
+            $s = $s.Replace('!SystemRoot!', '!PT142_CASE!')
+            if ($s.Trim() -ieq 'pause') { $code += 'rem pause stubbed'; continue }
+            if ($s.Contains($worker)) {
+                # the same command text - in this hidden console for the one real run, otherwise the
+                # answer the same text gave in this process
+                $code += ('if defined PT142_REALPS ' + $s.Trim().Replace($worker, 'powershell -NoProfile -NonInteractive -Command'))
+                $code += 'if not defined PT142_REALPS copy /y "!PT142_CASE!\polres.txt" "!_wdpolf!" >nul'
+                continue
+            }
+            $code += $s
+        }
+    }
+    $gpLine = 'HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    $stubs = @(
+        ':SafeRegAdd', 'echo   [REG] %~5', 'if not defined FAKEFAIL goto _stubAddOk', 'echo         [FAIL] stub: the write failed', 'set /a _FAILS+=1', 'exit /b 1', ':_stubAddOk',
+        'if defined FAKESTUCK exit /b 0', ('>"!PT142_CASE!\gp.txt" echo ' + $gpLine), '>>"!PT142_CASE!\gp.txt" echo     ExcludeWUDriversInQualityUpdate    REG_DWORD    0x1', 'exit /b 0',
+        ':SafeRegDelete', 'echo   [REG] %~3', 'if not defined FAKEFAIL goto _stubDelOk', 'echo         [FAIL] stub: the write failed', 'set /a _FAILS+=1', 'exit /b 1', ':_stubDelOk',
+        'if defined FAKESTUCK exit /b 0', 'type nul >"!PT142_CASE!\gp.txt"', 'exit /b 0',
+        ':LogVar', '>>"!PT142_CASE!\log.txt" echo !%~1!', 'exit /b 0',
+        ':MenuAdvanced', 'exit /b 0')
+
+    # ---- fake answers
+    $regOut = { param([string]$Key, [string]$Name, [string]$Type, [string]$Data) "`r`n$Key`r`n    $Name    $Type    $Data`r`n`r`n" }
+    $u = [System.Text.Encoding]::Unicode
+    $wuKey = 'Software\Policies\Microsoft\Windows\WindowsUpdate'
+    # one argument per entry, each @(key, value name, type, [byte[]] data) - never a list of
+    # entries, which a pair of grouping parentheses would unwrap when it holds just one
+    $polBytes = {
+        $bytes = New-Object 'System.Collections.Generic.List[byte]'
+        $bytes.AddRange([byte[]](0x50, 0x52, 0x65, 0x67, 1, 0, 0, 0))
+        foreach ($e in $args) {
+            $bytes.AddRange($u.GetBytes('[' + $e[0] + [char]0 + ';' + $e[1] + [char]0 + ';'))
+            $bytes.AddRange([BitConverter]::GetBytes([uint32]$e[2])); $bytes.AddRange($u.GetBytes(';'))
+            $bytes.AddRange([BitConverter]::GetBytes([uint32]$e[3].Length)); $bytes.AddRange($u.GetBytes(';'))
+            $bytes.AddRange([byte[]]$e[3]); $bytes.AddRange($u.GetBytes(']'))
+        }
+        , $bytes.ToArray()
+    }
+    $dw = { param([uint32]$n) , [BitConverter]::GetBytes($n) }
+    $v = 'ExcludeWUDriversInQualityUpdate'
+    $n1 = @($wuKey, 'DeferQualityUpdates', 4, (& $dw 1))
+    $n2 = @('Software\Policies\Microsoft\Windows\DataCollection', 'Blob', 3, [byte[]](1, 2, 3))   # odd length
+    $delMark = @($wuKey, ('**del.' + $v), 1, $u.GetBytes(' ' + [char]0))
+    # "**DelVals" deletes every value in the key: spelled so in Microsoft's format page. The worker
+    # matches it as a prefix, so the form with a trailing "." (as "**del." has) must count too
+    $valsDoc = @($wuKey, '**DelVals', 1, $u.GetBytes(' ' + [char]0))
+    $valsDot = @($wuKey, '**delvals.', 1, $u.GetBytes(' ' + [char]0))
+    $pol = @{
+        set0       = & $polBytes $n1 $n2 @($wuKey, $v, 4, (& $dw 0))
+        set1       = & $polBytes $n2 @($wuKey, $v, 4, (& $dw 1)) $n1
+        del        = & $polBytes $n2 $delMark
+        otherkey   = & $polBytes @(($wuKey + '\AU'), $v, 4, (& $dw 1))
+        lower0     = & $polBytes @($wuKey.ToLowerInvariant(), $v.ToLowerInvariant(), 4, (& $dw 0))
+        sz         = & $polBytes @($wuKey, $v, 1, $u.GetBytes('1' + [char]0))
+        setThenDel = & $polBytes @($wuKey, $v, 4, (& $dw 1)) $n2 $delMark
+        # the LAST entry wins - a first-match search answers 'set 0' / 'set 1' / 'set 0' here
+        set0then1   = & $polBytes @($wuKey, $v, 4, (& $dw 0)) $n1 @($wuKey, $v, 4, (& $dw 1))
+        delSetDel   = & $polBytes $delMark @($wuKey, $v, 4, (& $dw 1)) $n2 $delMark
+        valsThenSet = & $polBytes $valsDot $n1 @($wuKey, $v, 4, (& $dw 0))
+        setThenVals = & $polBytes @($wuKey, $v, 4, (& $dw 1)) $n2 $valsDoc
+        header  = [byte[]](0x50, 0x52, 0x65, 0x67, 1, 0, 0, 0)
+        empty   = [byte[]]@()
+    }
+    $vG = { param([string]$d) & $regOut 'HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' 'ExcludeWUDriversInQualityUpdate' 'REG_DWORD' $d }
+    $vM = { param([string]$d) & $regOut 'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\PolicyManager\current\device\Update' 'ExcludeWUDriversInQualityUpdate' 'REG_DWORD' $d }
+    $vI = { param([string]$d) & $regOut 'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\PolicyManager\current\device\Update' 'IgnoreWindowsUpdateGroupPolicies' 'REG_DWORD' $d }
+    $vE = { param([string]$d) & $regOut 'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'EditionID' 'REG_SZ' $d }
+
+    $ok = '[OK] Windows Update will stop offering drivers once it rereads its policy'
+    $okOn = '[OK] Driver updates back to the Windows default'
+    $gpWarn = '[WARN] The Group Policy Editor (gpedit.msc) also sets this policy, to '
+    $same = '[i] The Group Policy Editor (gpedit.msc) configures this value the same way, so it stays.'
+    $applies = 'that value now applies'
+    # a conflict with the Group Policy Editor: the value was written and read back, so the summary
+    # names what Group Policy will do, and :Summary's generic failure tail must not follow it
+    $offGp = '[WARN] Block written, but the Group Policy Editor will override it - change it in gpedit.msc.'
+    $onKeep = '[WARN] Drivers stay allowed, but the Group Policy Editor will put its own value back.'
+    $onBlock = '[WARN] Value deleted, but the Group Policy Editor will put its 1 (block) back - change it there.'
+    $onGp = '[WARN] Value deleted, but the Group Policy Editor will put its own value back - change it there.'
+    $cause = '       Not a failed write: the change was made and read back. The [WARN] above is the reason.'
+    $tail = @('could NOT be applied', 'See the [FAIL]', 'protected or held by Windows', 'NOT elevated', 'restart Windows')
+    # run: Off / On / a gpedit check wanting blocked|unset. gp/mdm/ign/ed = fake reg answers ('' = none),
+    # b = WIN_BUILD, fail = the write fails (not elevated), stuck = the write "succeeds" but changes nothing,
+    # pol = the fake Registry.pol ($null = none, 'lock' = held open so it cannot be read),
+    # gpc = what _wdgpc must hold afterwards ('' = nothing), log = what the log must hold.
+    $cases = @(
+        @{ run = 'Off'; gp = '';           mdm = '';           ign = '';           ed = (& $vE 'Professional'); b = '26100'; pol = $null;  fails = 0; has = @($ok); hasnt = @('[FAIL]', '[WARN]', 'Group Policy Editor') },
+        @{ run = 'Off'; gp = '';           mdm = '';           ign = '';           ed = (& $vE 'Professional'); b = '26100'; pol = $null;  stuck = 1; fails = 1; has = @('[FAIL] The value did not read back as a DWORD 1', '[WARN] Windows Update will stop offering drivers'); hasnt = @('[OK]', 'Group Policy Editor') },
+        @{ run = 'Off'; gp = '';           mdm = '';           ign = '';           ed = (& $vE 'Professional'); b = '26100'; pol = 'set0'; fail = 1; fails = 1; has = @('[WARN] Windows Update will stop offering drivers', 'NOT elevated'); hasnt = @('[OK]', 'Group Policy Editor', 'did not read back') },
+        @{ run = 'Off'; gp = '';           mdm = '';           ign = '';           ed = (& $vE 'Core');         b = '26100'; pol = $null;  fails = 0; has = @('[OK] Policy written, but its effect on this edition or build is unverified'); hasnt = @('will stop offering') },
+        @{ run = 'Off'; gp = '';           mdm = '';           ign = '';           ed = (& $vE 'Professional'); b = '10586'; pol = $null;  fails = 0; has = @('[OK] Policy written, but its effect on this edition or build is unverified'); hasnt = @('will stop offering') },
+        @{ run = 'Off'; gp = '';           mdm = (& $vM '0x1'); ign = (& $vI '0x1'); ed = (& $vE 'Professional'); b = '26100'; pol = $null; fails = 0; has = @('[OK] Policy written, but Windows Update is set to ignore Group Policy here'); hasnt = @('will stop offering') },
+        @{ run = 'Off'; gp = '';           mdm = '';           ign = '';           ed = (& $vE 'Professional'); b = '26100'; pol = 'set0'; fails = 1; gpc = 'replace'; has = @(($gpWarn + '0.'), 're-applies it at its next refresh or restart', $offGp, $cause); hasnt = @('[OK]', 'will stop offering drivers') + $tail },
+        @{ run = 'Off'; gp = '';           mdm = '';           ign = '';           ed = (& $vE 'Professional'); b = '26100'; pol = 'set1'; fails = 0; has = @($same, $ok); hasnt = @('[WARN]') },
+        @{ run = 'Off'; gp = '';           mdm = '';           ign = '';           ed = '';                     b = '26100'; pol = $null;  stuck = 1; fails = 1; has = @('[FAIL] The value did not read back as a DWORD 1'); hasnt = @('[OK]') },
+        @{ run = 'On';  gp = (& $vG '0x1'); mdm = '';          ign = '';           ed = (& $vE 'Professional'); b = '26100'; pol = $null;  fails = 0; has = @($okOn); hasnt = @($applies, '[FAIL]', '[WARN]') },
+        @{ run = 'On';  gp = (& $vG '0x1'); mdm = (& $vM '0x1'); ign = '';         ed = (& $vE 'Professional'); b = '26100'; pol = $null;  stuck = 1; fails = 1; has = @('[FAIL] The value did not read back as deleted', '[WARN] Driver updates back to the Windows default'); hasnt = @($applies, '[OK]') },
+        @{ run = 'On';  gp = (& $vG '0x1'); mdm = (& $vM '0x1'); ign = '';         ed = (& $vE 'Professional'); b = '26100'; pol = $null;  fails = 0; has = @($okOn, "[i] Your organization's MDM policy sets this to 0x1 - that value now applies."); hasnt = @('[WARN]') },
+        @{ run = 'On';  gp = (& $vG '0x1'); mdm = '';          ign = '';           ed = (& $vE 'Professional'); b = '26100'; pol = 'set0'; fails = 1; gpc = 'keep'; has = @(($gpWarn + '0.'), $onKeep, $cause); hasnt = @('[OK]', 'back to the Windows default') + $tail },
+        @{ run = 'On';  gp = (& $vG '0x1'); mdm = '';          ign = '';           ed = (& $vE 'Professional'); b = '26100'; pol = 'del';  fails = 0; has = @($same, $okOn); hasnt = @('[WARN]') },
+        @{ run = 'On';  gp = (& $vG '0x1'); mdm = (& $vM '0x1'); ign = (& $vI '0x1'); ed = (& $vE 'Professional'); b = '26100'; pol = $null; fails = 0; has = @('[OK] Policy value removed; Windows Update is set to ignore Group Policy here, so MDM decides.', $applies); hasnt = @('back to the Windows default') },
+        @{ run = 'On';  gp = '';           mdm = '';           ign = '';           ed = '';                     b = '26100'; pol = $null;  fails = 1; has = @('[FAIL] The value did not read back as deleted'); hasnt = @('[OK]') },
+        # gpedit puts the block back: no "now applies" for MDM (Group Policy wins again), no default
+        @{ run = 'On';  gp = (& $vG '0x1'); mdm = (& $vM '0x1'); ign = '';         ed = (& $vE 'Professional'); b = '26100'; pol = 'set1'; fails = 1; gpc = 'block'; has = @(($gpWarn + '1.'), $onBlock, $cause); hasnt = @($applies, '[OK]', 'back to the Windows default', 'Drivers stay allowed') + $tail },
+        # right after a conflict, a failed write skips the check: the old conflict and its cause must not leak
+        @{ run = 'Off'; gp = '';           mdm = '';           ign = '';           ed = (& $vE 'Professional'); b = '26100'; pol = 'set0'; fail = 1; fails = 1; has = @('[WARN] Windows Update will stop offering drivers', 'could NOT be applied', 'NOT elevated'); hasnt = @('[OK]', 'Group Policy Editor', 'Not a failed write') },
+        # the conflict decides before the edition gate and before the ignore switch
+        @{ run = 'Off'; gp = '';           mdm = '';           ign = '';           ed = (& $vE 'Core');         b = '26100'; pol = 'set0'; fails = 1; gpc = 'replace'; has = @($offGp, $cause); hasnt = @('[OK]', 'unverified') + $tail },
+        @{ run = 'On';  gp = (& $vG '0x1'); mdm = (& $vM '0x1'); ign = (& $vI '0x1'); ed = (& $vE 'Professional'); b = '26100'; pol = 'sz'; fails = 1; gpc = 'replace'; has = @(($gpWarn + 'a non-DWORD value.'), $onGp, $cause); hasnt = @('[OK]', 'MDM decides', $applies) + $tail },
+        # res = what the worker must answer for that Registry.pol; real = start the worker line itself
+        @{ run = 'blocked'; pol = $null;      res = 'none';   fails = 0; has = @(); hasnt = @('Group Policy Editor', 'Could not check') },
+        @{ run = 'blocked'; pol = 'header';   res = 'none';   fails = 0; has = @(); hasnt = @('Group Policy Editor', 'Could not check') },
+        @{ run = 'blocked'; pol = 'empty';    res = 'none';   fails = 0; has = @(); hasnt = @('Group Policy Editor', 'Could not check') },
+        @{ run = 'blocked'; pol = 'set0';     res = 'set 0';  fails = 1; gpc = 'replace'; has = @(($gpWarn + '0.')); hasnt = @(); real = 1 },
+        @{ run = 'blocked'; pol = 'set1';     res = 'set 1';  fails = 0; has = @($same); hasnt = @('[WARN]') },
+        @{ run = 'unset';   pol = 'set1';     res = 'set 1';  fails = 1; gpc = 'block'; has = @(($gpWarn + '1.')); hasnt = @() },
+        @{ run = 'unset';   pol = 'del';      res = 'del';    fails = 0; has = @($same); hasnt = @('[WARN]') },
+        @{ run = 'blocked'; pol = 'del';      res = 'del';    fails = 1; gpc = 'replace'; has = @('[WARN] The Group Policy Editor (gpedit.msc) is set to delete this policy value.'); hasnt = @() },
+        @{ run = 'blocked'; pol = 'otherkey'; res = 'none';   fails = 0; has = @(); hasnt = @('Group Policy Editor') },
+        @{ run = 'unset';   pol = 'lower0';   res = 'set 0';  fails = 1; gpc = 'keep'; has = @(($gpWarn + '0.')); hasnt = @() },
+        @{ run = 'blocked'; pol = 'sz';       res = 'set ?';  fails = 1; gpc = 'replace'; has = @(($gpWarn + 'a non-DWORD value.')); hasnt = @() },
+        @{ run = 'blocked'; pol = 'setThenDel'; res = 'del';  fails = 1; gpc = 'replace'; has = @('is set to delete this policy value'); hasnt = @('also sets this policy') },
+        @{ run = 'blocked'; pol = 'set0then1';  res = 'set 1'; fails = 0; has = @($same); hasnt = @('[WARN]') },
+        @{ run = 'unset';   pol = 'delSetDel';  res = 'del';   fails = 0; has = @($same); hasnt = @('[WARN]') },
+        @{ run = 'blocked'; pol = 'setThenVals'; res = 'del';  fails = 1; gpc = 'replace'; has = @('is set to delete this policy value'); hasnt = @('also sets this policy') },
+        @{ run = 'unset';   pol = 'valsThenSet'; res = 'set 0'; fails = 1; gpc = 'keep'; has = @(($gpWarn + '0.')); hasnt = @('is set to delete') },
+        @{ run = 'blocked'; pol = 'lock';     res = 'unread'; fails = 0; log = 'INFO: could not read Registry.pol'; has = @('[i] Could not check whether the Group Policy Editor also sets this policy (Registry.pol).'); hasnt = @('[WARN]') }
+    )
+
+    $tmp = [System.IO.Path]::GetTempPath()
+    if ($tmp -match '[\s%]') { $tmp = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($tmp).ShortPath }
+    $dir = Join-Path $tmp ('PT142_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    Assert-True ($dir -notmatch '%') ('test 142 cannot run here: the temp folder path holds a "%" and has no short name ({0}).' -f $dir)
+    $lock = $null
+    try {
+        [void](New-Item -ItemType Directory -Force -Path $dir)
+        $w = { param($f, $t) [System.IO.File]::WriteAllText($f, $t, [System.Text.Encoding]::ASCII) }
+        $drv = @('@echo off', 'setlocal EnableDelayedExpansion')
+        for ($k = 1; $k -le $cases.Count; $k++) {
+            $c = $cases[$k - 1]
+            # the gpedit-only cases leave the registry answers out; StrictMode wants every key present
+            foreach ($f in 'gp', 'mdm', 'ign', 'ed') { if (-not $c.ContainsKey($f)) { $c[$f] = '' } }
+            foreach ($f in 'b', 'fail', 'stuck', 'res', 'real', 'log') { if (-not $c.ContainsKey($f)) { $c[$f] = $null } }
+            if (-not $c.ContainsKey('gpc')) { $c['gpc'] = '' }
+            $cd = Join-Path $dir ("c$k")
+            [void](New-Item -ItemType Directory -Force -Path $cd)
+            foreach ($f in 'gp', 'mdm', 'ign', 'ed') { & $w (Join-Path $cd "$f.txt") $c[$f] }
+            if ($null -ne $c.pol) {
+                $pd = Join-Path $cd 'System32\GroupPolicy\Machine'
+                [void](New-Item -ItemType Directory -Force -Path $pd)
+                $pf = Join-Path $pd 'Registry.pol'
+                if ($c.pol -eq 'lock') {
+                    [System.IO.File]::WriteAllBytes($pf, $pol['set0'])
+                    $lock = [System.IO.File]::Open($pf, 'Open', 'Read', 'None')
+                } else { [System.IO.File]::WriteAllBytes($pf, [byte[]]$pol[$c.pol]) }
+            }
+            # the worker's own text, run the way PowerShell runs it (no strict mode, errors go on) in a
+            # fresh runspace: in this test's scope it could read $b, $c, $i ... wherever it forgot to
+            # assign one first, and pass here while failing in a real powershell -NoProfile
+            $res = Join-Path $cd 'polres.txt'
+            $env:PT_WDPOLSRC = Join-Path $cd 'System32\GroupPolicy\Machine\Registry.pol'
+            $env:PT_WDPOL = $res
+            $iso = [powershell]::Create()
+            try { [void]$iso.AddScript($payload); [void]$iso.Invoke() }
+            finally { $iso.Dispose(); Remove-Item Env:\PT_WDPOLSRC, Env:\PT_WDPOL -ErrorAction SilentlyContinue }
+            Assert-True (Test-Path -LiteralPath $res) "test 142 case ${k}: the worker wrote no answer."
+            $got = ([System.IO.File]::ReadAllText($res)).Trim()
+            if ($null -ne $c.res) { Assert-True ($got -eq $c.res) ("test 142 case {0}: for the Registry.pol '{1}' the worker answered '{2}', expected '{3}' (regression)." -f $k, $c.pol, $got, $c.res) }
+            # the real run must produce its own answer: nothing to copy
+            if ($c.real) { Remove-Item -LiteralPath $res -Force }
+            $drv += ('set "PT142_CASE=!PT142_DIR!\c{0}"' -f $k)
+            # the worker's answer file goes to !TEMP!: keep it in this case's folder, where the test can
+            # see whether it was deleted - and out of the real %TEMP%
+            $drv += 'set "TEMP=!PT142_CASE!" & set "TMP=!PT142_CASE!" & set "_wdpolf="'
+            $drv += $(if ($c.real) { 'set "PT142_REALPS=1"' } else { 'set "PT142_REALPS="' })
+            $drv += ('set "MACHINE=desktop" & set "WIN_BUILD={0}" & set "_FAILS=0"' -f $(if ($c.b) { $c.b } else { '26100' }))
+            $drv += $(if ($c.fail) { 'set "FAKEFAIL=1" & set "_ELEV=0"' } else { 'set "FAKEFAIL=" & set "_ELEV=1"' })
+            $drv += $(if ($c.stuck) { 'set "FAKESTUCK=1"' } else { 'set "FAKESTUCK="' })
+            $drv += ('echo [CASE#{0}]' -f $k)
+            $drv += $(switch ($c.run) { 'Off' { 'call :WuDrvOff' } 'On' { 'call :WuDrvOn' } default { 'call :WuDrvGpCheck ' + $c.run } })
+            $drv += ('echo [POLF#{0}#]!_wdpolf!' -f $k)
+            $drv += ('echo [END#{0}#!_FAILS!#!_wdgpc!#]' -f $k)
+        }
+        $body = $drv + @('exit /b 0') + $code + $stubs
+        $live = @($body | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' -and ($_ -match '(?i)\breg\s+(query|add|delete)\b|\bstart\b.*powershell|!SystemRoot!|%SystemRoot%') })
+        Assert-True (@($body | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' -and $_ -match '(?i)powershell' }).Count -eq 1 -and @($cases | Where-Object { $_.real }).Count -eq 1) 'test 142: expected exactly one real worker line and one case that runs it.'
+        Assert-True ($live.Count -eq 0) ('test 142: the driver still contains a real reg command, a minimized worker window or the real SystemRoot - refusing to run it: ' + ($live -join ' | '))
+        $drvPath = Join-Path $dir 'drv.cmd'
+        [System.IO.File]::WriteAllLines($drvPath, [string[]]$body, [System.Text.Encoding]::ASCII)
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+        $psi.Arguments = '/d /s /c ""' + $drvPath + '""'
+        $psi.WorkingDirectory = $dir
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $psi.EnvironmentVariables['PT142_DIR'] = $dir
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $p.StandardInput.Close()
+        $err = $p.StandardError.ReadToEndAsync()
+        $out = $p.StandardOutput.ReadToEnd()
+        if (-not $p.WaitForExit(180000)) { $p.Kill(); throw 'test 142: the handler driver did not finish within 180 s.' }
+        Assert-True ($p.ExitCode -eq 0) ("test 142: the handler driver failed (exit {0}): {1}" -f $p.ExitCode, $err.Result.Trim())
+        Assert-True ($err.Result.Trim() -eq '') ("test 142: the handlers wrote to stderr: {0}" -f $err.Result.Trim())
+        $all = @($out -split "`r?`n")
+        for ($k = 1; $k -le $cases.Count; $k++) {
+            $c = $cases[$k - 1]
+            $i0 = [Array]::IndexOf($all, ('[CASE#{0}]' -f $k))
+            $i1 = -1; for ($i = [Math]::Max($i0, 0); $i -lt $all.Count; $i++) { if ($all[$i].StartsWith(('[END#{0}#' -f $k))) { $i1 = $i; break } }
+            Assert-True ($i0 -ge 0 -and $i1 -gt $i0) "test 142 case ${k}: no end line - the handler did not run to the end."
+            $pfx = '[POLF#{0}#]' -f $k
+            $pl = @($all[$i0..$i1] | Where-Object { $_.StartsWith($pfx) })
+            Assert-True ($pl.Count -eq 1) "test 142 case ${k}: no [POLF] line - the driver changed shape."
+            $polf = $pl[0].Substring($pfx.Length)
+            $text = $(if ($i1 -gt $i0 + 1) { @($all[($i0 + 1)..($i1 - 1)] | Where-Object { -not $_.StartsWith($pfx) }) -join "`n" } else { '' })
+            $got = $all[$i1].Split('#')[2]
+            $gotGpc = $all[$i1].Split('#')[3]
+            $who = '{0} {1}' -f $c.run, $(if ($c.pol) { 'pol=' + $c.pol } else { '' })
+            Assert-True ($got -eq [string]$c.fails) ("test 142 case {0} ({1}): _FAILS is {2}, expected {3} - an outcome was miscounted (regression). Output: {4}" -f $k, $who, $got, $c.fails, ($text -replace "`n", ' | '))
+            Assert-True ($gotGpc -eq $c.gpc) ("test 142 case {0} ({1}): _wdgpc is '{2}', expected '{3}' - the handler would pick the wrong summary, or an earlier conflict leaked into this run (regression)." -f $k, $who, $gotGpc, $c.gpc)
+            # the check ran exactly when it should (a failed write skips it), in this case's folder,
+            # and left no answer file behind
+            $cd = Join-Path $dir ("c$k")
+            $ran = ($c.run -eq 'blocked' -or $c.run -eq 'unset' -or $c.fails -eq 0 -or $c.gpc -ne '')
+            Assert-True ($ran -eq ($polf -ne '')) ("test 142 case {0} ({1}): the Group Policy Editor check {2} (answer file '{3}')." -f $k, $who, $(if ($ran) { 'did not run' } else { 'ran after a failed write' }), $polf)
+            if ($ran) { Assert-True ($polf.StartsWith($cd + '\pt_wdpol_', [StringComparison]::OrdinalIgnoreCase)) ("test 142 case {0}: the answer file '{1}' is not in the case folder - TEMP was not redirected, and a leftover could not be seen." -f $k, $polf) }
+            $left = @(Get-ChildItem -LiteralPath $cd -Filter 'pt_wdpol_*' -Force -ErrorAction SilentlyContinue)
+            Assert-True ($left.Count -eq 0) ("test 142 case {0} ({1}): the Group Policy Editor check left its answer file behind ({2}) - every change would leave one in %TEMP% (regression)." -f $k, $who, (($left | ForEach-Object { $_.Name }) -join ', '))
+            # a counted conflict is logged; nothing else logs a conflict
+            $lf = Join-Path $cd 'log.txt'
+            $logText = $(if (Test-Path -LiteralPath $lf) { [System.IO.File]::ReadAllText($lf) } else { '' })
+            if ($c.gpc -ne '') { Assert-True ($logText.Contains('WARN: Registry.pol (gpedit.msc) holds ExcludeWUDriversInQualityUpdate as: ')) ("test 142 case {0} ({1}): the Group Policy Editor conflict is not in the log (regression). Log: {2}" -f $k, $who, $logText.Trim()) }
+            else { Assert-True (-not $logText.Contains('WARN: Registry.pol')) ("test 142 case {0} ({1}): a conflict was logged where there is none. Log: {2}" -f $k, $who, $logText.Trim()) }
+            if ($c.log) { Assert-True ($logText.Contains($c.log)) ("test 142 case {0} ({1}): the log does not say '{2}'. Log: {3}" -f $k, $who, $c.log, $logText.Trim()) }
+            foreach ($h in $c.has)   { Assert-True ($text.Contains($h))      ("test 142 case {0} ({1}): the output does not say '{2}'. Output: {3}" -f $k, $who, $h, ($text -replace "`n", ' | ')) }
+            foreach ($h in $c.hasnt) { Assert-True (-not $text.Contains($h)) ("test 142 case {0} ({1}): the output says '{2}' and must not. Output: {3}" -f $k, $who, $h, ($text -replace "`n", ' | ')) }
+        }
+    }
+    finally {
+        if ($null -ne $lock) { $lock.Dispose() }
+        if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+    }
+}
+
+# ---- helpers for tests 143-146: the [Page file] section of Status ----------------------------
+# The page-file worker is the one code line that hands its answer back through $env:PT_PGF_RES.
+function Get-PgfWorker {
+    param([string[]]$Lines)
+    $Lines | Where-Object { $_.TrimStart() -notmatch '^(?i)rem\b' -and $_.Contains('$env:PT_PGF_RES') -and $_ -match '(?i)powershell -NoProfile -Command "' }
+}
+
+# The worker's payload is held to an ALLOWLIST read by PowerShell's own parser: the commands and
+# the shape of each call, the parameters, the method calls, the static members (type and name),
+# the types it names or casts to, the variables it qualifies or assigns, and the one C#
+# declaration. The first draft's denylist of writers missed Clear-ItemProperty, module-qualified
+# names, aliases, [Microsoft.Win32.Registry] and WMI .Put(). The first allowlist missed a method
+# run through ForEach-Object -MemberName, a static property read, a $script:r or foreach-loop $r
+# fed to & $r, and a > redirection. Tests 144 and 146 RUN this payload, with writers also blocked
+# at run time, so this is what keeps an accidental writer away from the real registry. It guards
+# against regressions; it is not a proof against a writer disguised on purpose.
+# Returns what is off the list (nothing = read-only).
+function Get-PgfPayloadProblems {
+    param([string]$Payload)
+    $bad = New-Object System.Collections.Generic.List[string]
+    $tok = $null; $perr = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Payload, [ref]$tok, [ref]$perr)
+    if (@($perr).Count -gt 0) { $bad.Add('it does not parse: ' + $perr[0].Message); return $bad.ToArray() }
+    $all = @($ast.FindAll({ param($n) $true }, $true))
+    $cmds = @($all | Where-Object { $_ -is [System.Management.Automation.Language.CommandAst] })
+    if ($cmds.Count -lt 10) { $bad.Add(('only {0} command(s) found - the scan is not reading the worker' -f $cmds.Count)) }
+    $okCmd = @('Get-ItemProperty', 'Get-CimInstance', 'New-Object', 'Add-Type', 'Out-File', 'Sort-Object', 'ForEach-Object', 'Where-Object', 'Cl', 'Nm')
+    foreach ($c in $cmds) {
+        $n = $c.GetCommandName(); $e = @($c.CommandElements)
+        if ($null -eq $n) {
+            # the one call without a name is & $r, the reader of GetPerformanceInfo's buffer
+            if (-not ($c.InvocationOperator -eq 'Ampersand' -and $e[0] -is [System.Management.Automation.Language.VariableExpressionAst] -and $e[0].VariablePath.UserPath -eq 'r')) { $bad.Add('a call with no command name: ' + $c.Extent.Text) }
+            continue
+        }
+        if ($okCmd -notcontains $n) { $bad.Add('command ' + $n); continue }
+        # one script block and nothing else: -MemberName, or a bare member name, runs a method no other check sees
+        if (@('ForEach-Object', 'Where-Object') -contains $n -and -not ($e.Count -eq 2 -and $e[1] -is [System.Management.Automation.Language.ScriptBlockExpressionAst])) { $bad.Add($n + ' with anything but one script block: ' + $c.Extent.Text) }
+        if ($n -eq 'Sort-Object' -and $c.Extent.Text -cne 'Sort-Object -Unique') { $bad.Add('Sort-Object with anything but -Unique: ' + $c.Extent.Text) }
+        if ($n -eq 'Add-Type' -and -not ($e.Count -eq 3 -and $e[1] -is [System.Management.Automation.Language.CommandParameterAst] -and $e[1].ParameterName -eq 'TypeDefinition')) { $bad.Add('Add-Type with anything but -TypeDefinition: ' + $c.Extent.Text) }
+        if ($n -eq 'New-Object') {
+            $par = @($e | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] })
+            if ($e.Count -lt 2 -or $par.Count -gt 0 -or -not ($e[1] -is [System.Management.Automation.Language.StringConstantExpressionAst]) -or @('Collections.Generic.List[string]', 'byte[]') -notcontains $e[1].Extent.Text) { $bad.Add('New-Object other than a string list or a byte array: ' + $c.Extent.Text) }
+        }
+        if ($n -eq 'Out-File' -and $c.Extent.Text -cne 'Out-File -FilePath $env:PT_PGF_RES -Encoding ASCII') { $bad.Add('Out-File to something other than its answer file: ' + $c.Extent.Text) }
+    }
+    # parameters: only the ones the worker uses (-OutVariable, -OutputAssembly and the like are off)
+    $okPar = @('ClassName', 'Encoding', 'ErrorAction', 'FilePath', 'LiteralPath', 'TypeDefinition', 'Unique')
+    foreach ($p in @($all | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] })) { if ($okPar -notcontains $p.ParameterName) { $bad.Add('parameter -' + $p.ParameterName) } }
+    # methods by name; static members by type and name, [IntPtr]::Size the one static property read
+    $okCall = @('Add', 'Substring', 'ToUpper', 'Trim')
+    $okStatic = @('[BitConverter]::ToUInt32', '[BitConverter]::ToUInt64', '[math]::Floor', '[PTPf.N]::GPI', '[regex]::Match')
+    foreach ($m in @($all | Where-Object { $_ -is [System.Management.Automation.Language.MemberExpressionAst] })) {
+        $call = $m -is [System.Management.Automation.Language.InvokeMemberExpressionAst]
+        if (-not $call -and -not $m.Static) { continue }
+        if (-not ($m.Member -is [System.Management.Automation.Language.StringConstantExpressionAst])) { $bad.Add('a member with a computed name: ' + $m.Extent.Text); continue }
+        if (-not $m.Static) { if ($okCall -notcontains $m.Member.Value) { $bad.Add('method ' + $m.Member.Value) }; continue }
+        $key = $m.Expression.Extent.Text + '::' + $m.Member.Value
+        $ok = $m.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and $(if ($call) { $okStatic -contains $key } else { $key -eq '[IntPtr]::Size' })
+        if (-not $ok) { $bad.Add('static member ' + $m.Extent.Text) }
+    }
+    # types: a cast can run a constructor ([IO.StreamWriter]'x' creates the file), so every type
+    # literal and cast is listed, and -as / -is take a type literal only; no redirection
+    $okType = @('BitConverter', 'char', 'double', 'int', 'int64', 'IntPtr', 'math', 'pscustomobject', 'PTPf.N', 'regex', 'string', 'type')
+    foreach ($t in @($all | Where-Object { $_ -is [System.Management.Automation.Language.TypeExpressionAst] -or $_ -is [System.Management.Automation.Language.TypeConstraintAst] })) { if ($okType -notcontains $t.TypeName.FullName) { $bad.Add('type [' + $t.TypeName.FullName + ']') } }
+    foreach ($b in @($all | Where-Object { $_ -is [System.Management.Automation.Language.BinaryExpressionAst] -and @('As', 'Is', 'IsNot') -contains [string]$_.Operator -and -not ($_.Right -is [System.Management.Automation.Language.TypeExpressionAst]) })) { $bad.Add('a conversion to a computed type: ' + $b.Extent.Text) }
+    foreach ($x in @($all | Where-Object { $_ -is [System.Management.Automation.Language.RedirectionAst] })) { $bad.Add('a redirection: ' + $x.Extent.Text) }
+    # variables: the only qualified ones are the two environment values it reads, and an
+    # assignment sets a plain variable or a property of one
+    foreach ($v in @($all | Where-Object { $_ -is [System.Management.Automation.Language.VariableExpressionAst] -and -not $_.VariablePath.IsUnqualified })) {
+        if (@('env:SystemDrive', 'env:PT_PGF_RES') -notcontains $v.VariablePath.UserPath) { $bad.Add('variable $' + $v.VariablePath.UserPath) }
+    }
+    foreach ($a in @($all | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] })) {
+        $l = $a.Left
+        if ($l -is [System.Management.Automation.Language.MemberExpressionAst] -and -not $l.Static) { $l = $l.Expression }
+        if (-not ($l -is [System.Management.Automation.Language.VariableExpressionAst] -and $l.VariablePath.IsUnqualified)) { $bad.Add('an assignment to ' + $a.Left.Extent.Text) }
+    }
+    # $r and $q are each set once, to the buffer reader and to a double quote; $r only ever runs
+    # as & $r, and $q is read only inside the Add-Type (a foreach or param named r or q fails too)
+    $at = @($cmds | Where-Object { $_.GetCommandName() -eq 'Add-Type' })
+    foreach ($vn in @('r', 'q')) {
+        $set = 0
+        foreach ($v in @($all | Where-Object { $_ -is [System.Management.Automation.Language.VariableExpressionAst] -and $_.VariablePath.UserPath -eq $vn })) {
+            $pa = $v.Parent
+            if ($pa -is [System.Management.Automation.Language.AssignmentStatementAst] -and [object]::ReferenceEquals($pa.Left, $v)) {
+                $set++
+                $want = $(if ($vn -eq 'r') { '^\{param\(\$i\)' } else { '^\[char\]34$' })
+                if ($pa.Operator -ne 'Equals' -or $pa.Right.Extent.Text -notmatch $want) { $bad.Add(('${0} is set by {1}' -f $vn, $pa.Extent.Text)) }
+            }
+            elseif ($vn -eq 'r' -and -not ($pa -is [System.Management.Automation.Language.CommandAst] -and $pa.InvocationOperator -eq 'Ampersand' -and [object]::ReferenceEquals($pa.CommandElements[0], $v))) { $bad.Add('$r used other than as & $r: ' + $pa.Extent.Text) }
+            elseif ($vn -eq 'q' -and -not ($at.Count -eq 1 -and $v.Extent.StartOffset -ge $at[0].Extent.StartOffset -and $v.Extent.EndOffset -le $at[0].Extent.EndOffset)) { $bad.Add('$q used outside the Add-Type: ' + $pa.Extent.Text) }
+        }
+        if ($set -ne 1) { $bad.Add(('${0} is set {1} time(s), expected once' -f $vn, $set)) }
+    }
+    if ($at.Count -ne 1) { $bad.Add(('{0} Add-Type calls, expected the one for GetPerformanceInfo' -f $at.Count)) }
+    else {
+        $vars = @($at[0].FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true) | ForEach-Object { $_.VariablePath.UserPath } | Sort-Object -Unique)
+        $decl = @($at[0].FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -ne 'BareWord' }, $true) | ForEach-Object { $_.Value }) -join ''
+        $one = 'using System.Runtime.InteropServices;namespace PTPf{public static class N{[DllImport(kernel32.dll,EntryPoint=K32GetPerformanceInfo)]public static extern bool GPI([Out] byte[] b,int cb);}}'
+        if (($vars -join ',') -ne 'q' -or $decl -cne $one) { $bad.Add('Add-Type compiles something other than the one read-only GetPerformanceInfo import: ' + $decl) }
+    }
+    $bad.ToArray()
+}
+
+# Runs $Script in a child Windows PowerShell, with the worker payload in PT_T_PAYLOAD. The script
+# goes to a temp .ps1 run with -File (encoded, it would pass the 32767 characters a command line
+# may hold), in ASCII on purpose: Windows PowerShell reads a BOM-less .ps1 as ANSI.
+function Invoke-PgfChild {
+    param([string]$Script, [string]$Payload, [string]$Tag)
+    $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $psExe)) { $psExe = (Get-Process -Id $PID).Path }
+    $runner = Join-Path ([IO.Path]::GetTempPath()) ('{0}_{1}.ps1' -f $Tag, [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [IO.File]::WriteAllText($runner, $Script, [Text.Encoding]::ASCII)
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $psExe
+        $psi.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $runner + '"'
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $psi.EnvironmentVariables['PT_T_PAYLOAD'] = $Payload
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $p.StandardInput.Close()
+        $err = $p.StandardError.ReadToEndAsync()
+        $out = $p.StandardOutput.ReadToEndAsync()
+        if (-not $p.WaitForExit(120000)) { $p.Kill(); throw ('{0}: the child PowerShell did not finish within 120 s.' -f $Tag) }
+        @{ Exit = $p.ExitCode; Out = $out.Result; Err = $err.Result.Trim() }
+    }
+    finally { if (Test-Path -LiteralPath $runner) { Remove-Item -LiteralPath $runner -Force } }
+}
+
+# ===============================================================================
+# 143. The [Page file] section of Status: wired in, read-only, and every verdict
+#      comes from the worker. sincript SHOWS the page-file and crash-dump settings
+#      and must never write them. Two halves hold that: the page-file and crash-dump
+#      names (PagingFiles, CrashControl, Win32_PageFileSetting ...) appear in ONE
+#      code line of the whole script - the worker - and that worker's payload uses
+#      only commands, methods and types on a read-only allowlist, read with
+#      PowerShell's own parser. The worker follows the house hand-off (per-call temp,
+#      stale file deleted first, PT_* cleared), the display prints nothing unless the
+#      worker wrote its closing END record, [ADVISORY] exists only in the advisory
+#      branches, and the verdicts the worker can emit are the ones the display handles.
+# ===============================================================================
+Invoke-Test 'Page file status: wired in, read-only, verdicts only from the worker' {
+    $cmd = Read-Lines $CmdPath
+
+    # --- wiring: Status calls it once, right after [Memory compression], and nothing else calls it
+    $st = @(Get-BodyLines -Lines $cmd -Label 'Status' -CodeOnly | ForEach-Object { $_.Trim() })
+    Assert-True ($st.Count -gt 40) (':Status body did not unroll ({0} lines).' -f $st.Count)
+    Assert-True (@($cmd | Where-Object { $_ -match '(?i)\bcall\s+:PageFileStatus\b' }).Count -eq 1 -and @($st | Where-Object { $_ -ieq 'call :PageFileStatus' }).Count -eq 1) ':Status no longer calls :PageFileStatus exactly once, or something else calls it too - the [Page file] section is gone, doubled or moved (regression).'
+    $iMma = -1; $iCall = -1; $iHosts = -1
+    for ($i = 0; $i -lt $st.Count; $i++) {
+        if ($st[$i] -like 'echo `[Memory compression`]*') { $iMma = $i }
+        if ($st[$i] -ieq 'call :PageFileStatus') { $iCall = $i }
+        if ($st[$i] -like 'echo `[hosts file`]*') { $iHosts = $i }
+    }
+    Assert-True ($iMma -ge 0 -and $iCall -gt $iMma -and $iHosts -gt $iCall) (':Status shows [Page file] somewhere other than between [Memory compression] and [hosts file] (lines {0}/{1}/{2}).' -f $iMma, $iCall, $iHosts)
+    $pf = (Get-BodyLines -Lines $cmd -Label 'PageFileStatus' -CodeOnly) -join "`n"
+    Assert-True ($pf.Length -gt 200) ':PageFileStatus has no code.'
+    # A leftover file is deleted before the worker runs (it must never be read as this run's
+    # answer), and the result is deleted only after it has been shown. Each step is searched
+    # for AFTER the previous one, so the two identical deletes are told apart.
+    $order = @('set "_pgfres=!TEMP!\pt_pgf_%RANDOM%%RANDOM%.txt"', 'del "!_pgfres!" >nul 2>&1', 'set "PT_PGF_RES=!_pgfres!"', 'start "" /min /wait powershell -NoProfile -Command "', 'set "PT_PGF_RES="', 'call :_pgfShow', 'del "!_pgfres!" >nul 2>&1')
+    $pos = -1
+    foreach ($step in $order) {
+        $next = $pf.IndexOf($step, $pos + 1)
+        Assert-True ($next -gt $pos) (':PageFileStatus lost "{0}", or runs it out of order - per-call name, stale-file delete, hand-off, worker, clear, show, delete is the only safe order (regression).' -f $step)
+        $pos = $next
+    }
+
+    # --- nothing is shown or judged unless the worker finished
+    $sh = (Get-BodyLines -Lines $cmd -Label '_pgfShow' -CodeOnly) -join "`n"
+    $g1 = $sh.IndexOf('findstr /b /l /c:"END|ok" "!_pgfres!"'); $g2 = $sh.IndexOf('if not defined _pgfok goto _pgfNone'); $g3 = $sh.IndexOf('for /f "usebackq tokens=1-6 delims=|"')
+    Assert-True ($g1 -ge 0 -and $g2 -gt $g1 -and $g3 -gt $g2) ':_pgfShow reads records before proving the worker wrote its END record - a half-written file would be half-judged (regression).'
+
+    # --- [ADVISORY] appears only under a _pgfAdv* label, in all three bodies of the section, on
+    #     any non-rem line ("if x echo [ADVISORY]" is the likely stray shape); and every verdict
+    #     the worker can emit has exactly one branch, and no branch is dead
+    $raw = @(':PageFileStatus') + @(Get-BodyLines -Lines $cmd -Label 'PageFileStatus') + @(':_pgfShow') + @(Get-BodyLines -Lines $cmd -Label '_pgfShow') + @(':_pgfRec') + @(Get-BodyLines -Lines $cmd -Label '_pgfRec')
+    Assert-True ($raw.Count -gt 100) ('The page-file section did not unroll ({0} lines).' -f $raw.Count)
+    $cur = ''; $stray = @(); $advN = 0
+    foreach ($l in $raw) {
+        if ($l -match '^:(\w+)') { $cur = $Matches[1]; continue }
+        if ($l.Trim() -notmatch '^(?i)rem\b' -and $l.Contains('[ADVISORY]')) { $advN++; if ($cur -notlike '_pgfAdv?*') { $stray += $cur } }
+    }
+    Assert-True ($stray.Count -eq 0) ('[ADVISORY] printed outside an advisory branch ({0}) - a verdict must come from an ADV record the worker emitted (regression).' -f ($stray -join ', '))
+    Assert-True ($advN -ge 8) ('Only {0} [ADVISORY] line(s) in the page-file section - verdicts or their after-the-restart wording are gone.' -f $advN)
+    $wk = @(Get-PgfWorker -Lines $cmd)
+    Assert-True ($wk.Count -eq 1) ('Expected one page-file worker line, found {0}.' -f $wk.Count)
+    $emit = @([regex]::Matches($wk[0], "'ADV\|([a-z]+)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    $handle = @($raw | ForEach-Object { if ($_ -match '^if "!_pgf1!"=="([a-z]+)" goto _pgfAdv\w+') { $Matches[1] } } | Sort-Object -Unique)
+    Assert-True ($emit.Count -ge 6) ('Only {0} verdict code(s) found in the worker - the record format changed.' -f $emit.Count)
+    Assert-True (($emit -join ',') -ceq ($handle -join ',')) ('Verdicts the worker emits [{0}] and the display handles [{1}] differ - one is never shown, or one is dead (regression).' -f ($emit -join ','), ($handle -join ','))
+
+    # --- the worker reads documented, locale-free sources, and compiles only behind its type guard
+    $w = $wk[0]
+    foreach ($need in @('PagingFiles', 'ExistingPageFiles', 'Win32_PageFileUsage', 'Win32_OperatingSystem', 'Win32_PhysicalMemory', 'CrashControl', 'CrashDumpEnabled', 'FilterPages', 'DedicatedDumpFile', 'K32GetPerformanceInfo')) {
+        Assert-True ($w.Contains($need)) ('The page-file worker no longer reads {0} (regression).' -f $need)
+    }
+    Assert-True ($w -notmatch '(?i)\b(Get-Counter|systeminfo|wmic|fsutil|powercfg|Get-WmiObject)\b') 'The page-file worker calls a tool whose output is localized text or deprecated - read registry values and WMI properties instead (pitfall 26).'
+    Assert-True (([regex]::Matches($w, 'Add-Type')).Count -eq 1 -and $w.IndexOf("'PTPf.N' -as [type]") -ge 0 -and $w.IndexOf("'PTPf.N' -as [type]") -lt $w.IndexOf('Add-Type')) 'The page-file worker compiles GetPerformanceInfo without first checking the type is already there.'
+
+    # --- READ-ONLY, half 1: the payload uses only allowlisted, read-only commands and methods
+    $m = [regex]::Match($w, '-Command "(.*)"\s*$')
+    Assert-True $m.Success 'The page-file worker lost the -Command "..." shape this test reads.'
+    $probs = @(Get-PgfPayloadProblems -Payload $m.Groups[1].Value.Replace('%%', '%'))
+    Assert-True ($probs.Count -eq 0) ('The page-file worker uses something off its read-only allowlist - it may only read the registry and WMI and write its own answer file: ' + ($probs -join ' | '))
+
+    # --- READ-ONLY, half 2: no other code line in the script even names a page-file or
+    #     crash-dump setting. rem lines are prose, and so is a plain or if-guarded echo line that,
+    #     with its ^x escape pairs removed, holds no &, |, < or >. Any other line naming one - a reg
+    #     add, a :SafeRegAdd, a set that stages the name, a second worker, an echo that writes a
+    #     reg add into a .bat - fails, whatever command it would write with. (The first version
+    #     looked only for an & or | without a ^ before it, which let "echo reg add ... PagingFiles
+    #     ... /f>>file" and "echo ^^& reg add ..." through.)
+    $targets = '(?i)PagingFiles|ExistingPageFiles|TempPageFile|AutomaticManagedPagefile|Win32_PageFileSetting|pagefileset|ClearPageFileAtShutdown|CrashControl|CrashDumpEnabled|DedicatedDumpFile|DumpFileSize|FilterPages'
+    $echoLine = '(?i)^\s*(if\s+(/i\s+)?(not\s+)?(defined\s+\S+|exist\s+"[^"]*"|"[^"]*"==\s*"[^"]*")\s+)*echo([\s.:;,(]|$)'
+    $code = @($cmd | Where-Object { $t = $_.Trim(); $t -ne '' -and $t -notmatch '^(?i)(rem\b|::)' -and -not ($_ -match $echoLine -and ($_ -replace '\^.', '') -notmatch '[&|<>]') })
+    Assert-True ($code.Count -gt 2000 -and @($code | Where-Object { $_ -ceq $w }).Count -eq 1) 'The read-only scan found too little code, or not the worker - it would pass vacuously.'
+    $named = @($code | Where-Object { $_ -match $targets -and $_ -cne $w })
+    Assert-True ($named.Count -eq 0) ('A code line outside the read-only worker names a page-file or crash-dump setting - sincript shows them and must never change them: ' + (($named | ForEach-Object { $_.Trim().Substring(0, [Math]::Min(90, $_.Trim().Length)) }) -join ' | '))
+    Assert-True (@($code | Where-Object { $_ -match '(?i)Win32_PageFileSetting|pagefileset|AutomaticManagedPagefile' }).Count -eq 0) 'Code touches Win32_PageFileSetting / AutomaticManagedPagefile - the WMI write surface for the page file. The status needs neither.'
+}
+
+# ===============================================================================
+# 144. The page-file CLASSIFIER is RUN on synthetic machines. Its payload is pulled
+#      out of the script, checked against test 143's read-only allowlist (it is not
+#      run otherwise) and run in a child Windows PowerShell where the registry
+#      (Get-ItemProperty) and WMI (Get-CimInstance) answer from test cases - a
+#      function outranks a cmdlet - and GetPerformanceInfo is a stand-in that counts
+#      its calls. Every writer the allowlist would miss, Add-Type included once the
+#      stand-in is loaded, ends the child with 126. Each case pins the exact
+#      verdicts: a system-managed file is never judged small; an unrecognised,
+#      unreadable or ABSENT setting is never judged; a complete dump "cannot be
+#      written" only below RAM + 1 MB and "may be cut short" up to RAM + 257 MB;
+#      there is no small-dump rule; a growable file's soft limit is never called
+#      full; the commit verdict fires at exactly 90%; a pending change turns the
+#      no-page-file verdicts into "after the next restart" and suppresses the
+#      commit verdict; an in-use state WMI and the registry disagree on is unknown,
+#      and an unknown one gets the "after the next restart" wording too (true
+#      whatever is in use now);
+#      a CrashDumpEnabled that is not a DWORD is unrecognised, not unreadable; the
+#      Windows drive comes from SystemDrive; and the C# compile runs only where the
+#      commit verdict can fire. Every record meets the contract the display relies on
+#      (whitelisted characters, no empty field, at most 6 fields, 8-digit numbers,
+#      30-character names, 40-character entries), and the MEM / DMP records are
+#      pinned field by field where it matters.
+# ===============================================================================
+Invoke-Test 'Page file classifier: synthetic machines get exactly the documented verdicts' {
+    $cmd = Read-Lines $CmdPath
+    $hits = @(Get-PgfWorker -Lines $cmd)
+    Assert-True ($hits.Count -eq 1) ('Expected one worker line writing $env:PT_PGF_RES, found {0} - it moved or was split, so this test is not running it.' -f $hits.Count)
+    Assert-True ($hits[0].Length -lt 8000) ('The page-file worker line is {0} characters; cmd refuses a line over 8191, so it has to shrink, not grow.' -f $hits[0].Length)
+    $m = [regex]::Match($hits[0], '-Command "(.*)"\s*$')
+    Assert-True $m.Success 'The page-file worker lost the -Command "..." shape this test extracts.'
+    $raw = $m.Groups[1].Value
+    Assert-True (-not $raw.Contains('"')) 'The page-file payload holds a double quote, which would end cmd''s quoting of it.'
+    Assert-True (-not $raw.Contains('!')) 'The page-file payload holds a "!" - :Status runs with delayed expansion on, which would eat it.'
+    Assert-True (-not $raw.Replace('%%', '').Contains('%')) 'The page-file payload holds a single "%" that cmd would expand.'
+    $payload = $raw.Replace('%%', '%')
+    $probs = @(Get-PgfPayloadProblems -Payload $payload)
+    Assert-True ($probs.Count -eq 0) ('test 144 refuses to run a page-file worker that is off its read-only allowlist: ' + ($probs -join ' | '))
+
+    $prelude = @'
+$global:PTOdd = New-Object System.Collections.Generic.List[string]
+Add-Type -TypeDefinition @"
+namespace PTPf { public static class N {
+    public static int Calls;
+    static void Put(byte[] b, int i, ulong v) { if (System.IntPtr.Size == 8) System.BitConverter.GetBytes(v).CopyTo(b, 8 + 8 * i); else System.BitConverter.GetBytes((uint)v).CopyTo(b, 4 + 4 * i); }
+    public static bool GPI(byte[] b, int cb) {
+        Calls++;
+        string pk = System.Environment.GetEnvironmentVariable("PT_T_PEAK");
+        if (string.IsNullOrEmpty(pk)) return false;
+        Put(b, 0, ulong.Parse(System.Environment.GetEnvironmentVariable("PT_T_NOW")) * 256);
+        Put(b, 1, ulong.Parse(System.Environment.GetEnvironmentVariable("PT_T_LIM")) * 256);
+        Put(b, 2, ulong.Parse(pk) * 256);
+        Put(b, 9, 4096);
+        return true;
+    }
+} }
+"@
+function global:Get-ItemProperty {
+    [CmdletBinding()] param([string]$LiteralPath, [string[]]$Name)
+    if ($Name) { $global:PTOdd.Add('Get-ItemProperty -Name') }
+    if ($LiteralPath -eq 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management') { $v = $global:PTCase.MM }
+    elseif ($LiteralPath -eq 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl') { $v = $global:PTCase.CC }
+    else { $global:PTOdd.Add('key ' + $LiteralPath); return }
+    if ($v -is [string] -and $v -eq 'throw') { throw 'test 144: unreadable key' }
+    return $v
+}
+function global:Get-CimInstance {
+    [CmdletBinding()] param([Parameter(Position = 0)][string]$ClassName)
+    switch ($ClassName) {
+        'Win32_PageFileUsage'   { $v = $global:PTCase.USE }
+        'Win32_OperatingSystem' { $v = $global:PTCase.OS }
+        'Win32_PhysicalMemory'  { $v = $global:PTCase.PM }
+        default { $global:PTOdd.Add('class ' + $ClassName); return }
+    }
+    if ($v -is [string] -and $v -eq 'throw') { throw 'test 144: WMI failed' }
+    return $v
+}
+# Every command that could change the system ends this child with 126 - Add-Type too, now that
+# the stand-in is loaded. Set-Item comes last: this loop uses it to define the others.
+foreach ($n in @('Set-ItemProperty','New-ItemProperty','Remove-ItemProperty','Clear-ItemProperty','Rename-ItemProperty','Copy-ItemProperty','Move-ItemProperty','Remove-Item','New-Item','Clear-Item','Copy-Item','Move-Item','Rename-Item','Set-Content','Add-Content','Clear-Content','Set-CimInstance','New-CimInstance','Remove-CimInstance','Invoke-CimMethod','Get-WmiObject','Set-WmiInstance','Invoke-WmiMethod','Remove-WmiObject','Invoke-Expression','Invoke-Item','Start-Process','Stop-Process','reg','reg.exe','wmic','wmic.exe','cmd','cmd.exe','powershell','powershell.exe','Add-Type','Set-Item')) {
+    Set-Item -Path ('function:global:' + $n) -Value ([scriptblock]::Create("[Console]::Error.WriteLine('test 144: the page-file worker tried to run $n'); [Environment]::Exit(126)"))
+}
+function global:PTUse($n, $a, $c, $p, $t) { [pscustomobject]@{ Name = $n; AllocatedBaseSize = [uint32]$a; CurrentUsage = [uint32]$c; PeakUsage = [uint32]$p; TempPageFile = [bool]$t } }
+function global:PTOs($visMB, $limMB, $nowMB) { [pscustomobject]@{ TotalVisibleMemorySize = [uint64]($visMB * 1024); TotalVirtualMemorySize = [uint64]($limMB * 1024); FreeVirtualMemory = [uint64](($limMB - $nowMB) * 1024) } }
+function global:PTMm([string[]]$pf, [string[]]$ex) { $h = [ordered]@{}; if ($null -ne $pf) { $h.PagingFiles = $pf }; if ($null -ne $ex) { $h.ExistingPageFiles = $ex }; [pscustomobject]$h }
+function global:PTCc($type, $filter, $ded) { $h = [ordered]@{}; if ($null -ne $type) { $h.CrashDumpEnabled = [int]$type }; if ($null -ne $filter) { $h.FilterPages = [int]$filter }; if ($ded) { $h.DedicatedDumpFile = $ded }; [pscustomobject]$h }
+$pm16 = @([pscustomobject]@{ Capacity = [uint64]17179869184 })
+$os16 = PTOs 16257 32641 12000
+$fixC = { param($mb) @{ MM = (PTMm @("C:\pagefile.sys $mb $mb")); USE = @(PTUse 'C:\pagefile.sys' $mb 10 20 $false) } }
+
+# Each case: the registry (MM, CC) and WMI (USE, OS, PM) answers, the fake commit peak and
+# limit in MB (Peak, Lim; Peak $null = GetPerformanceInfo fails), SystemDrive (Sd, default C:),
+# and what must come out: Want = the exact ADV records in order; WantSet / WantUse = the exact
+# SET / USE records; WantMem / WantDmp = the exact MEM / DMP record; WantPnd = the pending-
+# restart record; Gpi = how many times GetPerformanceInfo was called. usable RAM is 16257 MB.
+$cases = [ordered]@{
+  'system-managed on all drives, dumps and peak that would fire anywhere else' = @{ MM = (PTMm @('?:\pagefile.sys') @('\??\C:\pagefile.sys')); CC = (PTCc 1 $null $null); USE = @(PTUse 'C:\pagefile.sys' 300 290 300 $false); OS = (PTOs 16257 16557 16500); PM = $pm16; Peak = 16550; Lim = 16557; Want = @(); WantSet = @('SET|auto'); Gpi = 0 }
+  'system-managed size on C: - never judged small' = @{ MM = (PTMm @('C:\pagefile.sys 0 0')); CC = (PTCc 1 $null $null); USE = @(PTUse 'C:\pagefile.sys' 256 250 256 $false); OS = (PTOs 16257 16513 16500); PM = $pm16; Peak = 16510; Lim = 16513; Want = @(); WantSet = @('SET|sys|C'); Gpi = 0 }
+  'no page file, dumps on, peak at 95 percent' = @{ MM = (PTMm @('') @()); CC = (PTCc 7 $null $null); USE = @(); OS = (PTOs 16257 16000 9000); PM = $pm16; Peak = 15200; Lim = 16000; Want = @('ADV|none|now', 'ADV|nodump|C|now', 'ADV|commit|15200|16000'); WantSet = @('SET|none'); WantUse = @('USE|none'); WantMem = 'MEM|16257|16384|1000|16000|15200'; WantDmp = 'DMP|7|0|7'; Gpi = 1 }
+  'no page file but a dedicated dump file, peak low' = @{ MM = (PTMm ([string[]]@()) @()); CC = (PTCc 7 $null 'D:\dedicated.sys'); USE = @(); OS = $os16; PM = $pm16; Peak = 4000; Lim = 16000; Want = @('ADV|none|now'); WantDmp = 'DMP|7|1|7'; Gpi = 1 }
+  'no page file and crash dumps off' = @{ MM = (PTMm @('') @()); CC = (PTCc 0 $null $null); USE = @(); OS = $os16; PM = $pm16; Peak = $null; Want = @('ADV|none|now'); WantDmp = 'DMP|0|0|0'; Gpi = 1 }
+  'PagingFiles value absent - unrecognised, nothing judged' = @{ MM = (PTMm $null $null); CC = (PTCc 7 $null $null); USE = @(); OS = $os16; PM = $pm16; Peak = 15900; Lim = 16000; Want = @(); WantSet = @('SET|absent'); WantUse = @('USE|none'); Gpi = 0 }
+  'fixed 4096 MB on C:, complete dump - below RAM + 1 MB, cannot be written' = (& $fixC 4096) + @{ CC = (PTCc 1 0 $null); OS = (PTOs 16257 20353 8000); PM = $pm16; Peak = 9000; Lim = 20353; Want = @('ADV|dumpsize|C|16258|4096'); WantSet = @('SET|custom|C|4096|4096'); WantDmp = 'DMP|1|0|1'; Gpi = 1 }
+  'fixed 1 MB under the complete-dump floor' = (& $fixC 16257) + @{ CC = (PTCc 1 $null $null); OS = $os16; PM = $pm16; Peak = 9000; Lim = 32514; Want = @('ADV|dumpsize|C|16258|16257'); Gpi = 1 }
+  'fixed exactly at the complete-dump floor - may be cut short only' = (& $fixC 16258) + @{ CC = (PTCc 1 $null $null); OS = $os16; PM = $pm16; Peak = 9000; Lim = 32515; Want = @('ADV|dumpshort|C|16514|16258'); Gpi = 1 }
+  'page file the size of installed RAM, complete dump - may be cut short, not cannot be written' = (& $fixC 16384) + @{ CC = (PTCc 1 $null $null); OS = $os16; PM = $pm16; Peak = 9000; Lim = 32641; Want = @('ADV|dumpshort|C|16514|16384'); Gpi = 1 }
+  'fixed at RAM + 257 MB - nothing to say' = (& $fixC 16514) + @{ CC = (PTCc 1 $null $null); OS = $os16; PM = $pm16; Peak = 9000; Lim = 32771; Want = @(); Gpi = 1 }
+  'complete dump with a dedicated dump file - no size verdict' = (& $fixC 4096) + @{ CC = (PTCc 1 $null 'D:\dd.sys'); OS = $os16; PM = $pm16; Peak = 9000; Lim = 20353; Want = @(); WantDmp = 'DMP|1|1|1'; Gpi = 1 }
+  'small dump on a 1 MB page file - there is no small-dump rule' = (& $fixC 1) + @{ CC = (PTCc 3 $null $null); OS = $os16; PM = $pm16; Peak = 9000; Lim = 16258; Want = @(); WantDmp = 'DMP|3|0|3'; Gpi = 1 }
+  'fixed 16384 MB on C:, small dump, peak at 92 percent' = @{ MM = (PTMm @('c:\pagefile.sys 16384 16384')); CC = (PTCc 3 $null $null); USE = @(PTUse 'C:\pagefile.sys' 16384 9000 12000 $false); OS = (PTOs 16257 32641 20000); PM = $pm16; Peak = 30100; Lim = 32641; Want = @('ADV|commit|30100|32641'); WantMem = 'MEM|16257|16384|1000|32641|30100'; Gpi = 1 }
+  'commit peak at exactly 90 percent' = (& $fixC 4096) + @{ CC = (PTCc 0 $null $null); OS = $os16; PM = $pm16; Peak = 9000; Lim = 10000; Want = @('ADV|commit|9000|10000'); Gpi = 1 }
+  'commit peak just under 90 percent' = (& $fixC 4096) + @{ CC = (PTCc 0 $null $null); OS = $os16; PM = $pm16; Peak = 8999; Lim = 10000; Want = @(); Gpi = 1 }
+  'custom that can still grow - the limit is soft, no commit verdict' = @{ MM = (PTMm @('C:\pagefile.sys 1024 8192')); CC = (PTCc 7 $null $null); USE = @(PTUse 'C:\pagefile.sys' 1024 1000 1024 $false); OS = (PTOs 16257 17281 17000); PM = $pm16; Peak = 17200; Lim = 17281; Want = @(); WantSet = @('SET|custom|C|1024|8192'); WantMem = 'MEM|16257|16384|17000|17281|-'; Gpi = 0 }
+  'page file only on D:, dumps on' = @{ MM = (PTMm @('D:\pagefile.sys 4096 4096')); CC = (PTCc 7 $null $null); USE = @(PTUse 'D:\pagefile.sys' 4096 10 20 $false); OS = (PTOs 16257 20353 8000); PM = $pm16; Peak = 9000; Lim = 20353; Want = @('ADV|nodump|C|now'); Gpi = 1 }
+  'Windows on D:, page file only on C: - the Windows drive comes from SystemDrive' = (& $fixC 4096) + @{ Sd = 'D:'; CC = (PTCc 7 $null $null); OS = $os16; PM = $pm16; Peak = 9000; Lim = 20353; Want = @('ADV|nodump|D|now'); Gpi = 1 }
+  'size change waiting for a restart - no commit verdict' = @{ MM = (PTMm @('C:\pagefile.sys 4096 4096')); CC = (PTCc 3 $null $null); USE = @(PTUse 'C:\pagefile.sys' 8192 10 20 $false); OS = (PTOs 16257 24449 24000); PM = $pm16; Peak = 24400; Lim = 24449; Want = @(); WantPnd = $true; Gpi = 0 }
+  'drive change waiting for a restart - after the next restart' = @{ MM = (PTMm @('D:\pagefile.sys 0 0')); CC = (PTCc 7 $null $null); USE = @(PTUse 'C:\pagefile.sys' 2048 10 20 $false); OS = $os16; PM = $pm16; Peak = $null; Want = @('ADV|nodump|C|next'); WantPnd = $true; Gpi = 0 }
+  'no page file set, one still in use - after the next restart' = @{ MM = (PTMm @('') @('\??\C:\pagefile.sys')); CC = (PTCc 7 $null $null); USE = @(PTUse 'C:\pagefile.sys' 2048 10 20 $false); OS = $os16; PM = $pm16; Peak = 15900; Lim = 16000; Want = @('ADV|none|next', 'ADV|nodump|C|next'); WantUse = @('USE|C:\pagefile.sys|2048|10|20'); WantPnd = $true; Gpi = 0 }
+  'unrecognised entries are shown and never judged' = @{ MM = (PTMm @('C:\pagefile.sys 4096', 'garbage !%^&| text', 'C:\pagefile.sys 8192 4096')); CC = (PTCc 1 $null $null); USE = @(PTUse 'C:\pagefile.sys' 4096 10 20 $false); OS = $os16; PM = $pm16; Peak = 16000; Lim = 16100; Want = @(); WantSet = @('SET|unrec|C:\pagefile.sys 4096', 'SET|unrec|garbage  text', 'SET|unrec|C:\pagefile.sys 8192 4096'); Gpi = 0 }
+  'custom sizes on "any drive" (?:) are unrecognised, never judged' = @{ MM = (PTMm @('?:\pagefile.sys 1024 1124')); CC = (PTCc 7 $null $null); USE = @(PTUse 'C:\pagefile.sys' 1024 10 20 $false); OS = $os16; PM = $pm16; Peak = 16000; Lim = 16100; Want = @(); WantSet = @('SET|unrec|?:\pagefile.sys 1024 1124'); Gpi = 0 }
+  'a nine-digit size is unrecognised, so no number outgrows the display' = @{ MM = (PTMm @('C:\pagefile.sys 100000000 100000000')); CC = (PTCc 1 $null $null); USE = @(PTUse 'C:\pagefile.sys' 4096 10 20 $false); OS = $os16; PM = $pm16; Peak = 16000; Lim = 16100; Want = @(); WantSet = @('SET|unrec|C:\pagefile.sys 100000000 100000000'); Gpi = 0 }
+  'an entry without a drive letter blocks the no-dump verdict' = @{ MM = (PTMm @('garbage')); CC = (PTCc 7 $null $null); USE = @(PTUse 'C:\pagefile.sys' 1024 1 2 $false); OS = $os16; PM = $pm16; Peak = $null; Want = @(); WantSet = @('SET|unrec|garbage'); Gpi = 0 }
+  'registry unreadable - nothing about the setting is judged' = @{ MM = 'throw'; CC = (PTCc 1 $null $null); USE = @(); OS = $os16; PM = $pm16; Peak = 16000; Lim = 16100; Want = @(); WantSet = @('SET|unreadable'); WantUse = @('USE|none'); Gpi = 0 }
+  'WMI down - in-use from ExistingPageFiles, no sizes, no commit verdict' = @{ MM = (PTMm @('C:\pagefile.sys 4096 4096') @('\??\C:\pagefile.sys')); CC = (PTCc 3 $null $null); USE = 'throw'; OS = 'throw'; PM = 'throw'; Peak = 16000; Lim = 16100; Want = @(); WantUse = @('USE|C:\pagefile.sys|-|-|-'); WantMem = 'MEM|-|-|-|-|-'; Gpi = 0 }
+  'WMI down and no ExistingPageFiles, no page file set - in use unknown, after the next restart, no commit verdict' = @{ MM = (PTMm @('') $null); CC = (PTCc 0 $null $null); USE = 'throw'; OS = $os16; PM = $pm16; Peak = 15900; Lim = 16000; Want = @('ADV|none|next'); WantUse = @('USE|unknown'); Gpi = 0 }
+  'WMI lists no page file but the registry lists one, dumps on - in use unknown, after the next restart, no commit verdict' = @{ MM = (PTMm @('') @('\??\C:\pagefile.sys')); CC = (PTCc 7 $null $null); USE = @(); OS = $os16; PM = $pm16; Peak = 15900; Lim = 16000; Want = @('ADV|none|next', 'ADV|nodump|C|next'); WantUse = @('USE|disagree'); WantDmp = 'DMP|7|0|7'; Gpi = 0 }
+  'a fixed file WMI does not list but the registry does - unknown, not pending' = @{ MM = (PTMm @('C:\pagefile.sys 4096 4096') @('\??\C:\pagefile.sys')); CC = (PTCc 7 $null $null); USE = @(); OS = $os16; PM = $pm16; Peak = 16000; Lim = 16100; Want = @(); WantUse = @('USE|disagree'); Gpi = 0 }
+  'a temporary page file is reported' = @{ MM = (PTMm @('?:\pagefile.sys')); CC = (PTCc 7 $null $null); USE = @(PTUse 'C:\pagefile.sys' 1024 10 20 $true); OS = $os16; PM = $pm16; Peak = $null; Want = @('ADV|temp'); Gpi = 0 }
+  'active dump on a tiny fixed file - no numeric rule for it' = (& $fixC 512) + @{ CC = (PTCc 1 1 $null); OS = $os16; PM = $pm16; Peak = 1000; Lim = 16769; Want = @(); WantDmp = 'DMP|A|0|1'; Gpi = 1 }
+  'RAM unknown - no complete-dump size verdict' = (& $fixC 512) + @{ CC = (PTCc 1 $null $null); OS = 'throw'; PM = 'throw'; Peak = 1000; Lim = 16769; Want = @(); WantMem = 'MEM|-|-|1000|16769|1000'; Gpi = 1 }
+  'crash-dump key unreadable - no dump verdicts' = @{ MM = (PTMm @('')); CC = 'throw'; USE = @(); OS = $os16; PM = $pm16; Peak = $null; Want = @('ADV|none|now'); WantDmp = 'DMP|R|0|-'; Gpi = 1 }
+  'CrashDumpEnabled as a string - unrecognised, not unreadable' = @{ MM = (PTMm @('')); CC = [pscustomobject]@{ CrashDumpEnabled = '1' }; USE = @(); OS = $os16; PM = $pm16; Peak = $null; Want = @('ADV|none|now'); WantDmp = 'DMP|X|0|-'; Gpi = 1 }
+  'CrashDumpEnabled 0xFFFFFFFF - unrecognised' = @{ MM = (PTMm @('?:\pagefile.sys')); CC = (PTCc -1 $null $null); USE = @(PTUse 'C:\pagefile.sys' 1024 10 20 $false); OS = $os16; PM = $pm16; Peak = $null; Want = @(); WantDmp = 'DMP|X|0|-'; Gpi = 0 }
+  'CrashDumpEnabled 4 - unrecognised, shown as found' = @{ MM = (PTMm @('?:\pagefile.sys')); CC = (PTCc 4 $null $null); USE = @(PTUse 'C:\pagefile.sys' 1024 10 20 $false); OS = $os16; PM = $pm16; Peak = $null; Want = @(); WantDmp = 'DMP|X|0|4'; Gpi = 0 }
+  'CrashDumpEnabled not set' = @{ MM = (PTMm @('?:\pagefile.sys')); CC = (PTCc $null 1 $null); USE = @(PTUse 'C:\pagefile.sys' 1024 10 20 $false); OS = $os16; PM = $pm16; Peak = $null; Want = @(); WantDmp = 'DMP|U|0|-'; Gpi = 0 }
+}
+$fails = New-Object System.Collections.Generic.List[string]
+$sb = [scriptblock]::Create($env:PT_T_PAYLOAD)
+foreach ($name in $cases.Keys) {
+    $c = $cases[$name]
+    $global:PTCase = $c
+    $env:SystemDrive = 'C:'; if ($c.ContainsKey('Sd')) { $env:SystemDrive = $c.Sd }
+    $env:PT_T_PEAK = ''; if ($null -ne $c.Peak) { $env:PT_T_PEAK = [string]$c.Peak; $env:PT_T_LIM = [string]$c.Lim; $env:PT_T_NOW = '1000' }
+    $env:PT_PGF_RES = Join-Path ([IO.Path]::GetTempPath()) ('PT144_{0}.txt' -f [guid]::NewGuid().ToString('N'))
+    $before = [PTPf.N]::Calls
+    & $sb
+    $calls = [PTPf.N]::Calls - $before
+    if (-not (Test-Path -LiteralPath $env:PT_PGF_RES)) { $fails.Add($name + ': no output file'); continue }
+    $bytes = [IO.File]::ReadAllBytes($env:PT_PGF_RES)
+    $lines = @([IO.File]::ReadAllLines($env:PT_PGF_RES))
+    [IO.File]::Delete($env:PT_PGF_RES)
+    if (@($bytes | Where-Object { $_ -gt 126 -or ($_ -lt 32 -and $_ -ne 13 -and $_ -ne 10) }).Count -gt 0) { $fails.Add($name + ': output is not printable ASCII') }
+    if ($lines.Count -eq 0 -or $lines[-1] -ne 'END|ok') { $fails.Add($name + ': output does not end in END|ok') }
+    foreach ($l in $lines) {
+        if ($l -notmatch '^(SET|USE|MEM|DMP|PND|ADV|END)(\|[A-Za-z0-9 :.?_\\-]+)+$') { $fails.Add(('{0}: malformed record [{1}] - empty field, unknown tag or a character outside the whitelist' -f $name, $l)) }
+        $f = $l.Split('|')
+        if ($f.Count -gt 6) { $fails.Add(('{0}: record [{1}] has more than the 6 fields the display reads' -f $name, $l)) }
+        foreach ($x in $f[1..($f.Count - 1)]) { if ($x -match '^\d+$' -and $x.Length -gt 8) { $fails.Add(('{0}: number {1} is wider than the 8 digits the display is sized for' -f $name, $x)) } }
+        if ($f[0] -eq 'USE' -and $f[1].Length -gt 30) { $fails.Add(('{0}: file name wider than 30' -f $name)) }
+        if ($f[0] -eq 'SET' -and $f[1] -eq 'unrec' -and $f[2].Length -gt 40) { $fails.Add(('{0}: unrecognised entry wider than 40' -f $name)) }
+    }
+    $adv = @($lines | Where-Object { $_ -like 'ADV|*' })
+    if (($adv -join ';') -cne (@($c.Want) -join ';')) { $fails.Add(('{0}: advisories [{1}], expected [{2}]' -f $name, ($adv -join ';'), (@($c.Want) -join ';'))) }
+    foreach ($k in @('Set', 'Use', 'Mem', 'Dmp')) {
+        if (-not $c.ContainsKey('Want' + $k)) { continue }
+        $got = @($lines | Where-Object { $_ -like ($k.ToUpper() + '|*') })
+        $want = @($c['Want' + $k])
+        if (($got -join ';') -cne ($want -join ';')) { $fails.Add(('{0}: {1} records [{2}], expected [{3}]' -f $name, $k.ToUpper(), ($got -join ';'), ($want -join ';'))) }
+    }
+    $pnd = @($lines | Where-Object { $_ -eq 'PND|1' }).Count -eq 1
+    if ($pnd -ne [bool]$c.WantPnd) { $fails.Add(('{0}: pending-restart record {1}, expected {2}' -f $name, $pnd, [bool]$c.WantPnd)) }
+    if ($calls -ne $c.Gpi) { $fails.Add(('{0}: GetPerformanceInfo called {1} time(s), expected {2} - it costs a C# compile, so it must run only where the commit verdict can fire' -f $name, $calls, $c.Gpi)) }
+}
+if ($global:PTOdd.Count -gt 0) { $fails.Add('the worker read something this test does not fake: ' + (($global:PTOdd | Select-Object -Unique) -join ', ')) }
+'CASES ' + $cases.Count
+$fails | ForEach-Object { 'FAIL ' + $_ }
+'@
+
+    $r = Invoke-PgfChild -Script $prelude -Payload $payload -Tag 'PT144'
+    Assert-True ($r.Exit -ne 126) ('The page-file worker tried to change the system: ' + $r.Err)
+    Assert-True ($r.Exit -eq 0) ('The classifier run failed (exit {0}): {1}' -f $r.Exit, ($r.Err + ' ' + $r.Out.Trim()))
+    $outLines = @($r.Out -split "`r?`n" | Where-Object { $_ -ne '' })
+    $cnt = @($outLines | Where-Object { $_ -match '^CASES (\d+)$' })
+    Assert-True ($cnt.Count -eq 1 -and [int]($cnt[0].Split(' ')[1]) -ge 39) ('The classifier run did not report its case count - it stopped early: ' + $r.Out.Trim() + ' ' + $r.Err)
+    $bad = @($outLines | Where-Object { $_ -like 'FAIL *' })
+    Assert-True ($bad.Count -eq 0) ('Page-file classifier: ' + ($bad -join ' | '))
+}
+
+# ===============================================================================
+# 145. The page-file DISPLAY is RUN on synthetic records. :_pgfShow and :_pgfRec
+#      are copied out of the script into a driver that is handed a record file by
+#      NAME (an environment variable read late, so the test's own folder - which
+#      holds a "!" on purpose - survives delayed expansion). No worker, no system
+#      access. Every record shape the worker writes, at its widest (8-digit numbers,
+#      a 30-character file name, a 40-character entry), must render within 98
+#      columns and the console width, ASCII only, with nothing on stderr and no
+#      empty-echo line (its local text is captured, not written in English). Every
+#      field lands where it belongs: sentinel records must render to exact lines. Every
+#      verdict code the worker can emit (read out of the worker itself) prints exactly
+#      one [ADVISORY] plus the line saying sincript changes neither setting, the
+#      no-page-file verdicts say "after the next restart" only when told to, an
+#      unknown tag or code prints nothing, and a file without the closing END record,
+#      an empty one or none at all prints only the could-not-read line.
+# ===============================================================================
+Invoke-Test 'Page file display: every record renders within the console, verdicts only when complete' {
+    $cmd = Read-Lines $CmdPath
+    $width = 0
+    foreach ($ln in $cmd) { $mc = [regex]::Match($ln, '(?i)^\s*mode con:\s*cols=(\d+)'); if ($mc.Success) { $width = [int]$mc.Groups[1].Value } }
+    Assert-True ($width -gt 0) 'test 145: no "mode con: cols=N" line - there is no width to measure against.'
+    $limit = [Math]::Min(98, $width - 1)
+    $cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $show = @(Get-BodyLines -Lines $cmd -Label '_pgfShow')
+    $rec  = @(Get-BodyLines -Lines $cmd -Label '_pgfRec')
+    Assert-True ($show.Count -gt 5 -and $rec.Count -gt 60) (':_pgfShow / :_pgfRec did not slice ({0} / {1} lines) - renamed or restructured?' -f $show.Count, $rec.Count)
+    $calls = @([regex]::Matches((($show + $rec) -join "`n"), '(?i)\bcall\s+:(\w+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    Assert-True (@($calls | Where-Object { $_ -ne '_pgfRec' }).Count -eq 0) ('The page-file display now calls {0} - add it to this test''s driver.' -f ($calls -join ', '))
+    $echoLine = '(?i)^\s*(if\s+(/i\s+)?(not\s+)?(defined\s+\S+|exist\s+"[^"]*"|"[^"]*"==\s*"[^"]*")\s+)*echo([\s.:;,(]|$)'
+    $live = @(($show + $rec) | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' -and -not ($_ -match $echoLine -and ($_ -replace '\^.', '') -notmatch '[&|<>]') -and $_ -match '(?i)\bpowershell\b|\breg(\.exe)?\s|\bstart\s+"|\bdel\s' })
+    Assert-True ($live.Count -eq 0) ('test 145: the display code now starts or deletes something - refusing to run it: ' + ($live -join ' | '))
+    $wk = @(Get-PgfWorker -Lines $cmd)
+    Assert-True ($wk.Count -eq 1) 'The page-file worker line is missing or split.'
+    $codes = @([regex]::Matches($wk[0], "'ADV\|([a-z]+)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    Assert-True ($codes.Count -ge 6) ('Only {0} advisory code(s) found in the worker - the record format changed.' -f $codes.Count)
+
+    $tmp = [IO.Path]::GetTempPath()
+    if ($tmp -match '%') { $tmp = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($tmp).ShortPath }
+    $dir = Join-Path $tmp ('PT145_b!ng_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    Assert-True ($dir -notmatch '%') ('test 145 cannot run here: the temp folder path holds a "%" and has no short name ({0}).' -f $dir)
+    [void](New-Item -ItemType Directory -Path $dir)
+    try {
+        $drv = Join-Path $dir 'drv.cmd'
+        $txt = @('@echo off', 'setlocal EnableDelayedExpansion', 'set "_pgfres=!PT_T_REC!"', 'call :_pgfShow', 'exit /b 0', ':_pgfShow') + $show + @(':_pgfRec') + $rec
+        [IO.File]::WriteAllText($drv, (($txt -join "`r`n") + "`r`n"), [Text.Encoding]::ASCII)
+        $runCmd = {
+            param([string]$Script, [string]$Rec)
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $cmdExe; $psi.Arguments = '/d /s /c ""' + $Script + '""'
+            $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+            $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+            $psi.EnvironmentVariables['PT_T_REC'] = $Rec
+            $p = [System.Diagnostics.Process]::Start($psi); $p.StandardInput.Close()
+            # read both streams while waiting, and stop a driver that does not end - a display
+            # stuck in a goto loop would otherwise print until this process runs out of memory
+            $err = $p.StandardError.ReadToEndAsync(); $out = $p.StandardOutput.ReadToEndAsync()
+            if (-not $p.WaitForExit(30000)) { $p.Kill(); throw 'test 145: the display driver did not end within 30 s.' }
+            Assert-True ($err.Result.Trim() -eq '') ('The page-file display wrote to stderr: ' + $err.Result.Trim())
+            ,@($out.Result -split "`r?`n" | Where-Object { $_ -ne '' })
+        }
+        # what an echo with nothing to print shows on this Windows, in its own language
+        $eo = Join-Path $dir 'eo.cmd'
+        [IO.File]::WriteAllText($eo, "@echo off`r`necho`r`n", [Text.Encoding]::ASCII)
+        $echoOff = & $runCmd $eo ''
+        Assert-True ($echoOff.Count -eq 1 -and $echoOff[0].Trim() -ne '') 'test 145: could not capture the text of an empty echo.'
+        $empty = $echoOff[0].Trim()
+        $render = {
+            param([string[]]$Records, [switch]$NoFile)
+            $f = Join-Path $dir ('r{0}.txt' -f [guid]::NewGuid().ToString('N').Substring(0, 6))
+            if ($null -eq $Records) { $Records = @() }
+            if (-not $NoFile) { [IO.File]::WriteAllLines($f, [string[]]$Records, [Text.Encoding]::ASCII) }
+            $o = & $runCmd $drv $f
+            Assert-True (@($o | Where-Object { $_.Trim() -eq $empty }).Count -eq 0) ('The page-file display printed an empty echo ("{0}") - a field it prints was empty.' -f $empty)
+            $wide = @($o | Where-Object { $_.Length -gt $limit })
+            Assert-True ($wide.Count -eq 0) (('Page-file lines wider than {0} columns (the console is {1}): ' -f $limit, $width) + (($wide | ForEach-Object { '{0}: {1}' -f $_.Length, $_.Trim().Substring(0, 30) }) -join ' | '))
+            ,$o
+        }
+
+        # --- every record shape at its widest
+        $n8 = '99999999'; $name30 = 'Z:\' + ('p' * 23) + '.sys'; $raw40 = 'X' * 40
+        $all = @('SET|auto', 'SET|none', 'SET|sys|C', "SET|custom|C|$n8|$n8", "SET|custom|C|1|$n8", "SET|unrec|$raw40", 'SET|absent', 'SET|unreadable',
+                 'USE|none', 'USE|unknown', 'USE|disagree', "USE|$name30|-|-|-", "USE|$name30|$n8|$n8|$n8",
+                 'MEM|-|-|-|-|-', "MEM|-|$n8|-|$n8|-", "MEM|$n8|-|-|$n8|-", "MEM|$n8|-|$n8|$n8|-", "MEM|$n8|$n8|$n8|$n8|$n8",
+                 'DMP|0|0|0', 'DMP|1|1|1', 'DMP|2|0|2', 'DMP|3|0|3', 'DMP|7|0|7', 'DMP|A|0|1', "DMP|X|0|$n8", 'DMP|X|1|-', 'DMP|U|0|-', 'DMP|R|0|-',
+                 'PND|1', 'ADV|none|now', 'ADV|none|next', 'ADV|nodump|C|now', 'ADV|nodump|C|next', "ADV|dumpsize|C|$n8|$n8", "ADV|dumpshort|C|$n8|$n8", "ADV|commit|$n8|$n8", 'ADV|temp') + @($codes | ForEach-Object { 'ADV|' + $_ }) + @('ZZZ|ignored', 'ADV|nosuchcode', 'END|ok')
+        $out = & $render $all
+        Assert-True ($out.Count -gt 60) ('The display printed only {0} line(s) for every record shape - it is not rendering them.' -f $out.Count)
+        Assert-True (@($out | Where-Object { $_ -match '[^\x20-\x7E]' }).Count -eq 0) 'The page-file display printed a non-ASCII character.'
+
+        # --- every record that is not a verdict renders to its exact lines, sentinels in the fields:
+        #     a field in the wrong place, a dropped tag or a lost branch changes the text
+        $exact = [ordered]@{
+            'SET|auto'                     = @('  Setting   : system-managed - Windows picks the drive and the size (the default)')
+            'SET|none'                     = @('  Setting   : NO page file')
+            'SET|sys|Q'                    = @('  Setting   : Q: system-managed size')
+            'SET|custom|Q|1111|2222'       = @('  Setting   : Q: custom, 1111 MB, can grow to 2222 MB')
+            'SET|custom|Q|3333|3333'       = @('  Setting   : Q: custom, fixed at 3333 MB')
+            'SET|unrec|odd entry 1'        = @('  Setting   : unrecognised entry "odd entry 1" - not judged')
+            'SET|absent'                   = @('  Setting   : unrecognised - the registry holds no PagingFiles value; not judged')
+            'SET|unreadable'               = @('  Setting   : could not be read from the registry - not judged')
+            'USE|none'                     = @('  In use    : none right now')
+            'USE|unknown'                  = @('  In use    : could not be read - WMI and the registry both failed')
+            'USE|disagree'                 = @('  In use    : unknown - WMI lists none, but the registry lists a page file in use')
+            'USE|Z:\f.sys|6666|7777|8888'  = @('  In use    : Z:\f.sys  6666 MB, 7777 MB used, peak 8888 MB')
+            'USE|Z:\g.sys|-|-|-'           = @('  In use    : Z:\g.sys  (size not available - WMI did not answer)')
+            'MEM|1111|2222|3333|4444|5555' = @('  RAM       : 1111 MB usable by Windows, 2222 MB installed', '  Committed : 3333 MB of a 4444 MB limit (RAM plus page files), peak 5555 MB')
+            'MEM|1111|-|3333|4444|-'       = @('  RAM       : 1111 MB usable by Windows', '  Committed : 3333 MB of a 4444 MB limit (RAM plus page files)')
+            'MEM|-|2222|-|4444|-'          = @('  RAM       : 2222 MB installed (how much of it Windows can use is not available)', '  Committed : the limit is 4444 MB (RAM plus page files); the amount in use is not available')
+            'MEM|-|-|3333|-|-'             = @('  RAM       : not available', '  Committed : not available')
+            'DMP|0|0|0'                    = @('  Crash dump: off - Windows writes no memory dump after a blue screen')
+            'DMP|1|0|1'                    = @('  Crash dump: complete memory dump (CrashDumpEnabled=1)')
+            'DMP|2|0|2'                    = @('  Crash dump: kernel memory dump (CrashDumpEnabled=2)')
+            'DMP|3|0|3'                    = @('  Crash dump: small memory dump (CrashDumpEnabled=3)')
+            'DMP|7|1|7'                    = @('  Crash dump: automatic memory dump, the Windows default (CrashDumpEnabled=7)', '              plus a dedicated dump file (DedicatedDumpFile is set)')
+            'DMP|A|0|1'                    = @('  Crash dump: active memory dump (CrashDumpEnabled=1 with FilterPages=1)')
+            'DMP|X|0|4242'                 = @('  Crash dump: unrecognised value CrashDumpEnabled=4242 - not judged')
+            'DMP|X|0|-'                    = @('  Crash dump: CrashDumpEnabled holds an unrecognised value - not judged')
+            'DMP|U|0|-'                    = @('  Crash dump: CrashDumpEnabled is not set - not judged')
+            'DMP|R|0|-'                    = @('  Crash dump: the CrashControl key could not be read - not judged')
+            'PND|1'                        = @('  [i] The setting differs from the page file(s) in use: a change is waiting for a restart,', '      or Windows could not create a configured file. The figures above are for the files in use.')
+        }
+        $sent = & $render (@($exact.Keys) + @('END|ok'))
+        $want = @($exact.Values | ForEach-Object { $_ })
+        Assert-True (($sent -join "`n") -ceq ($want -join "`n")) ("The page-file display lost a record, put a field in the wrong place or changed a line. Got:`n" + ($sent -join "`n"))
+        $adv = (& $render @('ADV|dumpsize|Q|11111111|22222222', 'ADV|dumpshort|Q|33333333|44444444', 'ADV|commit|55555555|66666666', 'END|ok')) -join "`n"
+        foreach ($re in @('on Q: is set to at most 22222222 MB, but', 'needs at least 11111111 MB there', 'on Q: is set to at most 44444444 MB\. Microsoft', '\s33333333 MB for a complete memory dump', 'peaked at 55555555 MB', 'its 66666666 MB limit')) {
+            Assert-True ($adv -match $re) ('A size verdict put a number in the wrong place (no "{0}"): {1}' -f $re, $adv)
+        }
+
+        # --- every verdict code prints one [ADVISORY] and the where-to-change-it line
+        foreach ($c in $codes) {
+            $one = & $render @("ADV|$c|C|1|2", 'END|ok')
+            Assert-True (@($one | Where-Object { $_ -match '^\s+\[ADVISORY\] ' }).Count -eq 1) ("The worker can emit ADV|$c but the display prints no [ADVISORY] for it - a verdict nobody sees.")
+            Assert-True (@($one | Where-Object { $_ -match '^\s+\[i\] sincript changes neither setting' }).Count -eq 1) ("ADV|$c printed without the line saying sincript does not change the setting.")
+        }
+        # --- the no-page-file verdicts speak of the next restart exactly when the worker says so
+        foreach ($pair in @(@('ADV|none|now', 'ADV|none|next', 'No page file: Windows caps'), @('ADV|nodump|Q|now', 'ADV|nodump|Q|next', 'the Windows drive Q: has no page file'))) {
+            $now = (& $render @($pair[0], 'END|ok')) -join "`n"
+            $nxt = & $render @($pair[1], 'END|ok')
+            Assert-True ($now.Contains($pair[2]) -and $now -notmatch '(?i)next restart') ('{0} does not describe the page file in use now: {1}' -f $pair[0], $now)
+            Assert-True (@($nxt | Where-Object { $_ -match '^\s+\[ADVISORY\] ' }).Count -eq 1 -and ($nxt -join "`n") -match '(?i)after the next restart' -and -not ($nxt -join "`n").Contains($pair[2])) ('{0} does not say the change takes effect after the next restart - it contradicts the In use line above it: {1}' -f $pair[1], ($nxt -join ' | '))
+        }
+
+        # --- unknown records print nothing; an unfinished, empty or missing file prints one line
+        $none = & $render @('SET|auto', 'USE|none', 'MEM|1|-|1|2|-', 'DMP|7|0|7', 'ZZZ|x', 'ADV|nosuchcode', 'END|ok')
+        Assert-True ($none.Count -eq 5) ('The display printed {0} line(s) for four known records (five lines) and two unknown ones: {1}' -f $none.Count, ($none -join ' | '))
+        Assert-True (@($none | Where-Object { $_ -match '\[ADVISORY\]|\[i\] sincript|nosuchcode|ZZZ' }).Count -eq 0) 'An unknown tag or advisory code printed something - only a known record may.'
+        foreach ($bad in @(@{ n = 'a file without END|ok'; r = @('SET|none', 'USE|none', 'ADV|none|now') }, @{ n = 'an empty file'; r = @() })) {
+            $cut = & $render $bad.r
+            Assert-True ($cut.Count -eq 1 -and $cut[0] -match 'Could not read the page-file state') ('{0} must print only the could-not-read line, nothing judged - got: {1}' -f $bad.n, ($cut -join ' | '))
+        }
+        $gone = & $render @() -NoFile
+        Assert-True ($gone.Count -eq 1 -and $gone[0] -match 'Could not read the page-file state') ('A missing result file must print only the could-not-read line - got: ' + ($gone -join ' | '))
+    }
+    finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# ===============================================================================
+# 146. The worker's real C# compile and GetPerformanceInfo call are RUN once. Test
+#      144 pre-loads a stand-in for the compiled type, so it never compiles the
+#      DllImport, never calls K32GetPerformanceInfo and reads the buffer at the
+#      offsets the stand-in itself wrote: a broken import, quoting, BOOL return or
+#      offset would only turn the peak into "-" and silence the commit verdict. Here
+#      the payload (allowlisted first, as in 144) runs in a child Windows PowerShell
+#      with no stand-in and with the registry and WMI faked to "no page file" and
+#      impossible sentinel sizes, and every writer except Add-Type blocked (exit
+#      126). The compile must happen; the limit and the charge must be GetPerformance-
+#      Info's, not the WMI sentinels; the limit must match Win32_OperatingSystem's
+#      TotalVirtualMemorySize within 2%; and the peak must be the one this harness
+#      reads itself, through psapi's GetPerformanceInfo and a declared struct - a
+#      second, independent reading. The peak only grows, so the worker's must lie
+#      between the harness's readings before and after it. The commit verdict must
+#      appear exactly when that peak is at 90% of the limit. Both calls only read.
+# ===============================================================================
+Invoke-Test 'Page file worker: the real GetPerformanceInfo compile and call answer' {
+    $cmd = Read-Lines $CmdPath
+    $hits = @(Get-PgfWorker -Lines $cmd)
+    Assert-True ($hits.Count -eq 1) ('Expected one page-file worker line, found {0}.' -f $hits.Count)
+    $m = [regex]::Match($hits[0], '-Command "(.*)"\s*$')
+    Assert-True $m.Success 'The page-file worker lost the -Command "..." shape this test extracts.'
+    $payload = $m.Groups[1].Value.Replace('%%', '%')
+    $probs = @(Get-PgfPayloadProblems -Payload $payload)
+    Assert-True ($probs.Count -eq 0) ('test 146 refuses to run a page-file worker that is off its read-only allowlist: ' + ($probs -join ' | '))
+    # the harness's own reading: psapi's export (the worker uses kernel32's K32 one), a declared
+    # PERFORMANCE_INFORMATION struct (the worker reads raw offsets), whole MB rounded down as the
+    # worker rounds them
+    if (-not ('PT146.Perf' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+namespace PT146 { public static class Perf {
+    [StructLayout(LayoutKind.Sequential)] public struct PI { public uint cb; public UIntPtr CommitTotal, CommitLimit, CommitPeak, PhysicalTotal, PhysicalAvailable, SystemCache, KernelTotal, KernelPaged, KernelNonpaged, PageSize; public uint HandleCount, ProcessCount, ThreadCount; }
+    [DllImport("psapi.dll")] static extern bool GetPerformanceInfo(out PI pi, uint cb);
+    public static ulong[] Mb() { PI p; if (!GetPerformanceInfo(out p, (uint)Marshal.SizeOf(typeof(PI)))) return null; ulong s = p.PageSize.ToUInt64(); return new ulong[] { p.CommitTotal.ToUInt64() * s / 1048576, p.CommitLimit.ToUInt64() * s / 1048576, p.CommitPeak.ToUInt64() * s / 1048576 }; }
+} }
+'@
+    }
+    $pa = [PT146.Perf]::Mb()
+    $limA = [double](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).TotalVirtualMemorySize / 1024
+    Assert-True ($null -ne $pa -and $pa[2] -gt 0) 'test 146: the harness''s own GetPerformanceInfo call failed - there is nothing to compare the worker with.'
+
+    $prelude = @'
+$global:PTOdd = New-Object System.Collections.Generic.List[string]
+function global:Get-ItemProperty {
+    [CmdletBinding()] param([string]$LiteralPath, [string[]]$Name)
+    if ($LiteralPath -eq 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management') { return [pscustomobject]@{ PagingFiles = [string[]]@('') } }
+    if ($LiteralPath -eq 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl') { return [pscustomobject]@{ CrashDumpEnabled = [int]0 } }
+    $global:PTOdd.Add('key ' + $LiteralPath)
+}
+function global:Get-CimInstance {
+    [CmdletBinding()] param([Parameter(Position = 0)][string]$ClassName)
+    switch ($ClassName) {
+        'Win32_PageFileUsage'   { return }
+        'Win32_OperatingSystem' { return [pscustomobject]@{ TotalVisibleMemorySize = [uint64](5 * 1024); TotalVirtualMemorySize = [uint64](7 * 1024); FreeVirtualMemory = [uint64](4 * 1024) } }
+        'Win32_PhysicalMemory'  { return @([pscustomobject]@{ Capacity = [uint64](6 * 1MB) }) }
+        default { $global:PTOdd.Add('class ' + $ClassName) }
+    }
+}
+foreach ($n in @('Set-ItemProperty','New-ItemProperty','Remove-ItemProperty','Clear-ItemProperty','Rename-ItemProperty','Copy-ItemProperty','Move-ItemProperty','Remove-Item','New-Item','Clear-Item','Copy-Item','Move-Item','Rename-Item','Set-Content','Add-Content','Clear-Content','Set-CimInstance','New-CimInstance','Remove-CimInstance','Invoke-CimMethod','Get-WmiObject','Set-WmiInstance','Invoke-WmiMethod','Remove-WmiObject','Invoke-Expression','Invoke-Item','Start-Process','Stop-Process','reg','reg.exe','wmic','wmic.exe','cmd','cmd.exe','powershell','powershell.exe','Set-Item')) {
+    Set-Item -Path ('function:global:' + $n) -Value ([scriptblock]::Create("[Console]::Error.WriteLine('test 146: the page-file worker tried to run $n'); [Environment]::Exit(126)"))
+}
+if ('PTPf.N' -as [type]) { 'FAIL the compiled type was there before the worker ran'; exit 3 }
+$env:PT_PGF_RES = Join-Path ([IO.Path]::GetTempPath()) ('PT146_{0}.txt' -f [guid]::NewGuid().ToString('N'))
+& ([scriptblock]::Create($env:PT_T_PAYLOAD))
+if (-not ('PTPf.N' -as [type])) { 'FAIL the worker did not compile its GetPerformanceInfo import' }
+if (Test-Path -LiteralPath $env:PT_PGF_RES) { [IO.File]::ReadAllLines($env:PT_PGF_RES) | ForEach-Object { 'REC ' + $_ }; [IO.File]::Delete($env:PT_PGF_RES) }
+if ($global:PTOdd.Count -gt 0) { 'FAIL the worker read something this test does not fake: ' + (($global:PTOdd | Select-Object -Unique) -join ', ') }
+'DONE'
+'@
+
+    $r = Invoke-PgfChild -Script $prelude -Payload $payload -Tag 'PT146'
+    $pb = [PT146.Perf]::Mb()
+    Assert-True ($r.Exit -ne 126) ('The page-file worker tried to change the system: ' + $r.Err)
+    Assert-True ($r.Exit -eq 0) ('The real GetPerformanceInfo run failed (exit {0}): {1}' -f $r.Exit, ($r.Err + ' ' + $r.Out.Trim()))
+    $lines = @($r.Out -split "`r?`n" | Where-Object { $_ -ne '' })
+    Assert-True (@($lines | Where-Object { $_ -eq 'DONE' }).Count -eq 1) ('The real GetPerformanceInfo run stopped early: ' + ($lines -join ' | ') + ' ' + $r.Err)
+    $bad = @($lines | Where-Object { $_ -like 'FAIL *' })
+    Assert-True ($bad.Count -eq 0) ('Page-file worker, real run: ' + ($bad -join ' | '))
+    $recs = @($lines | Where-Object { $_ -like 'REC *' } | ForEach-Object { $_.Substring(4) })
+    Assert-True ($recs.Count -gt 0 -and $recs[-1] -eq 'END|ok') ('The real run wrote no complete answer: ' + ($recs -join ' | '))
+    $mem = @($recs | Where-Object { $_ -like 'MEM|*' })
+    Assert-True ($mem.Count -eq 1) ('The real run wrote {0} MEM records.' -f $mem.Count)
+    $f = $mem[0].Split('|')
+    Assert-True ($f.Count -eq 6 -and $f[1] -eq '5' -and $f[2] -eq '6') ('The MEM record does not carry the faked RAM figures where the display reads them: ' + $mem[0])
+    Assert-True ($f[5] -match '^\d+$' -and [int64]$f[5] -gt 0) ('GetPerformanceInfo gave no commit peak - the compile, the import or the call is broken, and the commit verdict can never fire: ' + $mem[0])
+    Assert-True ($f[4] -match '^\d+$' -and $f[4] -ne '7' -and $f[3] -match '^\d+$' -and $f[3] -ne '3') ('The commit limit and charge are still the WMI sentinels (7 / 3 MB) - GetPerformanceInfo''s answer was not used: ' + $mem[0])
+    $limB = [double](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).TotalVirtualMemorySize / 1024
+    $lo = [Math]::Min($limA, $limB) * 0.98; $hi = [Math]::Max($limA, $limB) * 1.02
+    Assert-True ([double]$f[4] -ge $lo -and [double]$f[4] -le $hi) ('GetPerformanceInfo''s commit limit ({0} MB) is not Win32_OperatingSystem''s ({1:N0}-{2:N0} MB) - the buffer is read at the wrong offsets or scaled by the wrong page size.' -f $f[4], $limA, $limB)
+    Assert-True ($null -ne $pb -and [uint64]$f[5] -ge $pa[2] -and [uint64]$f[5] -le $pb[2]) ('The worker read a commit peak of {0} MB; this harness read {1} MB before it and {2} MB after it, and the peak only grows - the worker reads it from the wrong place.' -f $f[5], $pa[2], $(if ($pb) { $pb[2] } else { '?' }))
+    Assert-True ([int64]$f[5] -ge [int64]$f[3] -and [int64]$f[3] -le [int64]$f[4]) ('Commit charge {0} MB, peak {1} MB, limit {2} MB: the peak is below the charge or the charge above the limit - the fields are read from the wrong places.' -f $f[3], $f[5], $f[4])
+    $want = [int64]$f[5] * 10 -ge [int64]$f[4] * 9
+    $got = @($recs | Where-Object { $_ -eq ('ADV|commit|{0}|{1}' -f $f[5], $f[4]) }).Count -eq 1
+    Assert-True ($got -eq $want) ('The commit verdict is {0} for a real peak of {1} of {2} MB.' -f $(if ($got) { 'present' } else { 'missing' }), $f[5], $f[4])
+    Assert-True (@($recs | Where-Object { $_ -eq 'ADV|none|now' }).Count -eq 1) ('The faked no-page-file machine did not get its no-page-file verdict: ' + ($recs -join ' | '))
+}
+
+# ===============================================================================
+# 147. The crash report is wired into System tools and it only READS. Its three
+#      workers are single -Command lines cmd can hold (8191) and delayed expansion
+#      cannot alter; they read events through EventLogReader - never Get-WinEvent,
+#      whose -FilterHashtable answers an unreadable log with NoMatchingEventsFound,
+#      the same answer as "nothing happened" (measured under a basic-user token) -
+#      and never the rendered message text. Each log's oldest record is read before
+#      the main query, and the main queries run newest first, so an event cap keeps
+#      the latest events. SCM 7045's ImagePath (a service command line can hold a
+#      secret) is used for nothing but the .sys test, and ServiceType (localized
+#      text) is not read at all. WHEA events are classified by ID in the collector
+#      alone (id 29 is fatal at the warning level), and its query keeps WHEA levels
+#      1-3: an informational record (level 4, id 3) would fail closed into
+#      UNCORRECTED. The summary and timeline never look at a level, share one Ntfs
+#      98 test, and do not repeat the cap.
+# ===============================================================================
+Invoke-Test 'Crash report is wired into System tools and only reads' {
+    $cmd = Read-Lines $CmdPath
+    $mt = @(Get-BodyLines -Lines $cmd -Label 'MenuTools')
+    Assert-True (($mt -join "`n") -match '(?m)^echo\s+3\.\s+Crash \^& hardware-error report') ':MenuTools no longer lists the crash report as item 3.'
+    $ask = @(Get-BodyLines -Lines $cmd -Label 'MenuTools_ask' -CodeOnly) -join "`n"
+    Assert-True ($ask -match '(?m)^if "!sel!"=="3" goto CrashReport\s*$') ':MenuTools_ask does not route 3 -> CrashReport.'
+
+    $s = [Array]::IndexOf($cmd, ':CrashReport'); $e = [Array]::IndexOf($cmd, ':CrashTimeline')
+    Assert-True ($s -gt 0 -and $e -gt $s) 'The crash report section (:CrashReport .. :CrashTimeline) is missing or reordered.'
+    $j = $e + 1; while ($j -lt $cmd.Count -and $cmd[$j] -notmatch '^:\w') { $j++ }
+    $sec = @($cmd[$s..($j - 1)])
+    $code = @($sec | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' })
+    $noecho = @($code | Where-Object { $_.Trim() -notmatch '^(?i)echo\b' })
+    Assert-True ($code.Count -gt 100) "The crash report section is only $($code.Count) code lines - the slice is wrong."
+    $bad = @($noecho | Where-Object { $_ -match '(?i)\b(reg\s+(add|delete|import)|wevtutil|call :SafeReg\w*|Clear-EventLog|Limit-EventLog|Remove-Item|Set-ItemProperty|New-ItemProperty|Remove-ItemProperty|Set-Content|Stop-Process|Start-Process|sc\s+config|schtasks|bcdedit|powercfg)\b' })
+    Assert-True ($bad.Count -eq 0) ('The read-only crash report runs something that changes the system: ' + (($bad | Select-Object -First 2 | ForEach-Object { $_.Trim().Substring(0, [Math]::Min(90, $_.Trim().Length)) }) -join ' | '))
+
+    $workers = [ordered]@{ 'PT_CR_OUT' = 'CrashCollect'; 'PT_CR_SUM' = 'CrashSummary'; 'PT_CR_LT' = 'CrashTimeline' }
+    $pay = @{}
+    foreach ($k in $workers.Keys) {
+        $lab = $workers[$k]
+        $b = @(Get-BodyLines -Lines $cmd -Label $lab -CodeOnly)
+        $w = @($b | Where-Object { $_ -match '^start "" /min /wait powershell -NoProfile -Command "' })
+        Assert-True ($w.Count -eq 1) (":$lab should start exactly one PowerShell worker; found $($w.Count).")
+        Assert-True ($w[0].Contains('$env:' + $k)) (":$lab worker does not use `$env:$k.")
+        Assert-True ($w[0].Length -lt 8000) (":$lab worker line is $($w[0].Length) characters; cmd refuses a line over 8191, so keep headroom.")
+        $raw = [regex]::Match($w[0], '-Command "(.*)"\s*$').Groups[1].Value
+        Assert-True ($raw.Length -gt 1000) (":$lab payload was not extracted.")
+        Assert-True (-not $raw.Contains('"') -and -not $raw.Contains('!') -and -not $raw.Replace('%%', '').Contains('%') -and -not $raw.Contains('#')) (":$lab payload holds a double quote, a '!', a single '%' or a '#' - cmd would change the first three before PowerShell saw them, and a '#' would comment out the rest of the one-line payload.")
+        Assert-True ($raw -match '^\$ErrorActionPreference=''SilentlyContinue''; if\(-not \$env:[^)]*\)\{ exit 2 \};' -and $raw -match ('^[^;]*; if\([^)]*-not \$env:' + $k + '\b')) (":$lab payload no longer refuses to run without its hand-off variable - an unset path makes a cmdlet prompt in a minimized window (pitfall 45).")
+        Assert-True (@($b | Where-Object { $_ -match ('(^|& )set "' + $k + '="') }).Count -ge 1) (":$lab does not clear $k after the child.")
+        $pay[$lab] = $raw
+    }
+
+    $col = $pay['CrashCollect']
+    Assert-True ($col -match 'System\.Diagnostics\.Eventing\.Reader\.EventLogReader') 'The collector no longer uses EventLogReader.'
+    Assert-True ($col -notmatch '(?i)Get-WinEvent|Get-EventLog|\.Message\b|FormatDescription|wevtutil') 'The collector reads events through Get-WinEvent / Get-EventLog / message text again: -FilterHashtable reports an unreadable log as NoMatchingEventsFound (measured), and message text is localized and slow.'
+    Assert-True ($col -match '\[UnauthorizedAccessException\]' -and $col -match 'EventLogNotFoundException') 'The collector no longer tells "access refused" and "log missing" apart from a clean read.'
+    $probe = $col.IndexOf("`$r=xRd `$l '*'; "); $main = $col.IndexOf('Kernel-Power')
+    Assert-True ($probe -ge 0 -and $main -gt $probe) 'The collector does not read each log''s oldest record (forward, no reverse flag) before the main query - a failed read could then look like "nothing found".'
+    Assert-True ($col.Contains('if($v){ $q.ReverseDirection=$true }') -and ([regex]::Matches($col, [regex]::Escape("+`$w+']]') 1;"))).Count -eq 2) 'The main System and Application queries no longer read newest first - at the event cap the LATEST events would be the ones dropped.'
+    Assert-True ($col.Contains("xD `$x 'ImagePath'") -and ([regex]::Matches($col, 'ImagePath')).Count -eq 1) 'SCM 7045 ImagePath is used for more than the .sys test - a service command line can hold a secret and must never be written out.'
+    Assert-True ($col -notmatch "'ServiceType'|'StartType'") 'The collector reads ServiceType / StartType - those fields are localized text (measured on a ru-RU machine).'
+    Assert-True ($col.Contains('$wco=@(2,17,19,21,23,25,27,28,41,43,45,47,49)') -and $col.Contains('$wcpu=@(18,19,28,29)') -and $col.Contains("`$A='uncorrected'; if(`$wco -contains `$id){ `$A='corrected' }")) 'The collector no longer classifies WHEA events by the manifest''s corrected IDs, failing closed to "uncorrected" (id 29 is fatal at the warning level).'
+    Assert-True ($col.Contains("('(Provider[@Name='+`$ap+'Microsoft-Windows-WHEA-Logger'+`$ap+'] and (Level=1 or Level=2 or Level=3))')")) 'The collector''s WHEA query no longer keeps levels 1-3 only - an informational record (level 4, id 3 "A hardware event has occurred") would fail closed into UNCORRECTED and raise the hardware-error hint.'
+    foreach ($lab in 'CrashSummary', 'CrashTimeline') {
+        Assert-True ($pay[$lab] -notmatch '\bLvl\b') (":$lab reads the event level - WHEA must be classified by ID (in the collector), and id 29 is a fatal error logged at level 3.")
+        Assert-True ($pay[$lab].Contains("(`$_.A -match '^[0-9]+`$' -and `$_.A -ne '0')")) (":$lab no longer uses the shared Ntfs 98 test - the summary and the timeline would disagree about which 98 events are corruption.")
+    }
+    $cm = [regex]::Matches($col, '\$cap=([0-9]+);')
+    Assert-True ($cm.Count -eq 1) 'The collector should set its event cap exactly once.'
+    $capv = $cm[0].Groups[1].Value
+    Assert-True ([int]$capv -le 30000) ("The event cap is $capv; the summary and timeline were timed at 2-4 s each on 30,000 rows and up to 5.7 s on 50,000 - raise it only after timing them again.")
+    Assert-True (-not $pay['CrashSummary'].Contains($capv) -and -not $pay['CrashTimeline'].Contains($capv) -and @($noecho | Where-Object { $_.Contains($capv) -and $_ -notmatch '\$env:PT_CR_OUT' }).Count -eq 0) ("The cap value $capv is repeated outside the collector - it is handed on in the W row, so a second copy can only drift (pitfall 28).")
+    Assert-True ($col.Contains("-notlike 'FullReg_*'") -and $col -notmatch '\.Extension -eq') 'The undo-file count no longer skips FullReg_* exports - a full registry backup changes nothing, yet would read as "sincript made changes".'
+
+    $tmps = @($sec | Where-Object { $_ -match 'set "_cr\w+=!TEMP!\\pt_cr' })
+    Assert-True ($tmps.Count -ge 6 -and @($tmps | Where-Object { $_ -notmatch '%RANDOM%%RANDOM%' }).Count -eq 0) 'Crash report temp files must be per-call (%RANDOM%%RANDOM%).'
+}
+
+# ===============================================================================
+# 148. The classification is RUN on synthetic events. The summary and timeline
+#      payloads are taken from the script and fed hand-written events files (the
+#      same CSV the collector writes). A: every category; one crash's Kernel-Power
+#      41 + WER 1001 (+ EventLog 6008) counted ONCE; a 41 with no code next to a
+#      WER 1001 that has one is a bugcheck, not a "no code" restart; WHEA id 29 is
+#      UNCORRECTED although logged at level 3 (the collector's class, never the
+#      level); only Processor Core ids count as machine checks; a healthy or
+#      state-less Ntfs 98 is ignored by both workers; a 2004 without its numbers
+#      says "low virtual memory". B: an unreadable System or Application log is
+#      never "None found" / "none", and its line - every reason, the longer log
+#      name - ends whole (the worker cuts lines at 96, so a width check alone
+#      cannot see a cut). C: a log holding exactly ONE event - a function
+#      returning @(x) unrolls to x, and a lone PSCustomObject has no .Count in
+#      PowerShell 5.1, so a single Kernel-Power 41 once read as "None found:
+#      unexpected restarts" (measured). D: nothing outside the week before the
+#      first crash is blamed - a corrected WHEA error is not a crash, and a driver
+#      10 days before it or after it, a service, a sincript session after it or
+#      one that wrote no undo file name nothing. E: a capped read says so, with
+#      the cap from the W row, and bounds "None found" by the days actually read;
+#      an Application log the System log left no room for under the shared cap
+#      says NOT READ, never "stopped at" or "none".
+# ===============================================================================
+Invoke-Test 'Crash report classification is honest on synthetic events (run)' {
+    $cmd = Read-Lines $CmdPath
+    $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $psExe)) { $psExe = (Get-Process -Id $PID).Path }
+    $payload = @{}
+    foreach ($key in 'PT_CR_SUM', 'PT_CR_LT') {
+        $hits = @($cmd | Where-Object { $_.TrimStart() -notmatch '^(?i)rem\b' -and $_.Contains('-Command "') -and $_.Contains('$env:' + $key) })
+        Assert-True ($hits.Count -eq 1) ('Expected one worker line using $env:{0}, found {1}.' -f $key, $hits.Count)
+        $m = [regex]::Match($hits[0], '-Command "(.*)"\s*$')
+        Assert-True $m.Success ('The {0} worker lost the -Command "..." shape this test extracts.' -f $key)
+        $payload[$key] = $m.Groups[1].Value.Replace('%%', '%')
+    }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('PT148_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void](New-Item -ItemType Directory -Path $tmp)
+    $run = {
+        param([string]$Name, [string[]]$Rows, [switch]$SummaryOnly)
+        $in = Join-Path $tmp ($Name + '_ev.txt')
+        [IO.File]::WriteAllLines($in, [string[]](@('"K","T","Log","Prov","Id","Lvl","A","B","C"') + $Rows), [Text.Encoding]::ASCII)
+        $envs = @{ PT_CR_IN = $in; PT_CR_SUM = (Join-Path $tmp ($Name + '_sum.txt')); PT_CR_STAT = (Join-Path $tmp ($Name + '_stat.txt')); PT_CR_LT = (Join-Path $tmp ($Name + '_lt.txt')); PT_CR_TL = (Join-Path $tmp ($Name + '_tl.txt')) }
+        $keys = @('PT_CR_SUM', 'PT_CR_LT'); if ($SummaryOnly) { $keys = @('PT_CR_SUM') }
+        foreach ($key in $keys) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $psExe; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+            $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+            $psi.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload[$key]))
+            foreach ($k in $envs.Keys) { $psi.EnvironmentVariables[$k] = $envs[$k] }
+            $p = [Diagnostics.Process]::Start($psi); $p.StandardInput.Close(); $null = $p.StandardError.ReadToEndAsync(); $null = $p.StandardOutput.ReadToEnd()
+            if (-not $p.WaitForExit(60000)) { $p.Kill(); throw "test 148: the $key worker did not finish within 60 s." }
+            Assert-True ($p.ExitCode -eq 0) "test 148 ($Name): the $key worker exited $($p.ExitCode)."
+        }
+        $st = @{}
+        foreach ($l in [IO.File]::ReadAllLines($envs['PT_CR_STAT'])) { $i = $l.IndexOf('='); if ($i -gt 0) { $st[$l.Substring(0, $i)] = $l.Substring($i + 1) } }
+        $sum = [IO.File]::ReadAllLines($envs['PT_CR_SUM'])
+        if ($SummaryOnly) { return [pscustomobject]@{ Sum = ($sum -join "`n"); All = @($sum); Tl = ''; St = $st } }
+        [pscustomobject]@{ Sum = ($sum -join "`n"); All = @($sum + [IO.File]::ReadAllLines($envs['PT_CR_LT']) + [IO.File]::ReadAllLines($envs['PT_CR_TL'])); Tl = ([IO.File]::ReadAllLines($envs['PT_CR_TL']) -join "`n"); St = $st }
+    }
+    $MW = 'Microsoft-Windows-'
+    $W = '"W","2026-01-31 12:00","","","","","30","20260131_1200","0"'
+    $okS = '"L","2025-12-01 00:00","System","","","","ok","30",""'
+    $okA = '"L","2025-12-01 00:00","Application","","","","ok","30",""'
+    $narrow = { param($r, $tag) Assert-True (@($r.All | Where-Object { $_.Length -gt 96 -or $_ -match '[^\x20-\x7e]' }).Count -eq 0) "${tag}: a report line is wider than 96 columns or not plain ASCII." }
+    try {
+        # ---- A: every category; one crash logged three ways; a paired no-code 41; WHEA 29 at level 3
+        $r = & $run 'A' @($W, $okS, $okA,
+            '"E","2026-01-18 09:00:00","System","Service Control Manager","7045","4","SomeDrv","driver",""',
+            '"S","2026-01-19 21:00:00","","sincript","","","3","",""',
+            ('"E","2026-01-20 10:00:05","System","' + $MW + 'Kernel-Power","41","1","0x00000124","0","WHEA_UNCORRECTABLE_ERROR"'),
+            ('"E","2026-01-20 10:00:07","System","' + $MW + 'WHEA-Logger","18","2","uncorrected","cpu",""'),
+            '"E","2026-01-20 10:00:10","System","EventLog","6008","2","","",""',
+            ('"E","2026-01-20 10:01:00","System","' + $MW + 'WER-SystemErrorReporting","1001","2","0x00000124","","WHEA_UNCORRECTABLE_ERROR"'),
+            ('"E","2026-01-21 11:00:00","System","' + $MW + 'WHEA-Logger","19","3","corrected","cpu",""'),
+            ('"E","2026-01-21 11:05:00","System","' + $MW + 'WHEA-Logger","19","3","corrected","cpu",""'),
+            ('"E","2026-01-21 12:00:00","System","' + $MW + 'WHEA-Logger","17","3","corrected","",""'),
+            ('"E","2026-01-22 08:00:00","System","' + $MW + 'Kernel-Power","41","1","","133000000000000000",""'),
+            '"E","2026-01-23 20:00:00","System","Display","4101","3","nvlddmkm","",""',
+            '"E","2026-01-24 01:00:00","System","disk","153","3","Harddisk1","",""',
+            '"E","2026-01-24 01:01:00","System","storahci","129","3","RaidPort0","",""',
+            '"E","2026-01-24 01:02:00","System","disk","7","2","Harddisk1","",""',
+            ('"E","2026-01-25 09:00:00","System","' + $MW + 'Kernel-Power","41","1","","0",""'),
+            '"E","2026-01-25 09:00:30","System","Ntfs","55","2","C:","",""',
+            ('"E","2026-01-25 09:00:31","System","' + $MW + 'Ntfs","98","4","0","C:",""'),
+            ('"E","2026-01-25 09:00:32","System","' + $MW + 'Ntfs","98","4","2","D:",""'),
+            ('"E","2026-01-25 09:00:33","System","' + $MW + 'Ntfs","98","4","","E:",""'),
+            ('"E","2026-01-26 03:00:00","System","' + $MW + 'WHEA-Logger","29","3","uncorrected","cpu",""'),
+            ('"E","2026-01-26 14:00:00","System","' + $MW + 'Resource-Exhaustion-Detector","2004","3","17179869184","17448304640",""'),
+            ('"E","2026-01-26 15:00:00","System","' + $MW + 'Resource-Exhaustion-Detector","2004","3","","",""'),
+            '"E","2026-01-27 07:00:00","System","volmgr","46","2","","",""',
+            ('"E","2026-01-27 20:00:00","System","' + $MW + 'Kernel-Power","41","1","","0",""'),
+            ('"E","2026-01-27 20:01:00","System","' + $MW + 'WER-SystemErrorReporting","1001","2","0x0000009F","","DRIVER_POWER_STATE_FAILURE"'),
+            '"E","2026-01-28 07:00:00","System","EventLog","6008","2","","",""',
+            '"E","2026-01-29 18:00:00","Application","Application Error","1000","2","game.exe","nvwgf2umx.dll","c0000005"',
+            '"E","2026-01-29 18:30:00","Application","Application Error","1000","2","game.exe","nvwgf2umx.dll","c0000005"')
+        $s = $r.Sum
+        Assert-True ($s -match '(?m)^  Unexpected restarts\s+5  2 bugcheck, 1 power button held, 1 no code, 1 lone 6008$') "A: 4 Kernel-Power 41 + 1 lone 6008 should be 5 restarts - the 6008 logged with a 41 is the same restart, and the code-less 41 next to a coded WER 1001 is a bugcheck. Got:`n$s"
+        $bl = @($r.Sum -split "`n" | Where-Object { $_ -match '^  Bugchecks \(blue screens\)' })
+        Assert-True ($bl.Count -eq 1 -and $bl[0] -match '\s2  0x(00000124 WHEA_UNCORRECTABLE_ERROR|0000009F DRIVER_POWER_STATE_FAILURE), 0x' -and $bl[0].Contains('0x00000124') -and $bl[0].Contains('0x0000009F')) ('A: one crash''s 41 and 1001 must count once, each bugcheck shown by code and named from it (the line is cut at 96 columns). Got: ' + ($bl -join ' | '))
+        Assert-True ($s -match '(?m)^  Hardware errors, UNCORRECTED\s+2  WHEA-Logger (id 18, id 29|id 29, id 18)$') "A: WHEA id 29 is a fatal error logged at level 3 - it must be counted as UNCORRECTED next to id 18 (the class, not the level). Got:`n$s"
+        Assert-True ($s -match '(?m)^  Hardware errors, corrected\s+3  WHEA-Logger id 19 x2, id 17$') 'A: corrected WHEA errors, raw ids with counts.'
+        Assert-True ($s -match '(?m)^  Display driver resets \(TDR\)\s+1  Display 4101: nvlddmkm$') 'A: Display 4101 counted with its driver name.'
+        Assert-True ($s -match '(?m)^  Disk retries / resets\s+2  ' -and $s -match '(?m)^  Disk bad blocks\s+1  disk 7: Harddisk1$') 'A: disk 153 + storahci 129 are retries/resets; disk 7 is a bad block.'
+        Assert-True ($s -match '(?m)^  NTFS corruption reported\s+2  ') 'A: Ntfs 55 and a non-zero Ntfs 98 count; a state-0 ("volume is healthy") or state-less 98 must not.'
+        Assert-True ($s -match '(?m)^  Low virtual memory\s+2  ' -and $s -match '(?m)^  Crash-dump setup failed\s+1  volmgr 46$') 'A: both 2004 events and volmgr 46 counted.'
+        Assert-True ($s -notmatch 'None found') 'A: a None-found line appeared although every category has events.'
+        Assert-True ($s -match '(?m)^  App crashes \(Application log\)\s+2  game\.exe / nvwgf2umx\.dll x2$') 'A: app crashes grouped by app / module.'
+        $st = $r.St
+        Assert-True ($st['sys'] -eq 'ok' -and $st['app'] -eq 'ok' -and $st['stamp'] -eq '20260131_1200' -and $st['capped'] -eq '0') 'A: both logs ok, not capped, stamp passed through.'
+        Assert-True ($st['hw'] -eq '3' -and $st['mce'] -eq '5' -and $st['nocode'] -eq '1' -and $st['vm46'] -eq '1' -and $st['disk'] -eq '3' -and $st['ntfs'] -eq '2' -and $st['rex'] -eq '2' -and $st['tdr'] -eq '1') ('A: the hint counts are wrong (hw = uncorrected WHEA + 0x124; mce = Processor Core WHEA + 0x124; nocode leaves out the paired 41): ' + (($st.Keys | Sort-Object | ForEach-Object { $_ + '=' + $st[$_] }) -join ' '))
+        Assert-True ($st['drv'] -eq 'SomeDrv' -and $st['drvdate'] -eq '2026-01-18' -and $st['sin'] -eq '2026-01-19') 'A: the driver installed, and the sincript session that wrote undo files, in the week before the first crash are not reported.'
+        Assert-True ($r.Tl -match 'Kernel-Power 41\s+bugcheck 0x00000124' -and $r.Tl -match 'WHEA-Logger 29\s+UNCORRECTED hardware error') 'A: the timeline lost the 41''s code, or calls WHEA 29 corrected.'
+        Assert-True ($r.Tl -notmatch 'state 0' -and $r.Tl -notmatch 'volume E:') 'A: the timeline lists a healthy or state-less Ntfs 98 that the summary does not count - the two workers must use one test.'
+        Assert-True ($r.Tl -match 'Resource-Exh 2004\s+commit 16\.0 of 16\.[23] GB' -and $r.Tl -match 'Resource-Exh 2004\s+low virtual memory') 'A: a 2004 with its numbers shows them, and one without them must say "low virtual memory" (not "commit 0.0 of 0.0 GB").'
+        & $narrow $r 'A'
+
+        # ---- B: neither log could be read (System refused, Application missing) - never "nothing found" or "none"
+        $r = & $run 'B' @($W, '"L","","System","","","","denied","0",""', '"L","","Application","","","","missing","0",""') -SummaryOnly
+        Assert-True ($r.Sum -match '(?m)^  System log: COULD NOT BE READ \(access refused\) - finding nothing there proves nothing\.$' -and $r.Sum -match '(?m)^  Application log: COULD NOT BE READ \(no such log\) - finding nothing there proves nothing\.$') "B: an unreadable log is not said out loud with its reason, or its line was cut at 96 columns. Got:`n$($r.Sum)"
+        Assert-True ($r.Sum -match 'NOT DONE' -and $r.Sum -notmatch 'None found') 'B: an unreadable log produced a None-found line - a failed read reported as good news.'
+        Assert-True ($r.Sum -match '(?m)^  App crashes \(Application log\)\s+-  NOT READ' -and $r.Sum -notmatch 'none in the') 'B: an unreadable Application log reads as "no app crashes".'
+        Assert-True ($r.St['sys'] -eq 'fail' -and $r.St['app'] -eq 'fail') 'B: stat sys / app is not fail, so the final line would not be [FAIL].'
+        & $narrow $r 'B'
+        $r = & $run 'B2' @($W, '"L","","System","","","","error","0",""', '"L","","Application","","","","error","0",""') -SummaryOnly
+        Assert-True ($r.Sum -match '(?m)^  System log: COULD NOT BE READ \(the read failed\) - finding nothing there proves nothing\.$' -and $r.Sum -match '(?m)^  Application log: COULD NOT BE READ \(the read failed\) - finding nothing there proves nothing\.$') "B2: the longest COULD NOT BE READ line (Application, the read failed) was cut at 96 columns or lost its reason. Got:`n$($r.Sum)"
+        Assert-True ($r.St['sys'] -eq 'fail' -and $r.St['app'] -eq 'fail') 'B2: a log whose read failed for another reason is not fail.'
+        & $narrow $r 'B2'
+
+        # ---- C: exactly ONE event, a System log cleared a day ago, an empty Application log
+        $r = & $run 'C' @($W, '"L","2026-01-30 22:09","System","","","","ok","1","2026-01-30 22:09"', '"L","","Application","","","","empty","0",""',
+            ('"E","2026-01-31 05:31:12","System","' + $MW + 'Kernel-Power","41","1","","134346042600109507",""'))
+        Assert-True ($r.Sum -match '(?m)^  Unexpected restarts\s+1  1 power button held$') "C: a single Kernel-Power 41 is not counted - the @() unroll trap (a lone PSCustomObject has no .Count in PowerShell 5.1). Got:`n$($r.Sum)"
+        Assert-True ($r.Sum -match 'None found in the 1 day\(s\) the System log covers' -and $r.Sum -notmatch 'covers: unexpected restarts') 'C: None-found is not bounded by the covered day, or lists what WAS found.'
+        Assert-True (($r.Sum -replace '\n    ', ' ') -match 'disk retries or resets \(Windows storage drivers only\)') 'C: the None-found list no longer says the disk-reset check covers only Windows'' own storage drivers.'
+        Assert-True ($r.Sum -match 'It was cleared 2026-01-30 22:09' -and $r.Sum -match 'Application log: EMPTY') 'C: a cleared or empty log is not said.'
+        Assert-True ($r.St['sys'] -eq 'short' -and $r.St['app'] -eq 'short') 'C: a partial read is reported as ok.'
+
+        # ---- D: evidence outside the week before the first crash (Kernel-Power 41 with a code, 2026-01-20)
+        #      blames nothing: a corrected WHEA error before it is not a crash, DrvOld is 10 days before
+        #      it, DrvLate and the session that wrote undo files come after it, SvcNear is a service,
+        #      and the session before it wrote no undo file
+        $r = & $run 'D' @($W, $okS, $okA,
+            '"E","2026-01-10 08:00:00","System","Service Control Manager","7045","4","DrvOld","driver",""',
+            '"E","2026-01-13 08:00:00","System","Service Control Manager","7045","4","DrvEdge","driver",""',
+            ('"E","2026-01-12 09:00:00","System","' + $MW + 'WHEA-Logger","19","3","corrected","cpu",""'),
+            '"E","2026-01-18 09:00:00","System","Service Control Manager","7045","4","SvcNear","service",""',
+            '"S","2026-01-19 21:00:00","","sincript","","","0","",""',
+            ('"E","2026-01-20 10:00:05","System","' + $MW + 'Kernel-Power","41","1","0x0000009F","0","DRIVER_POWER_STATE_FAILURE"'),
+            '"E","2026-01-20 10:30:00","System","Service Control Manager","7045","4","DrvSoon","driver",""',
+            '"S","2026-01-20 12:00:00","","sincript","","","2","",""',
+            '"S","2026-01-21 21:00:00","","sincript","","","2","",""',
+            '"E","2026-01-22 09:00:00","System","Service Control Manager","7045","4","DrvLate","driver",""')
+        $st = $r.St
+        Assert-True ($st.ContainsKey('drv') -and $st.ContainsKey('drvdate') -and $st.ContainsKey('sin')) 'D: the timeline worker did not append drv / drvdate / sin - the checks below would prove nothing.'
+        Assert-True ($r.Tl -match 'SCM 7045\s+DrvOld \(driver\)' -and $r.Tl -match 'SCM 7045\s+DrvLate \(driver\)' -and $r.Tl -match 'SCM 7045\s+SvcNear \(service\)' -and $r.Tl -match 'WHEA-Logger 19\s+corrected hardware error' -and $r.Tl -match 'Kernel-Power 41\s+bugcheck 0x0000009F' -and ([regex]::Matches($r.Tl, 'sincript session')).Count -eq 3 -and $r.Tl -match 'SCM 7045\s+DrvEdge \(driver\)' -and $r.Tl -match 'SCM 7045\s+DrvSoon \(driver\)') "D: the timeline does not list the fixture's installs, sessions and events - the checks below would prove nothing. Got:`n$($r.Tl)"
+        Assert-True ($st['drv'] -eq '' -and $st['drvdate'] -eq '') ("D: a driver was blamed on evidence outside the week before the first crash (a Kernel-Power 41 on 2026-01-20; the corrected WHEA error on 01-12 is not a crash; DrvOld is 10 days earlier, DrvLate later, SvcNear a service). Got drv='{0}' drvdate='{1}'." -f $st['drv'], $st['drvdate'])
+        Assert-True ($st['sin'] -eq '') ("D: sincript was blamed for a session after the first crash, or for one that wrote no undo file. Got sin='{0}'." -f $st['sin'])
+        Assert-True ($st['hw'] -eq '0' -and $st['mce'] -eq '1') ('D: a corrected WHEA error was counted as uncorrected, or the Processor Core one was not a machine check: ' + (($st.Keys | Sort-Object | ForEach-Object { $_ + '=' + $st[$_] }) -join ' '))
+        Assert-True ($r.Sum -match '(?m)^  Application log: read, covers the full 30 days\.$' -and $r.Sum -match '(?m)^  App crashes \(Application log\)\s+0  none in the 30 day\(s\) that log covers$' -and $r.Sum -notmatch 'NOT READ') "D: a fully read Application log with no app crash is not said as read and empty. Got:`n$($r.Sum)"
+        & $narrow $r 'D'
+        foreach ($fc in @('"E","2026-01-20 10:00:00","System","EventLog","6008","2","","",""',
+                ('"E","2026-01-20 10:00:00","System","' + $MW + 'WER-SystemErrorReporting","1001","2","0x0000009F","","DRIVER_POWER_STATE_FAILURE"'),
+                ('"E","2026-01-20 10:00:00","System","' + $MW + 'WHEA-Logger","18","2","uncorrected","cpu",""'))) {
+            $r = & $run 'D2' @($W, $okS, $okA,
+                '"E","2026-01-19 08:00:00","System","Service Control Manager","7045","4","DrvPre","driver",""',
+                '"S","2026-01-19 21:00:00","","sincript","","","1","",""',
+                $fc,
+                '"E","2026-01-24 09:00:00","System","Service Control Manager","7045","4","DrvMid","driver",""',
+                ('"E","2026-01-27 20:00:00","System","' + $MW + 'Kernel-Power","41","1","","0",""'))
+            Assert-True ($r.St['drv'] -eq 'DrvPre' -and $r.St['drvdate'] -eq '2026-01-19' -and $r.St['sin'] -eq '2026-01-19') ("D2: a first crash logged only as {0} was not taken as the first crash. Got drv='{1}' drvdate='{2}' sin='{3}'." -f $fc, $r.St['drv'], $r.St['drvdate'], $r.St['sin'])
+        }
+
+        # ---- E: reading stopped at the cap: stated per log, the cap taken from the W row, days bounded
+        $r = & $run 'E' @('"W","2026-01-31 12:00","","","","","30","20260131_1200","12345"', '"L","2025-12-01 00:00","System","","","","capped","2",""', '"L","2025-12-01 00:00","Application","","","","capped","0",""',
+            ('"E","2026-01-31 11:00:00","System","' + $MW + 'WHEA-Logger","17","3","corrected","",""'))
+        Assert-True ($r.Sum -match '(?m)^  System log: stopped at the shared 12345-event cap \(newest first\) - covers 2 day\(s\)\.$') "E: a capped log is not said, or its cap is not the one the collector wrote. Got:`n$($r.Sum)"
+        Assert-True ($r.Sum -match '(?m)^  Application log: NOT READ - the System log used up the shared 12345-event cap\.$' -and $r.Sum -notmatch 'Application log: stopped at') "E: the System log used up the shared cap and no Application event was read - 'stopped at' the cap would claim 12345 events of its own. Got:`n$($r.Sum)"
+        Assert-True ($r.Sum -match 'None found in the 2 day\(s\) the System log covers' -and $r.Sum -match '(?m)^  App crashes \(Application log\)\s+-  NOT READ - the event cap was reached first$' -and $r.Sum -notmatch 'none in the') "E: None-found is not bounded by the days actually read before the cap, or an unread Application log reads as 'none'. Got:`n$($r.Sum)"
+        Assert-True ($r.St['capped'] -eq '12345' -and $r.St['sys'] -eq 'short' -and $r.St['app'] -eq 'short') ('E: a capped read must pass the cap on and never count as a full read: ' + (($r.St.Keys | Sort-Object | ForEach-Object { $_ + '=' + $r.St[$_] }) -join ' '))
+        & $narrow $r 'E'
+
+        # ---- E2: the Application log reached the shared cap itself, after some of it was read
+        $r = & $run 'E2' @('"W","2026-01-31 12:00","","","","","30","20260131_1200","12345"', $okS, '"L","2025-12-01 00:00","Application","","","","capped","3",""',
+            '"E","2026-01-30 18:00:00","Application","Application Error","1000","2","game.exe","nvwgf2umx.dll","c0000005"') -SummaryOnly
+        Assert-True ($r.Sum -match '(?m)^  Application log: stopped at the shared 12345-event cap \(newest first\) - covers 3 day\(s\)\.$' -and $r.Sum -notmatch 'NOT READ' -and $r.Sum -match '(?m)^  App crashes \(Application log\)\s+1  game\.exe / nvwgf2umx\.dll$') "E2: an Application log read up to the cap must say where it stopped and show what it read, never NOT READ. Got:`n$($r.Sum)"
+        Assert-True ($r.St['sys'] -eq 'ok' -and $r.St['app'] -eq 'short' -and $r.St['capped'] -eq '12345') 'E2: a capped Application log counted as a full read.'
+        & $narrow $r 'E2'
+    }
+    finally { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force } }
+}
+
+# ===============================================================================
+# 149. The collector is RUN against a faked event-log reader. New-Object is a
+#      cmdlet, so a global function of that name wins, and it hands the payload
+#      fake EventLogQuery / EventLogReader objects that honour ReverseDirection:
+#      a System log whose oldest record is a clear notice, events carrying their
+#      data by field name (and the classic providers' positional strings), and an
+#      Application log refused twice over - at the oldest-record probe while its
+#      query would quietly return nothing (the Get-WinEvent -FilterHashtable
+#      shape), and after a good probe. Both must come out as "denied", never as a
+#      log with no events. WHEA events get their class from the ID (29 is fatal,
+#      an unknown id fails closed). Only undo files written before a change count
+#      toward a sincript session - a FullReg_* export does not. With the cap cut
+#      to 3, the NEWEST three events are kept and the days covered shrink to them.
+#      Anything that could change the system ends the child (exit 149).
+# ===============================================================================
+Invoke-Test 'Crash report collector: unreadable is "denied", fields by name, no paths, newest first at the cap (run with a faked reader)' {
+    $cmd = Read-Lines $CmdPath
+    $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $psExe)) { $psExe = (Get-Process -Id $PID).Path }
+    $hits = @($cmd | Where-Object { $_.TrimStart() -notmatch '^(?i)rem\b' -and $_.Contains('-Command "') -and $_.Contains('$env:PT_CR_OUT') })
+    Assert-True ($hits.Count -eq 1) "Expected one collector line using `$env:PT_CR_OUT, found $($hits.Count)."
+    $raw = [regex]::Match($hits[0], '-Command "(.*)"\s*$').Groups[1].Value.Replace('%%', '%')
+    $capm = [regex]::Matches($raw, '\$cap=[0-9]+;')
+    Assert-True ($capm.Count -eq 1) 'The collector no longer sets its cap in one "$cap=N;" statement this test can shrink.'
+    $raw3 = $raw.Replace($capm[0].Value, '$cap=3;')
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('PT149_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $bak = Join-Path $tmp 'bak'; [void](New-Item -ItemType Directory -Force -Path $bak)
+    $csv = Join-Path $tmp 'ev.txt'
+    $t0 = (Get-Date).AddDays(-2)
+    $lg = Join-Path $bak 'PerfTweaks_1.log'; [IO.File]::WriteAllText($lg, 'x')
+    [IO.File]::SetCreationTime($lg, $t0); [IO.File]::SetLastWriteTime($lg, $t0.AddMinutes(5))
+    # written in that session: four undo files of the four families, and three that are not undo files
+    foreach ($n in 'HKCU_Software_PT_Test_12345.reg', 'Preset_moderate_678.json', 'PowerPlan_91.bat', 'Telemetry_nvidia_55.bat', 'FullReg_HKLM_4321.reg', 'notes.bat', 'CrashReport_x.txt') {
+        $f = Join-Path $bak $n; [IO.File]::WriteAllText($f, 'x'); [IO.File]::SetCreationTime($f, $t0.AddMinutes(2))
+    }
+    $old = Join-Path $bak 'PerfTweaks_2.log'; [IO.File]::WriteAllText($old, 'x'); [IO.File]::SetCreationTime($old, (Get-Date).AddDays(-40))
+    $prelude = @'
+foreach ($n in @('reg', 'reg.exe', 'wevtutil', 'wevtutil.exe', 'Clear-EventLog', 'Limit-EventLog', 'Remove-Item', 'Set-ItemProperty', 'New-ItemProperty', 'Remove-ItemProperty', 'Set-Content', 'Start-Process', 'Stop-Process')) {
+    Set-Item -Path ('function:global:' + $n) -Value ([scriptblock]::Create("[Console]::Error.WriteLine('test 149: the collector tried to run $n'); [Environment]::Exit(149)"))
+}
+$global:PTNS = 'http://schemas.microsoft.com/win/2004/08/events/event'
+function global:PTEv($prov, $id, $lvl, $ageDays, $inner) {
+    $o = [pscustomobject]@{ ProviderName = $prov; Id = $id; Level = $lvl; TimeCreated = (Get-Date).AddDays(-$ageDays); X = ('<Event xmlns=''' + $global:PTNS + '''><System/>' + $inner + '</Event>') }
+    $o | Add-Member -MemberType ScriptMethod -Name ToXml -Value { $this.X }
+    $o | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+    $o
+}
+# events are listed oldest first, as a log holds them; a reverse-direction query reads them newest first
+function global:PTRd($evs, $rev) {
+    $a = @($evs); if ($rev) { [array]::Reverse($a) }
+    $q = New-Object System.Collections.Queue; foreach ($e in $a) { $q.Enqueue($e) }
+    $r = [pscustomobject]@{ Q = $q }
+    $r | Add-Member -MemberType ScriptMethod -Name ReadEvent -Value { if ($this.Q.Count -gt 0) { $this.Q.Dequeue() } else { $null } }
+    $r
+}
+function global:New-Object {
+    param([string]$TypeName, [object[]]$ArgumentList)
+    if ($TypeName -like '*EventLogQuery') { return [pscustomobject]@{ Log = [string]$ArgumentList[0]; Q = [string]$ArgumentList[2]; ReverseDirection = $false } }
+    if ($TypeName -like '*EventLogReader') {
+        $a = $ArgumentList[0]; $rv = [bool]$a.ReverseDirection
+        if ($a.Log -eq 'Application') {
+            # probe mode: the oldest-record probe is refused while the query itself would quietly return
+            # nothing - the Get-WinEvent -FilterHashtable shape the probe exists to catch.
+            # query mode: the probe works and the real query is refused.
+            if (($env:PT149_MODE -eq 'probe' -and $a.Q -eq '*') -or ($env:PT149_MODE -eq 'query' -and $a.Q -ne '*')) { throw [System.UnauthorizedAccessException]::new('test 149: access denied') }
+            if ($a.Q -eq '*') { return (PTRd @((PTEv 'Application Error' 1000 2 60 ''), (PTEv 'Application Error' 1000 2 1 '')) $rv) }
+            return (PTRd @((PTEv 'Application Error' 1000 2 3 '<EventData><Data Name=''AppName''>a.exe</Data><Data Name=''ModuleName''>m.dll</Data><Data Name=''ExceptionCode''>c0000005</Data></EventData>')) $rv)
+        }
+        if ($a.Q -eq '*') { return (PTRd @((PTEv 'Microsoft-Windows-Eventlog' 104 4 45 ''), (PTEv 'Microsoft-Windows-Kernel-Power' 41 1 1 '')) $rv) }
+        if ($a.Q -like '*EventID=104*') { return (PTRd @(PTEv 'Microsoft-Windows-Eventlog' 104 4 45 '<UserData><LogFileCleared xmlns=''http://manifests.microsoft.com/win/2004/08/windows/eventlog''><Channel>System</Channel></LogFileCleared></UserData>') $rv) }
+        if ($a.Q -like '*Kernel-Power*') {
+            if ($env:PT149_MODE -eq 'cap') {
+                return (PTRd @((PTEv 'Microsoft-Windows-WHEA-Logger' 17 3 10.5 ''), (PTEv 'Microsoft-Windows-WHEA-Logger' 17 3 8.5 ''), (PTEv 'Microsoft-Windows-WHEA-Logger' 17 3 6.5 ''), (PTEv 'Microsoft-Windows-WHEA-Logger' 17 3 4.5 ''), (PTEv 'Microsoft-Windows-WHEA-Logger' 17 3 2.5 '')) $rv)
+            }
+            return (PTRd @(
+                (PTEv 'Service Control Manager' 7045 4 5 '<EventData><Data Name=''ServiceName''>Svc&amp;Name!%x</Data><Data Name=''ImagePath''>"C:\Program Files\Vpn\svc.exe" tunnel "PrivateKey = SECRETPT149"</Data><Data Name=''ServiceType''>localized text</Data></EventData>'),
+                (PTEv 'Service Control Manager' 7045 4 5 '<EventData><Data Name=''ServiceName''>FakeDrv</Data><Data Name=''ImagePath''>\SystemRoot\System32\drivers\fakedrv.sys</Data></EventData>'),
+                (PTEv 'Display' 4101 3 4 '<EventData><Data>nvlddmkm</Data><Data></Data></EventData>'),
+                (PTEv 'disk' 153 3 4 '<EventData><Data>\Device\Harddisk1\DR1</Data><Data>0x10</Data></EventData>'),
+                (PTEv 'Microsoft-Windows-WHEA-Logger' 29 3 3.4 '<EventData><Data Name=''ErrorSource''>1</Data></EventData>'),
+                (PTEv 'Microsoft-Windows-WHEA-Logger' 19 3 3.3 ''),
+                (PTEv 'Microsoft-Windows-WHEA-Logger' 17 3 3.2 ''),
+                (PTEv 'Microsoft-Windows-WHEA-Logger' 99 2 3.1 ''),
+                (PTEv 'Microsoft-Windows-Kernel-Power' 41 1 3 '<EventData><Data Name=''BugcheckCode''>292</Data><Data Name=''PowerButtonTimestamp''>0</Data></EventData>'),
+                (PTEv 'Microsoft-Windows-WER-SystemErrorReporting' 1001 2 3 '<EventData><Data Name=''param1''>0x0000009f (0x0000000000000003, 0xffff)</Data><Data Name=''param2''>C:\Windows\Minidump\x.dmp</Data></EventData>')) $rv)
+        }
+        return (PTRd @() $rv)
+    }
+    if ($null -ne $ArgumentList) { Microsoft.PowerShell.Utility\New-Object -TypeName $TypeName -ArgumentList $ArgumentList } else { Microsoft.PowerShell.Utility\New-Object -TypeName $TypeName }
+}
+'@
+    $collect = {
+        param([string]$Mode, [string]$Code)
+        if (Test-Path -LiteralPath $csv) { Remove-Item -LiteralPath $csv -Force }
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $psExe; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $psi.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($prelude + "`n" + $Code))
+        $psi.EnvironmentVariables['PT_CR_OUT'] = $csv; $psi.EnvironmentVariables['PT_CR_BAK'] = $bak; $psi.EnvironmentVariables['PT_CR_DAYS'] = '30'
+        $psi.EnvironmentVariables['PT149_MODE'] = $Mode
+        $p = [Diagnostics.Process]::Start($psi); $p.StandardInput.Close(); $err = $p.StandardError.ReadToEndAsync(); $null = $p.StandardOutput.ReadToEnd()
+        if (-not $p.WaitForExit(60000)) { $p.Kill(); throw 'test 149: the collector did not finish within 60 s.' }
+        Assert-True ($p.ExitCode -ne 149) ('The collector tried to change the system: ' + $err.Result.Trim())
+        Assert-True ($p.ExitCode -eq 0 -and (Test-Path -LiteralPath $csv)) ('The collector wrote no events file (exit {0}, mode {1}).' -f $p.ExitCode, $Mode)
+        $rows = @(Import-Csv -LiteralPath $csv)
+        $L = @{}; foreach ($r in @($rows | Where-Object { $_.K -eq 'L' })) { $L[$r.Log] = $r }
+        [pscustomobject]@{ Text = [IO.File]::ReadAllText($csv); Rows = $rows; L = $L; W = @($rows | Where-Object { $_.K -eq 'W' }) }
+    }
+    try {
+        # refused mid-read: the probe works, the real query throws - the path the "$A overwrote $a" XPath bug took
+        $q = & $collect 'query' $raw
+        Assert-True ($q.L['Application'].A -eq 'denied') ('Application refused AFTER a good probe must still come out as "denied", never as a log with no events. Got: ' + $q.L['Application'].A)
+        Assert-True (@($q.Rows | Where-Object { $_.Log -eq 'Application' -and $_.K -eq 'E' }).Count -eq 0) 'Application events were written although the query failed.'
+        # refused at the probe
+        $c = & $collect 'probe' $raw
+        $text = $c.Text; $rows = $c.Rows; $L = $c.L
+        Assert-True ($L['System'].A -eq 'ok' -and $L['System'].B -eq '30' -and $L['System'].C -ne '') ('System: a readable log whose OLDEST record is older than the window must cover all 30 days (the probe reads forward), and its last clear must be recorded. Got: ' + $L['System'].A + ' ' + $L['System'].B)
+        Assert-True ($L['Application'].A -eq 'denied') ('Application: UnauthorizedAccessException at the probe must come out as "denied", never as a log with no events. Got: ' + $L['Application'].A)
+        Assert-True ($c.W.Count -eq 1 -and $c.W[0].C -eq '0') 'The W row must say the read was not capped (C = 0).'
+        $kp = @($rows | Where-Object { $_.Id -eq '41' })
+        Assert-True ($kp.Count -eq 1 -and $kp[0].A -eq '0x00000124' -and $kp[0].C -eq 'WHEA_UNCORRECTABLE_ERROR') 'Kernel-Power 41: BugcheckCode 292 (decimal, read by field name) must become 0x00000124, named WHEA_UNCORRECTABLE_ERROR.'
+        $we = @($rows | Where-Object { $_.Id -eq '1001' })
+        Assert-True ($we.Count -eq 1 -and $we[0].A -eq '0x0000009F' -and $we[0].C -eq 'DRIVER_POWER_STATE_FAILURE') 'WER 1001: param1 must yield 0x0000009F, named DRIVER_POWER_STATE_FAILURE.'
+        Assert-True (@($rows | Where-Object { $_.Id -eq '4101' })[0].A -eq 'nvlddmkm' -and @($rows | Where-Object { $_.Id -eq '153' })[0].A -eq 'Harddisk1') 'Classic providers: the display driver name and the disk token are not extracted.'
+        $wh = @{}; foreach ($x in @($rows | Where-Object { $_.Prov -eq 'Microsoft-Windows-WHEA-Logger' })) { $wh[$x.Id] = $x.A + '/' + $x.B }
+        Assert-True ($wh['29'] -eq 'uncorrected/cpu' -and $wh['19'] -eq 'corrected/cpu' -and $wh['17'] -eq 'corrected/' -and $wh['99'] -eq 'uncorrected/') ('WHEA: 29 (fatal, logged at level 3) must be uncorrected, 19 corrected, both Processor Core; 17 corrected PCIe; an unknown id uncorrected (fail closed). Got: ' + (($wh.Keys | Sort-Object | ForEach-Object { $_ + '=' + $wh[$_] }) -join ' '))
+        $svc = @($rows | Where-Object { $_.Id -eq '7045' })
+        Assert-True (@($svc | Where-Object { $_.A -eq 'Svc?Name??x' -and $_.B -eq 'service' }).Count -eq 1 -and @($svc | Where-Object { $_.A -eq 'FakeDrv' -and $_.B -eq 'driver' }).Count -eq 1) 'SCM 7045: service names must be sanitized (no & ! %) and a .sys image must read as a driver.'
+        Assert-True ($text -notmatch 'SECRETPT149|Program Files|Minidump|localized') 'An image path, a dump path or localized field text leaked into the events file - it ends up in a saved report.'
+        $ses = @($rows | Where-Object { $_.K -eq 'S' })
+        Assert-True ($ses.Count -eq 1 -and $ses[0].A -eq '4') ('sincript sessions: only the one inside the window, with the 4 undo files it wrote - a FullReg_* export, a stray .bat and a saved report are not undo files. Got: ' + (($ses | ForEach-Object { $_.A }) -join ','))
+        Assert-True ($text -notmatch '[^\x09\x0a\x0d\x20-\x7e]') 'The events file is not plain ASCII.'
+
+        # the cap, cut to 3: newest first, days covered shrink to what was read, the Application log gets nothing
+        $k = & $collect 'cap' $raw3
+        $se = @($k.Rows | Where-Object { $_.K -eq 'E' -and $_.Log -eq 'System' })
+        $ages = @($se | ForEach-Object { ((Get-Date) - [datetime]::ParseExact($_.T, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)).TotalDays } | Sort-Object)
+        Assert-True ($se.Count -eq 3 -and $ages[0] -lt 3 -and $ages[2] -lt 7) ('At the cap the collector must keep the NEWEST three events (read newest first); ages kept: ' + (($ages | ForEach-Object { '{0:N1}' -f $_ }) -join ', '))
+        Assert-True ($k.L['System'].A -eq 'capped' -and $k.L['System'].B -eq '6') ('A capped System log must say so and cover only the 6 whole days it read. Got: ' + $k.L['System'].A + ' ' + $k.L['System'].B)
+        Assert-True ($k.L['Application'].A -eq 'capped' -and $k.L['Application'].B -eq '0' -and @($k.Rows | Where-Object { $_.K -eq 'E' -and $_.Log -eq 'Application' }).Count -eq 0) 'The shared cap was already reached: the Application log must read as capped with 0 days covered, not as a full read.'
+        Assert-True ($k.W.Count -eq 1 -and $k.W[0].C -eq '3') 'The W row must carry the cap value, for the summary and the final line to print.'
+    }
+    finally { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force } }
+}
+
+# ===============================================================================
+# 150. Two PowerShell name traps, checked in all three workers. An ALIAS runs
+#      instead of a function of the same name (about_Command_Precedence): the first
+#      draft's helper "R" was Invoke-History, so the collector wrote an empty file,
+#      and "Rd" was Remove-Item. And variable names are case-insensitive: "$A" (an
+#      event field) overwrote "$a" (the apostrophe every XPath was built with), so
+#      the Application query broke and read as "error". Both were measured.
+# ===============================================================================
+Invoke-Test 'Crash report workers: no helper named like an alias, no two variables differing only by case' {
+    $cmd = Read-Lines $CmdPath
+    $n = 0
+    foreach ($key in 'PT_CR_OUT', 'PT_CR_SUM', 'PT_CR_LT') {
+        $line = @($cmd | Where-Object { $_.TrimStart() -notmatch '^(?i)rem\b' -and $_.Contains('-Command "') -and $_.Contains('$env:' + $key) })
+        Assert-True ($line.Count -eq 1) "Expected one worker line using `$env:$key, found $($line.Count)."
+        $raw = [regex]::Match($line[0], '-Command "(.*)"\s*$').Groups[1].Value
+        $fn = @([regex]::Matches($raw, '(?i)\bfunction\s+([A-Za-z_][\w-]*)') | ForEach-Object { $_.Groups[1].Value })
+        Assert-True ($fn.Count -ge 3) "The $key worker defines only $($fn.Count) helper(s) - the scan is not seeing them."
+        $hit = @($fn | Where-Object { Get-Alias -Name $_ -ErrorAction SilentlyContinue })
+        Assert-True ($hit.Count -eq 0) ("The $key worker names helper(s) like a PowerShell alias, and the alias runs instead: " + (($hit | ForEach-Object { $_ + ' -> ' + (Get-Alias -Name $_).Definition }) -join ', ') + '. Prefix helpers with x.')
+        $vars = @([regex]::Matches($raw, '\$([A-Za-z_]\w*)') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -notmatch '^(?i)(env|true|false|null|_)$' })
+        Assert-True ($vars.Count -ge 20) "Only $($vars.Count) variable reads found in the $key worker - the scan is not seeing them."
+        $col = @($vars | Sort-Object -Unique -CaseSensitive | Group-Object { $_.ToLowerInvariant() } | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Group -join '/' })
+        Assert-True ($col.Count -eq 0) ("The $key worker uses variables that differ only by case - PowerShell names are case-insensitive, so one overwrites the other: " + ($col -join ', '))
+        $n++
+    }
+    Assert-True ($n -eq 3) 'Not all three crash report workers were checked.'
+}
+
+# ===============================================================================
+# 151. The batch side of the report stays honest, checked in the text AND run.
+#      :_crVerdict, :CrashHints, :_crWrite and :_crHintsFile only echo and
+#      redirect, so they are copied into a driver and RUN in a contained cmd. The
+#      final line is [FAIL] for an unreadable System log and, in its own words,
+#      for an unreadable Application log (which never reaches the "not all days"
+#      text); [WARN] for a capped read and, separately, for a short one; [OK] only
+#      for a full read. Every hint prints on its own evidence and on nothing else
+#      - a goto retargeted to the wrong label shows up as a missing or extra hint -
+#      and the undervolt hint needs BOTH a found tool and a machine-check count.
+#      The saved report carries the final line. A hints file that cannot be
+#      written is caught one call level down (pitfall 44: nothing on stderr) and
+#      flagged, never shown as "No hints". Also: no worker output is [FAIL], not
+#      an empty screen; TdrDelay / TdrLevel appear in echo text only; the stat
+#      reader takes whitelisted keys only; a save is verified before [OK];
+#      Cleanup's clear-all-logs prompt says it erases this history; and every
+#      printed line fits 96 columns with the longest values.
+# ===============================================================================
+Invoke-Test 'Crash report verdict and hints: [FAIL]/[WARN] before [OK], each hint on its own evidence (run)' {
+    $cmd = Read-Lines $CmdPath
+    $v = @(Get-BodyLines -Lines $cmd -Label '_crVerdict' -CodeOnly)
+    Assert-True ($v.Count -gt 10) ':_crVerdict is missing or did not unroll.'
+    $vj = $v -join "`n"
+    $order = @('if /i "!_cr_sys!"=="fail" goto _crvFail', 'if /i "!_cr_app!"=="fail" goto _crvAppFail', 'if not "!_cr_capped!"=="0" goto _crvCap', 'if /i not "!_cr_sys!"=="ok" goto _crvShort', 'if /i not "!_cr_app!"=="ok" goto _crvShort', 'echo  [OK]')
+    $at = @($order | ForEach-Object { $vj.IndexOf($_) })
+    Assert-True (@($at | Where-Object { $_ -lt 0 }).Count -eq 0) (':_crVerdict lost a check: ' + (@(for ($i = 0; $i -lt $order.Count; $i++) { if ($at[$i] -lt 0) { $order[$i] } }) -join ' | '))
+    for ($i = 1; $i -lt $at.Count; $i++) { Assert-True ($at[$i] -gt $at[$i - 1]) (':_crVerdict checks "{0}" before "{1}" - [FAIL] must come first, then the cap, then coverage, then [OK].' -f $order[$i], $order[$i - 1]) }
+    foreach ($b in 'Fail', 'AppFail', 'Cap', 'Short') { Assert-True ($vj -match ('(?m)^:_crv' + $b + '\s*\n\s*echo\s+\[(FAIL|WARN)\]')) ":_crVerdict lost its _crv$b branch." }
+    $show = @(Get-BodyLines -Lines $cmd -Label 'CrashReport_show' -CodeOnly | ForEach-Object { $_.Trim() })
+    Assert-True ($show -contains 'call :_crVerdict') ':CrashReport_show no longer prints the final line.'
+    $wr = @(Get-BodyLines -Lines $cmd -Label '_crWrite' -CodeOnly | ForEach-Object { $_.Trim() })
+    Assert-True ($wr -contains '>>"!_crout!" (call :_crVerdict)') ':_crWrite no longer files the final line - a saved report of a failed read would not say so.'
+
+    $cr = @(Get-BodyLines -Lines $cmd -Label 'CrashReport' -CodeOnly | ForEach-Object { $_.Trim() })
+    foreach ($g in 'if not exist "!_crcsv!" goto _crNoRead', 'if not exist "!_crsum!" goto _crNoRead', 'if not defined _cr_sys goto _crNoRead') {
+        Assert-True ($cr -contains $g) (":CrashReport lost its guard '$g' - a worker that wrote nothing would show an empty report instead of [FAIL].")
+    }
+    $hseq = @('set "_crnh=0"', 'set "_crhbad="', 'call :_crHintsFile 2>nul', 'if not exist "!_crhnt!" set "_crhbad=1"')
+    $hi = @($hseq | ForEach-Object { [Array]::IndexOf($cr, $_) })
+    Assert-True (@($hi | Where-Object { $_ -lt 0 }).Count -eq 0 -and $hi[1] -gt $hi[0] -and $hi[2] -gt $hi[1] -and $hi[3] -eq $hi[2] + 1) ':CrashReport no longer writes the hints one call level down and flags a hints file that did not land.'
+    $hf = @(Get-BodyLines -Lines $cmd -Label '_crHintsFile' -CodeOnly | ForEach-Object { $_.Trim() })
+    Assert-True ($hf -contains '>"!_crhnt!" (call :CrashHints)') ':_crHintsFile no longer holds the hints redirect.'
+    $ask = @(Get-BodyLines -Lines $cmd -Label 'CrashReport_ask' -CodeOnly)
+    $askj = $ask -join "`n"
+    Assert-True ($askj -match '(?m)^:_crNoRead[\s\S]*?echo\s+\[FAIL\][\s\S]*?NOT a clean') 'The no-output path no longer prints [FAIL] and says it is not a clean bill of health.'
+    Assert-True (@($ask | Where-Object { $_ -match 'No hints:' -and $_ -notmatch '^if not defined _crhbad if "!_crnh!"=="0" echo' }).Count -eq 0 -and @($ask | Where-Object { $_ -match 'No hints:' }).Count -eq 1) 'The H page can say "No hints" when the hints file was never written.'
+
+    $h = @(Get-BodyLines -Lines $cmd -Label 'CrashHints' -CodeOnly)
+    Assert-True ($h.Count -gt 30) ':CrashHints is missing or did not unroll.'
+    # every gate's goto lands after its own hint and before the next gate
+    $gl = @(for ($i = 0; $i -lt $h.Count; $i++) { if ($h[$i] -match '^if (not defined \w+|"!_cr_\w+!"=="0") goto (\S+)\s*$') { ,@($i, $Matches[2]) } })
+    Assert-True ($gl.Count -eq 11) "Expected 11 hint gates in :CrashHints (10 hints, the undervolt one with two), found $($gl.Count)."
+    for ($i = 0; $i -lt $gl.Count; $i++) {
+        $gi = $gl[$i][0]; $tg = $gl[$i][1]
+        $li = if ($tg -eq ':eof') { $h.Count } else { [Array]::IndexOf($h, ':' + $tg) }
+        $ni = if ($i + 1 -lt $gl.Count) { $gl[$i + 1][0] } else { $h.Count }
+        if ($i + 1 -lt $gl.Count -and $gl[$i + 1][0] -eq $gi + 1) { $ni = $h.Count; for ($k = $i + 2; $k -lt $gl.Count; $k++) { $ni = $gl[$k][0]; break } }
+        $txt = @($h[($gi + 1)..([Math]::Max($gi + 1, $li - 1))] | Where-Object { $_ -match '^echo\s+\[i\]' })
+        Assert-True ($li -gt $gi -and $txt.Count -eq 1 -and ($li -le $ni -or $ni -eq $h.Count)) ("The :CrashHints gate '{0}' jumps to {1}, which does not skip exactly its own hint - a hint would print on another hint's evidence." -f $h[$gi].Trim(), $tg)
+    }
+    Assert-True (@($h | Where-Object { $_ -match '(?i)\bTdr(Delay|Level)\b' -and $_.Trim() -notmatch '^(?i)echo\b' }).Count -eq 0) 'TdrDelay / TdrLevel appear outside echo text in :CrashHints.'
+    Assert-True ([regex]::Matches(($h -join "`n"), 'set /a _crnh\+=1').Count -eq 10) ':CrashHints no longer counts each of its 10 hints.'
+
+    $rs = @(Get-BodyLines -Lines $cmd -Label '_crReadStat' -CodeOnly) -join "`n"
+    Assert-True ($rs.Contains('for %%K in (!_crkeys!) do if /i "%%a"=="%%K" set "_cr_%%K=%%b"')) ':_crReadStat no longer restricts KEY=VALUE lines to its whitelist.'
+
+    $iw = $askj.IndexOf('call :_crWrite 2>nul'); $ic = $askj.IndexOf('if not exist "!_crout!" goto _crSaveFail'); $io = $askj.IndexOf('echo  [OK] Saved:')
+    Assert-True ($iw -ge 0 -and $ic -gt $iw -and $io -gt $ic) 'The saved report is claimed before it is checked to exist.'
+    Assert-True ($askj.Contains('for /f "eol=_ delims=0123456789_" %%X in ("!_cr_stamp!") do set "_crbad=1"')) 'The file-name stamp from the worker is no longer checked before it becomes part of a path.'
+
+    $cl = @(Get-BodyLines -Lines $cmd -Label 'Cleanup')
+    $pi = -1; for ($i = 0; $i -lt $cl.Count; $i++) { if ($cl[$i] -match 'set /p "_ev=') { $pi = $i; break } }
+    Assert-True ($pi -gt 0 -and $cl[$pi - 1] -match '(?i)^\s*echo\s+Clearing the event logs\b.*crash.*report') 'Cleanup''s clear-all-event-logs prompt no longer says, before it asks, that clearing the logs erases the history the crash report reads.'
+
+    $s = [Array]::IndexOf($cmd, ':CrashReport'); $e = [Array]::IndexOf($cmd, ':CrashCollect')
+    Assert-True ($s -gt 0 -and $e -gt $s) 'The crash report section could not be sliced for the width check.'
+    $worst = @{ '!_cr_drv!' = 40; '!_cr_drvdate!' = 10; '!_cr_sin!' = 10; '!UVTOOL!' = 44; '!_cr_days!' = 3; '!_crnh!' = 2; '!_cr_gen!' = 16; '!_cr_capped!' = 6 }
+    $wide = @(); $seen = 0
+    foreach ($l in $cmd[$s..$e]) {
+        $t = $l.Trim()
+        if ($t -notmatch '^(?i)(if .*? )?(>>?\s*"[^"]*"\s*)?echo[ .]') { continue }
+        $r = [regex]::Replace($t.Substring($t.IndexOf('echo') + 5), '\^(.)', '$1')
+        if ($r -match '^[=-]{10}' -or $r.Contains('!_crout!') -or $r.Contains('!BACKUP_DIR!')) { continue }
+        foreach ($k in $worst.Keys) { $r = $r.Replace($k, ('x' * $worst[$k])) }
+        $seen++
+        if ($r.Length -gt 96) { $wide += ('{0} cols: {1}' -f $r.Length, $t.Substring(0, [Math]::Min(60, $t.Length))) }
+    }
+    Assert-True ($seen -ge 40) "Only $seen echo lines were measured - the scan is not seeing them."
+    Assert-True ($wide.Count -eq 0) ('Crash report line(s) wider than 96 columns with the longest values filled in: ' + ($wide -join ' | '))
+
+    # ---- RUN the four routines in a contained cmd (they only echo, set and redirect)
+    $rt = [ordered]@{ '_crVerdict' = @(Get-BodyLines -Lines $cmd -Label '_crVerdict'); 'CrashHints' = @(Get-BodyLines -Lines $cmd -Label 'CrashHints'); '_crWrite' = @(Get-BodyLines -Lines $cmd -Label '_crWrite'); '_crHintsFile' = @(Get-BodyLines -Lines $cmd -Label '_crHintsFile') }
+    $all = @($rt.Values | ForEach-Object { $_ })
+    $calls = @([regex]::Matches(($all -join "`n"), '(?i)\bcall\s+:(\w+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    Assert-True (@($calls | Where-Object { -not $rt.Contains($_) }).Count -eq 0) ('The report routines now call {0} - add it to this test''s driver.' -f ($calls -join ', '))
+    $live = @($all | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' -and $_ -match '(?i)\bpowershell\b|\breg(\.exe)?\s|\bstart\s+"|\bdel\s|\bwevtutil\b|\bsc\s' })
+    Assert-True ($live.Count -eq 0) ('test 151: the report routines now start or delete something - refusing to run them: ' + ($live -join ' | '))
+    $cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $tmp = [IO.Path]::GetTempPath()
+    if ($tmp -match '%') { $tmp = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($tmp).ShortPath }
+    $dir = Join-Path $tmp ('PT151_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    Assert-True ($dir -notmatch '[%!]') ('test 151 cannot run here: the temp folder path holds a "%" or "!" ({0}).' -f $dir)
+    [void](New-Item -ItemType Directory -Path $dir)
+    try {
+        $zero = 'set "_cr_hw=0" & set "_cr_mce=0" & set "_cr_nocode=0" & set "_cr_vm46=0" & set "_cr_disk=0" & set "_cr_ntfs=0" & set "_cr_rex=0" & set "_cr_tdr=0" & set "_cr_drv=" & set "_cr_drvdate=" & set "_cr_sin=" & set "UVTOOL="'
+        $hint = [ordered]@{ hw = 'Uncorrected hardware error or bugcheck 0x124'; uv = 'Undervolt tool found: Intel XTU'; nocode = 'Restart with no bugcheck code'; vm46 = 'volmgr 46:'; disk = 'Disk retries, resets or bad blocks'; ntfs = 'NTFS reported corruption'; rex = 'Low virtual memory:'; tdr = 'Display driver resets (TDR)'; drv = 'A driver was installed'; sin = 'sincript made changes on 2026-01-19' }
+        $hcase = [ordered]@{
+            'none'    = @('', @())
+            'hw'      = @('set "_cr_hw=1"', @('hw'))
+            'uvtool'  = @('set "UVTOOL=Intel XTU"', @())
+            'uvmce'   = @('set "_cr_mce=4"', @())
+            'uv'      = @('set "UVTOOL=Intel XTU" & set "_cr_mce=1"', @('uv'))
+            'nocode'  = @('set "_cr_nocode=2"', @('nocode'))
+            'vm46'    = @('set "_cr_vm46=1"', @('vm46'))
+            'disk'    = @('set "_cr_disk=3"', @('disk'))
+            'ntfs'    = @('set "_cr_ntfs=1"', @('ntfs'))
+            'rex'     = @('set "_cr_rex=1"', @('rex'))
+            'tdr'     = @('set "_cr_tdr=1"', @('tdr'))
+            'drv'     = @('set "_cr_drv=SomeDrv" & set "_cr_drvdate=2026-01-18"', @('drv'))
+            'sin'     = @('set "_cr_sin=2026-01-19"', @('sin'))
+            'all'     = @('set "_cr_hw=1" & set "_cr_mce=1" & set "UVTOOL=Intel XTU" & set "_cr_nocode=1" & set "_cr_vm46=1" & set "_cr_disk=1" & set "_cr_ntfs=1" & set "_cr_rex=1" & set "_cr_tdr=1" & set "_cr_drv=SomeDrv" & set "_cr_drvdate=2026-01-18" & set "_cr_sin=2026-01-19"', @($hint.Keys))
+        }
+        $vcase = [ordered]@{
+            'sysfail'      = @('fail', 'ok', '0', ' [FAIL] The System log could not be read')
+            'bothfail'     = @('fail', 'fail', '0', ' [FAIL] The System log could not be read')
+            'appfail'      = @('ok', 'fail', '0', ' [FAIL] The Application log could not be read')
+            'appfailshort' = @('short', 'fail', '0', ' [FAIL] The Application log could not be read')
+            'appfailcap'   = @('short', 'fail', '30000', ' [FAIL] The Application log could not be read')
+            'cap'          = @('short', 'short', '30000', ' [WARN] Reading stopped at 30000 matching events')
+            'syshort'      = @('short', 'ok', '0', ' [WARN] Read, but not all 30 days of both logs')
+            'appshort'     = @('ok', 'short', '0', ' [WARN] Read, but not all 30 days of both logs')
+            'ok'           = @('ok', 'ok', '0', ' [OK] Both logs were read and cover the full 30 days.')
+        }
+        $drv = @('@echo off', 'setlocal EnableDelayedExpansion')
+        foreach ($k in $hcase.Keys) { $drv += @(('echo ###H ' + $k), $zero, $hcase[$k][0], 'set "_crnh=0"', 'call :CrashHints', 'echo ###NH !_crnh!') }
+        foreach ($k in $vcase.Keys) { $drv += @(('echo ###V ' + $k), ('set "_cr_sys={0}" & set "_cr_app={1}" & set "_cr_capped={2}" & set "_cr_days=30"' -f $vcase[$k][0], $vcase[$k][1], $vcase[$k][2]), 'call :_crVerdict') }
+        # the saved report files the final line; a hints file that cannot be opened is caught quietly and flagged
+        $drv += @('echo ###W', 'set "_crsum=!PT_T_DIR!\sum.txt" & set "_crtl=!PT_T_DIR!\tl.txt" & set "_crout=!PT_T_DIR!\out.txt" & set "_cr_gen=2026-01-31 12:00"',
+            '>"!_crsum!" echo SUMMARY-LINE', '>"!_crtl!" echo TIMELINE-LINE',
+            'set "_cr_sys=fail" & set "_cr_app=ok" & set "_cr_capped=0" & set "_crhnt=!PT_T_DIR!\nodir\h.txt" & set "_crhbad="',
+            $zero, 'set "_cr_tdr=1" & set "_crnh=0"', 'call :_crHintsFile 2>nul', 'if not exist "!_crhnt!" set "_crhbad=1"', 'echo ###HB [!_crhbad!] [!_crnh!]',
+            'call :_crWrite 2>nul', 'set "_crhnt=!PT_T_DIR!\h.txt" & set "_crhbad=" & set "_crnh=0"', 'call :_crHintsFile 2>nul', 'if not exist "!_crhnt!" set "_crhbad=1"', 'echo ###HG [!_crhbad!] [!_crnh!]', 'exit /b 0')
+        foreach ($k in $rt.Keys) { $drv += @((':' + $k)) + $rt[$k] }
+        $drvPath = Join-Path $dir 'drv.cmd'
+        [IO.File]::WriteAllText($drvPath, (($drv -join "`r`n") + "`r`n"), [Text.Encoding]::ASCII)
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $cmdExe; $psi.Arguments = '/d /s /c ""' + $drvPath + '""'
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $psi.EnvironmentVariables['PT_T_DIR'] = $dir
+        $p = [System.Diagnostics.Process]::Start($psi); $p.StandardInput.Close()
+        $err = $p.StandardError.ReadToEndAsync(); $out = $p.StandardOutput.ReadToEndAsync()
+        if (-not $p.WaitForExit(30000)) { $p.Kill(); throw 'test 151: the driver did not end within 30 s.' }
+        Assert-True ($err.Result.Trim() -eq '') ('The report routines wrote to stderr - a hints file that cannot be opened must be caught one call level down (pitfall 44): ' + $err.Result.Trim())
+        $o = @($out.Result -split "`r?`n")
+        $blocks = @{}; $cur = $null
+        foreach ($l in $o) { if ($l -match '^###(H|V|W)\s*(\S*)') { $cur = $Matches[1] + ':' + $Matches[2]; $blocks[$cur] = New-Object System.Collections.Generic.List[string]; continue }; if ($null -ne $cur) { $blocks[$cur].Add($l) } }
+        foreach ($k in $hcase.Keys) {
+            $b = $blocks['H:' + $k]
+            Assert-True ($null -ne $b) "test 151: the driver printed nothing for hint case '$k'."
+            $got = @($b | Where-Object { $_ -match '^  \[i\] ' })
+            $want = @($hcase[$k][1])
+            $nh = @($b | Where-Object { $_ -match '^###NH' })
+            foreach ($w in $want) { Assert-True (@($got | Where-Object { $_.Contains($hint[$w]) }).Count -eq 1) ("Hint case '{0}': the {1} hint did not print on its own evidence. Printed: {2}" -f $k, $w, ($got -join ' | ')) }
+            Assert-True ($got.Count -eq $want.Count) ("Hint case '{0}': {1} hint(s) printed where {2} belong - a hint printed without its evidence: {3}" -f $k, $got.Count, $want.Count, ($got -join ' | '))
+        }
+        $nhl = @($o | Where-Object { $_ -match '^###NH (\d+)$' } | ForEach-Object { [int]($_ -replace '^###NH ', '') })
+        Assert-True ($nhl.Count -eq $hcase.Count -and $nhl[0] -eq 0 -and $nhl[$nhl.Count - 1] -eq 10) ('The hint counter _crnh does not match the hints printed: ' + ($nhl -join ','))
+        foreach ($k in $vcase.Keys) {
+            $b = @($blocks['V:' + $k])
+            $tags = @($b | Where-Object { $_ -match '^ \[(OK|WARN|FAIL)\]' })
+            Assert-True ($tags.Count -eq 1 -and $tags[0].StartsWith($vcase[$k][3])) ("Verdict case '{0}' (sys={1} app={2} capped={3}) should print exactly one final line starting '{4}'. Got: {5}" -f $k, $vcase[$k][0], $vcase[$k][1], $vcase[$k][2], $vcase[$k][3].Trim(), ($tags -join ' | '))
+        }
+        Assert-True (@($blocks['V:appfailshort'] | Where-Object { $_ -match '(?i)none found|not all 30 days' }).Count -eq 0 -and @($blocks['V:appfailcap'] | Where-Object { $_ -match '(?i)none found|not all 30 days|Reading stopped' }).Count -eq 0) 'An unreadable Application log reached the "not all days" or cap text - it was not read at all.'
+        Assert-True (@($o | Where-Object { $_ -eq '###HB [1] [0]' }).Count -eq 1) ('A hints file that cannot be opened must leave _crhbad set (and no hint counted: the redirected block never ran). Got: ' + (@($o | Where-Object { $_ -like '###HB*' }) -join ' '))
+        Assert-True (@($o | Where-Object { $_ -eq '###HG [] [1]' }).Count -eq 1 -and ([IO.File]::ReadAllText((Join-Path $dir 'h.txt'))).Contains('Display driver resets (TDR)')) 'A hints file that can be written must land with its hint, and not be flagged.'
+        $saved = [IO.File]::ReadAllText((Join-Path $dir 'out.txt'))
+        Assert-True ($saved.Contains('SUMMARY-LINE') -and $saved.Contains('TIMELINE-LINE') -and $saved.Contains(' [FAIL] The System log could not be read')) 'The saved report does not carry the final [FAIL] line - a saved report of a failed read would look clean.'
+        Assert-True ($saved.Contains('[WARN] The hints could not be prepared')) 'The saved report does not say its hints could not be prepared.'
+    }
+    finally { if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force } }
+}
+
+# ===============================================================================
+# 152. The refresh rate on the main-menu header never makes the menu wait. Starting
+#      PowerShell alone took about 2 s on the reference laptop, so the first draw
+#      starts one worker in the background and every draw after that only looks for
+#      its answer (:DetectRefresh). The worker reads WinRT's DisplayManager, which gives
+#      each display's exact rate - not Win32_VideoController (one value per adapter,
+#      truncated 143.998 Hz to 143 there) and not a C# shim (Add-Type compiles on every
+#      launch). The path reaches it through the environment, the answer comes back in a
+#      file, and nothing is cached across sessions: a refresh rate is a setting.
+# ===============================================================================
+Invoke-Test 'The refresh-rate header never makes the menu wait, reads DisplayManager and keeps no cache' {
+    $cmd = Read-Lines $CmdPath
+    $hdr = 'echo   Build %WIN_BUILD%   Win11=%IS_WIN11%   CPU=%CPU%   GPU=%GPU%   Disk=%SYSDISK%   Refresh=!REFRESH!'
+    foreach ($r in 'MainMenu', 'Status') {
+        $b = @(Get-BodyLines -Lines $cmd -Label $r -CodeOnly)
+        Assert-True ($b.Count -gt 10) ":$r body did not unroll."
+        $j = $b -join "`n"
+        $iCall = $j.IndexOf('call :DetectRefresh'); $iShow = $j.IndexOf($hdr)
+        Assert-True ($iShow -ge 0) ":$r header no longer shows Refresh=!REFRESH! after Disk= (regression)."
+        Assert-True ($iCall -ge 0 -and $iCall -lt $iShow) ":$r prints Refresh= without collecting it first (regression)."
+        Assert-True ($j -notmatch '(?i)call :ProbeRefresh') ":$r starts the refresh worker itself instead of collecting the session's one measurement (regression)."
+        if ($r -eq 'MainMenu') { Assert-True ($j -notmatch '(?i)\bpowershell\b|/wait') ':MainMenu starts or waits for a process - it runs on every draw (regression).' }
+    }
+    $dr = @(Get-BodyLines -Lines $cmd -Label 'DetectRefresh' -CodeOnly)
+    Assert-True ($dr.Count -gt 5) ':DetectRefresh body did not unroll.'
+    $drj = $dr -join "`n"
+    Assert-True ($drj -match '(?m)^if not defined HZSTATE call :ProbeRefresh\s*$') ':DetectRefresh no longer starts the worker once, on first use (regression).'
+    Assert-True ($drj -match '(?m)^if exist "!_hzres!" goto _hzCollect\s*$') ':DetectRefresh no longer just looks for the answer file (regression).'
+    Assert-True ($drj -notmatch '(?i)\bpowershell\b|/wait|\bstart\b') ':DetectRefresh starts or waits for a process in the draw path (regression).'
+    Assert-True ($drj -match '(?m)^set "_hzlim=10"\s*$' -and $drj -match '(?m)^if exist "!_hzres!\.run" set "_hzlim=30"\s*$') ':DetectRefresh no longer gives up on a worker that never started, or gives a started one too little time (regression).'
+    $pr = @(Get-BodyLines -Lines $cmd -Label 'ProbeRefresh' -CodeOnly)
+    Assert-True ($pr.Count -gt 8) ':ProbeRefresh body did not unroll.'
+    $starts = @($pr | Where-Object { $_ -match '^\s*start\s' })
+    Assert-True ($starts.Count -eq 1) ("':ProbeRefresh has {0} worker lines, not one." -f $starts.Count)
+    $w = $starts[0]
+    Assert-True ($w -match '^start "" /min powershell -NoProfile -Command "') ':ProbeRefresh no longer starts its worker minimized and WITHOUT /wait (regression).'
+    Assert-True (($pr -join "`n") -match '(?m)^set "PT_HZ_RES=!_hzres!"\s*$' -and ($pr -join "`n") -match '(?m)^set "PT_HZ_RES="\s*$') ':ProbeRefresh no longer hands the answer path over through the environment and clears it (regression).'
+    $ps = $w.Substring($w.IndexOf('-Command "') + 10)
+    Assert-True ($ps.EndsWith('"')) ':ProbeRefresh payload is not closed by the line''s last quote.'
+    $ps = $ps.Substring(0, $ps.Length - 1)
+    Assert-True ($ps.IndexOfAny([char[]]'!^%"') -lt 0) ':ProbeRefresh payload holds ! ^ % or a double quote - delayed expansion or the -Command quoting would change it (regression).'
+    foreach ($need in 'Windows.Devices.Display.Core.DisplayManager', 'TryReadCurrentStateForAllTargets()', 'PresentationRate', 'VerticalSyncRate.Denominator -gt 0', 'GlassSessionId', "`$env:PT_HZ_RES", "(`$f+'.run')", "Move-Item -LiteralPath `$t -Destination `$f", "catch { `$o+='E' }", '$m.Dispose()') {
+        Assert-True ($ps.Contains($need)) ":ProbeRefresh worker no longer contains $need (regression)."
+    }
+    foreach ($no in 'Add-Type', 'Win32_VideoController', 'Win32_DisplayConfiguration', 'Get-CimInstance', 'Get-WmiObject', 'wmic') {
+        Assert-True (-not $ps.Contains($no)) ":ProbeRefresh worker uses $no - a compile on every launch, or a per-adapter / truncated / removed source (regression)."
+    }
+    $all = (@($pr) + $dr + @(Get-BodyLines -Lines $cmd -Label '_hzParse' -CodeOnly) + @(Get-BodyLines -Lines $cmd -Label '_hzRec' -CodeOnly)) -join "`n"
+    Assert-True ($all -notmatch '(?i)LOCALAPPDATA|\.cache\b') 'The refresh-rate probe keeps an answer across sessions (regression).'
+    $pa = @(Get-BodyLines -Lines $cmd -Label '_hzParse' -CodeOnly) -join "`n"
+    Assert-True ($pa -match '(?m)^\s+if not defined _hzbad call :_hzRec\s*$') ':_hzParse hands a record to :_hzRec as call arguments - call parses text from a user-writable file a second time (regression).'
+    Assert-True ($pa -match '(?m)^findstr /l /c:"\^!" "!_hzres!" >nul 2>&1\s*$') ':_hzParse no longer rejects an answer file holding "!" before reading it (regression).'
+    $st = @(Get-BodyLines -Lines $cmd -Label 'Status' -CodeOnly) -join "`n"
+    Assert-True ($st -match '(?m)^call :_hzShow\s*$') ':Status no longer shows the [Display] section (regression).'
+    $sh = @(Get-BodyLines -Lines $cmd -Label '_hzShow') -join "`n"
+    Assert-True ($sh -match 'Refresh rate  = !REFRESH_ALL!' -and $sh -match 'in the order Windows lists them' -and $sh -match 'Dynamic Refresh Rate can run a panel below it') ':_hzShow lost its value line or its honest caveats (regression).'
+    $ex = @(Get-BodyLines -Lines $cmd -Label 'ExitScript' -CodeOnly) -join "`n"
+    Assert-True ($ex -match '(?m)^if defined _hzres del "!_hzres!" "!_hzres!\.run" "!_hzres!\.tmp"') ':ExitScript no longer removes an answer the worker left in TEMP (regression).'
+}
+
+# ===============================================================================
+# 153. The main-menu header fits the console at its widest. Each variable's widest
+#      value is read from the script's own literal set lines, so a new GPU word is
+#      covered the day it is added; REFRESH's 14 columns is what test 154 proves the
+#      parser can produce, and WIN_BUILD is a five-digit build number.
+# ===============================================================================
+Invoke-Test 'The main-menu header fits the console at its widest' {
+    $cmd = Read-Lines $CmdPath
+    $width = 0
+    foreach ($ln in $cmd) { $m = [regex]::Match($ln, '(?i)^\s*mode con:?\s*cols=(\d+)'); if ($m.Success) { $width = [int]$m.Groups[1].Value } }
+    Assert-True ($width -gt 0) 'No "mode con cols=" line found.'
+    $h = @(Get-BodyLines -Lines $cmd -Label 'MainMenu' -CodeOnly | Where-Object { $_ -match '^\s*echo   Build ' })
+    Assert-True ($h.Count -eq 1) ("Expected one header line in :MainMenu, found {0}." -f $h.Count)
+    $text = $h[0].TrimStart().Substring(5)
+    $computed = @{ 'WIN_BUILD' = 5; 'REFRESH' = 14 }
+    $vars = @([regex]::Matches($text, '[%!]([A-Za-z_]\w*)[%!]') | ForEach-Object { $_.Groups[1].Value })
+    Assert-True ($vars.Count -ge 6) ("Only {0} variables found on the header - the scan is not seeing them." -f $vars.Count)
+    $code = @($cmd | Where-Object { $_.Trim() -notmatch '^(?i)(rem\b|::)' })
+    $rendered = $text
+    foreach ($v in $vars) {
+        $max = 0
+        foreach ($ln in $code) {
+            foreach ($m in [regex]::Matches($ln, '(?i)\bset "' + [regex]::Escape($v) + '=([^"%!]*)"')) { if ($m.Groups[1].Value.Length -gt $max) { $max = $m.Groups[1].Value.Length } }
+        }
+        if ($computed.ContainsKey($v)) { $max = [Math]::Max($max, $computed[$v]) }
+        Assert-True ($max -gt 0) "Nothing assigns a value to $v, yet the header prints it."
+        $rendered = $rendered -replace ('[%!]' + [regex]::Escape($v) + '[%!]'), ('x' * $max)
+    }
+    Assert-True ($rendered.Length -le 98 -and $rendered.Length -lt $width) ("At its widest the main-menu header is {0} columns - past the 98-column separators, or it wraps at {1}: {2}" -f $rendered.Length, $width, $rendered)
+}
+
+# ===============================================================================
+# 154. The refresh-rate parser is RUN on synthetic worker answers. It decides what
+#      the header claims, and its input is a file in the user's TEMP, so it is checked,
+#      not trusted. This extracts :_hzParse, :_hzRec and :_hzJoin and feeds them every
+#      answer the worker can give and many it never gives, including records holding
+#      & ) " % ! - each must come out "unknown", with nothing else printed. Every header
+#      value must fit 14 columns, and the 64-display case must reach exactly 14 (test
+#      153 relies on it). The answer path reaches the driver through the environment.
+# ===============================================================================
+Invoke-Test 'The refresh-rate parser turns synthetic worker answers into honest values (run)' {
+    $cmd = Read-Lines $CmdPath
+    $grab = {
+        param([string]$Label, [string[]]$Own)
+        $i = [Array]::IndexOf($cmd, ':' + $Label)
+        if ($i -lt 0) { throw "test 154: :$Label not found." }
+        $j = $i + 1
+        while ($j -lt $cmd.Count) { if ($cmd[$j] -match '^:(\w+)' -and -not ($Own -contains $Matches[1])) { break }; $j++ }
+        $cmd[$i..($j - 1)]
+    }
+    $parts = @(& $grab '_hzParse' @('_hzUnknown')) + @(& $grab '_hzRec' @('_hzRecKeep')) + @(& $grab '_hzJoin' @())
+    $pc = @($parts | Where-Object { $_.Trim() -notmatch '^(?i)rem\b' }) -join "`n"
+    Assert-True ($pc.Length -gt 500) 'The parser routines did not unroll.'
+    Assert-True ($pc -notmatch '(?i)\bstart\b|powershell|call :(?!_hz)') 'The parser starts a process or calls outside itself.'
+    $body = @('@echo off', 'setlocal EnableDelayedExpansion', 'set "_hzres=!PT154_ANS!"', 'call :_hzParse', 'echo [!REFRESH!]^|[!REFRESH_ALL!]', 'exit /b 0') + $parts
+    $tmp = [System.IO.Path]::GetTempPath()
+    if ($tmp -match '[\s%]') { $tmp = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($tmp).ShortPath }
+    $dir = Join-Path $tmp ('PT154_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $big = @(1..64 | ForEach-Object { 'S 9999' })
+    $over = @(1..65 | ForEach-Object { 'S 60' })
+    $cases = @(
+        @('single',            @('S 144'),                 '144Hz',          '144Hz'),
+        @('two',               @('S 144', 'S 60'),         '144/60Hz',       '144/60Hz'),
+        @('three',             @('S 144', 'S 60', 'S 75'), '144/60Hz+1',     '144/60/75Hz'),
+        @('hw default 0',      @('S 0'),                   'unknown',        'unknown'),
+        @('hw default 1, mix', @('S 1', 'S 60'),           '?/60Hz',         '?/60Hz'),
+        @('unreadable',        @('S ?'),                   'unknown',        'unknown'),
+        @('unreadable, mix',   @('S 144', 'S ?'),          '144/?Hz',        '144/?Hz'),
+        @('remote',            @('R', 'S 32'),             'remote',         'remote'),
+        @('remote, failed',    @('R', 'E'),                'remote',         'remote'),
+        @('failed',            @('E'),                     'unknown',        'unknown'),
+        @('no display',        @('N'),                     'unknown',        'unknown'),
+        @('N beside a rate',   @('N', 'S 60'),             'unknown',        'unknown'),
+        @('empty answer',      @(),                        'unknown',        'unknown'),
+        @('64 displays',       $big,                       '9999/9999Hz+62', '9999/9999/9999/9999/9999/9999/9999/9999Hz+56'),
+        @('over the cap',      $over,                      'unknown',        'unknown'),
+        @('leading zero',      @('S 0144'),                'unknown',        'unknown'),
+        @('five digits',       @('S 12345'),               'unknown',        'unknown'),
+        @('negative',          @('S -1'),                  'unknown',        'unknown'),
+        @('letter in rate',    @('S 6x0'),                 'unknown',        'unknown'),
+        @('unknown record',    @('X 60'),                  'unknown',        'unknown'),
+        @('old P record',      @('P 60'),                  'unknown',        'unknown'),
+        @('lower-case record', @('s 60'),                  'unknown',        'unknown'),
+        @('extra token',       @('S 60 extra'),            'unknown',        'unknown'),
+        @('two R',             @('R', 'R'),                'unknown',        'unknown'),
+        @('two E',             @('E', 'E'),                'unknown',        'unknown'),
+        @('R with a value',    @('R 1', 'S 60'),           'unknown',        'unknown'),
+        @('record, no rate',   @('S'),                     'unknown',        'unknown'),
+        @('ampersand',         @('S 6&0'),                 'unknown',        'unknown'),
+        @('paren',             @('S 1)0'),                 'unknown',        'unknown'),
+        @('quote',             @('S "60"'),                'unknown',        'unknown'),
+        @('percent',           @('S 60%OS%'),              'unknown',        'unknown'),
+        @('bang',              @('S 6!0'),                 'unknown',        'unknown'))
+    try {
+        [void](New-Item -ItemType Directory -Force -Path $dir)
+        $drv = Join-Path $dir 'drv.cmd'
+        [System.IO.File]::WriteAllLines($drv, [string[]]$body, [System.Text.Encoding]::ASCII)
+        $ran = 0; $widest = 0
+        foreach ($c in $cases) {
+            $ans = Join-Path $dir 'answer.txt'
+            $lines = @($c[1])
+            [System.IO.File]::WriteAllText($ans, $(if ($lines.Count) { ($lines -join "`r`n") + "`r`n" } else { '' }), [System.Text.Encoding]::ASCII)
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+            $psi.Arguments = '/d /c "' + $drv + '"'
+            $psi.WorkingDirectory = $dir
+            $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+            $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+            $psi.EnvironmentVariables['PT154_ANS'] = $ans
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $p.StandardInput.Close()
+            $err = $p.StandardError.ReadToEndAsync()
+            $out = $p.StandardOutput.ReadToEnd()
+            if (-not $p.WaitForExit(30000)) { $p.Kill(); throw ("test 154: the parser did not finish for case '{0}'." -f $c[0]) }
+            $want = '[' + $c[2] + ']|[' + $c[3] + ']'
+            $outl = @($out -split "`r?`n" | Where-Object { $_.Trim() })
+            Assert-True ($outl.Count -eq 1 -and $outl[0] -eq $want) ("Case '{0}': the parser printed {1}, not only {2} (regression). {3}" -f $c[0], ($outl -join ' / '), $want, $err.Result.Trim())
+            Assert-True ($err.Result.Trim() -eq '') ("Case '{0}': cmd reported an error while parsing: {1}" -f $c[0], $err.Result.Trim())
+            $hv = $c[2].Length; if ($hv -gt $widest) { $widest = $hv }
+            Assert-True ($hv -le 14) ("Case '{0}': a {1}-column header value - test 153 assumes 14 at most." -f $c[0], $hv)
+            $ran++
+        }
+        Assert-True ($ran -eq $cases.Count -and $ran -ge 30) "test 154 ran only $ran case(s)."
+        Assert-True ($widest -eq 14) "The widest header value reached $widest, not 14 - test 153's constant no longer matches the parser."
+    }
+    finally { if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force } }
+}
+
+# ===============================================================================
+# 155. The refresh-rate state machine is RUN over simulated main-menu draws, with the
+#      worker stubbed out (no process starts). An answer that lands at draw 3 must be
+#      shown from then on and its files deleted; with no worker marker the header must
+#      give up to "unknown" at draw 10, and an answer landing later must still replace
+#      it; a worker that started (".run" present) must stay "pending" through draw 29.
+# ===============================================================================
+Invoke-Test 'The refresh-rate state machine collects, gives up and recovers across draws (run)' {
+    $cmd = Read-Lines $CmdPath
+    $grab = {
+        param([string]$Label, [string[]]$Own)
+        $i = [Array]::IndexOf($cmd, ':' + $Label)
+        if ($i -lt 0) { throw "test 155: :$Label not found." }
+        $j = $i + 1
+        while ($j -lt $cmd.Count) { if ($cmd[$j] -match '^:(\w+)' -and -not ($Own -contains $Matches[1])) { break }; $j++ }
+        $cmd[$i..($j - 1)]
+    }
+    $parts = @(& $grab 'DetectRefresh' @()) + @(& $grab '_hzCollect' @()) + @(& $grab '_hzParse' @('_hzUnknown')) + @(& $grab '_hzRec' @('_hzRecKeep')) + @(& $grab '_hzJoin' @())
+    Assert-True (($parts -join "`n") -match 'if not defined HZSTATE call :ProbeRefresh') 'test 155: :DetectRefresh did not unroll.'
+    # :ProbeRefresh is replaced by a stub that sets the same state and starts nothing
+    $stub = @(':ProbeRefresh', 'set "_hzres=!PT155_DIR!\ans.txt"', 'set "HZSTATE=pending"', 'set "_hzdraws=0"', 'set "REFRESH=pending"', 'set "REFRESH_ALL=pending"', 'goto :eof', ':LogVar', 'goto :eof')
+    $body = @('@echo off', 'setlocal EnableDelayedExpansion',
+              'for /l %%D in (1,1,32) do (',
+              '  if "%%D"=="!PT155_LAND!" (>"!PT155_DIR!\ans.txt" echo S 144)',
+              '  if "%%D"=="1" if defined PT155_RUN (>"!PT155_DIR!\ans.txt.run" echo run)',
+              '  call :DetectRefresh',
+              '  if exist "!PT155_DIR!\ans.txt" (set "_f=file") else (set "_f=nofile")',
+              '  echo D%%D !REFRESH! !_f!',
+              ')', 'exit /b 0') + $stub + $parts
+    $tmp = [System.IO.Path]::GetTempPath()
+    if ($tmp -match '[\s%]') { $tmp = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($tmp).ShortPath }
+    $dir = Join-Path $tmp ('PT155_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $run = {
+        param([string]$Land, [string]$RunMarker)
+        Get-ChildItem -LiteralPath $dir -Filter 'ans.txt*' -ErrorAction SilentlyContinue | Remove-Item -Force
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+        $psi.Arguments = '/d /c "' + (Join-Path $dir 'drv.cmd') + '"'
+        $psi.WorkingDirectory = $dir
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $psi.EnvironmentVariables['PT155_DIR'] = $dir
+        $psi.EnvironmentVariables['PT155_LAND'] = $Land
+        if ($RunMarker) { $psi.EnvironmentVariables['PT155_RUN'] = '1' }
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $p.StandardInput.Close()
+        $err = $p.StandardError.ReadToEndAsync()
+        $out = $p.StandardOutput.ReadToEnd()
+        if (-not $p.WaitForExit(60000)) { $p.Kill(); throw 'test 155: the state-machine driver did not finish.' }
+        $st = @{}
+        foreach ($l in ($out -split "`r?`n")) { $m = [regex]::Match($l, '^D(\d+) (\S+) (\S+)$'); if ($m.Success) { $st[[int]$m.Groups[1].Value] = @($m.Groups[2].Value, $m.Groups[3].Value) } }
+        Assert-True ($st.Count -eq 32) ("test 155: expected 32 draws, got {0}. {1}" -f $st.Count, $err.Result.Trim())
+        $st
+    }
+    try {
+        [void](New-Item -ItemType Directory -Force -Path $dir)
+        [System.IO.File]::WriteAllLines((Join-Path $dir 'drv.cmd'), [string[]]$body, [System.Text.Encoding]::ASCII)
+        # (a) the answer lands at draw 3
+        $s = & $run '3' ''
+        Assert-True ($s[1][0] -eq 'pending' -and $s[2][0] -eq 'pending') 'Before the answer lands the header must say pending.'
+        foreach ($d in 3..32) { Assert-True ($s[$d][0] -eq '144Hz') ("Draw ${d}: the header says {0}, not the collected 144Hz (regression)." -f $s[$d][0]) }
+        Assert-True ($s[3][1] -eq 'nofile') 'The answer file is not deleted once it has been collected (regression).'
+        # (b) no worker marker: give up at draw 10, recover when an answer lands at draw 12
+        $s = & $run '12' ''
+        foreach ($d in 1..9) { Assert-True ($s[$d][0] -eq 'pending') ("Draw ${d}: the header gave up too early ({0})." -f $s[$d][0]) }
+        Assert-True ($s[10][0] -eq 'unknown' -and $s[11][0] -eq 'unknown') 'A worker that never started must turn the header to unknown at draw 10 (regression).'
+        foreach ($d in 12..32) { Assert-True ($s[$d][0] -eq '144Hz') ("Draw ${d}: an answer that landed after the give-up did not replace unknown (regression).") }
+        # (c) the worker started (.run present) but no answer: pending through draw 29, unknown at 30
+        $s = & $run '99' '1'
+        foreach ($d in 1..29) { Assert-True ($s[$d][0] -eq 'pending') ("Draw ${d}: a started worker was given up on too early ({0})." -f $s[$d][0]) }
+        Assert-True ($s[30][0] -eq 'unknown') 'A started worker that never answers must still give up at draw 30 (regression).'
+    }
+    finally { if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force } }
+}
+
+# ===============================================================================
+# 156. Non-ASCII names survive. Adapter, startup-entry, PATH and lock-holder names
+#      used to show as ? on a PC whose code page for non-Unicode programs lacks
+#      their letters (437 under a Russian UI). Every read that can carry one now
+#      switches the console to UTF-8 and back, and the workers behind them write
+#      UTF-8 and keep every letter. RUN in a hidden console from code page 437 -
+#      chcp needs a console: a UTF-8 file read through :Utf8On comes back intact,
+#      and :Utf8Off puts 437 back.
+# ===============================================================================
+Invoke-Test 'Non-ASCII names survive every screen that shows them, and the code page is restored (run)' {
+    $cmd = Read-Lines $CmdPath
+    $all = $cmd -join "`n"
+    $on = @(Get-BodyLines -Lines $cmd -Label 'Utf8On' -CodeOnly) -join "`n"
+    $off = @(Get-BodyLines -Lines $cmd -Label 'Utf8Off' -CodeOnly) -join "`n"
+    Assert-True ($on -match 'chcp 65001 >nul' -and $on -match 'set "_cpSaved=!_cpRaw!"') ':Utf8On no longer saves the code page before switching to UTF-8.'
+    Assert-True ($on -match 'eol=0 delims=0123456789') ':Utf8On switches without checking that chcp printed a number.'
+    Assert-True ($off -match 'chcp !_cpSaved! >nul' -and $off -match 'set "_cpSaved="') ':Utf8Off no longer restores the saved code page.'
+    $scd = @(Get-BodyLines -Lines $cmd -Label 'ShowCurrentDns' -CodeOnly) -join "`n"
+    $i1 = $scd.IndexOf('call :Utf8On'); $i2 = $scd.IndexOf('call :_scdScan'); $i3 = $scd.LastIndexOf('call :Utf8Off'); $i4 = $scd.LastIndexOf('call :_scdScan')
+    Assert-True ($i1 -ge 0 -and $i1 -lt $i2 -and $i3 -gt $i4) ':ShowCurrentDns reads adapter names through reg without UTF-8 (regression: they show as ?).'
+    foreach ($f in '_dnsf', '_sures', '_peres') {
+        Assert-True ($all -match ('(?m)^call :Utf8On\nif exist "!' + $f + '!" type "!' + $f + '!"\ncall :Utf8Off$')) "The $f display is not wrapped in :Utf8On / :Utf8Off."
+    }
+    foreach ($f in '_sulist', '_pelist', '_lflist') {
+        Assert-True ($all -match ('(?m)^call :Utf8On\nfor /f "usebackq tokens=[^"]+" %%a in \("!' + $f + '!"\) do \(')) "The $f read is not preceded by call :Utf8On."
+    }
+    foreach ($v in 'PT_DNSF', 'PT_SU_LIST', 'PT_SU_RES', 'PT_PE_LIST', 'PT_PE_RES', 'PT_LF_LIST') {
+        $w = @($cmd | Where-Object { $_ -match ('\$env:' + $v + '\b') -and $_ -match '(?i)powershell' })
+        Assert-True ($w.Count -ge 1) "No worker writes $v."
+        foreach ($l in $w) {
+            Assert-True ($l -notmatch ('Out-File -FilePath \$env:' + $v + ' -Encoding ASCII')) "$v is written as ASCII again - non-ASCII names become ? (regression)."
+            Assert-True ($l -match 'function Wu8\(\$p\)' -and $l -match 'UTF8Encoding \$false') "The worker writing $v lost its UTF-8 writer (no BOM: a BOM would glue itself to the first field)."
+            Assert-True ($l -notmatch '\[\^\\x20-\\x7e\]') "The worker writing $v turns non-ASCII letters into ? again (regression)."
+        }
+    }
+
+    # RUN
+    $grab = {
+        param([string]$Label)
+        $i = [Array]::IndexOf($cmd, ':' + $Label)
+        if ($i -lt 0) { throw "test 156: :$Label not found." }
+        $j = $i + 1
+        while ($j -lt $cmd.Count -and $cmd[$j] -notmatch '^:\w') { $j++ }
+        $cmd[$i..($j - 1)]
+    }
+    $body = @('@echo off', 'setlocal EnableDelayedExpansion', 'chcp 437 >nul', 'call :Utf8On',
+        'for /f "usebackq delims=" %%L in ("!PT156_IN!") do set "V=%%L"', 'call :Utf8Off',
+        "for /f `"tokens=2 delims=:`" %%p in ('chcp') do set `"CPA=%%p`"",
+        'chcp 65001 >nul', '>"!PT156_OUT!" echo [!V!]^|[!CPA: =!]', 'exit /b 0') + @(& $grab 'Utf8On') + @(& $grab 'Utf8Off')
+    $tmp = [System.IO.Path]::GetTempPath()
+    if ($tmp -match '[\s%]') { $tmp = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($tmp).ShortPath }
+    $dir = Join-Path $tmp ('PT156_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $name = -join [char[]](0x0411,0x0435,0x0441,0x043F,0x0440,0x043E,0x0432,0x043E,0x0434,0x043D,0x0430,0x044F,0x20,0x0441,0x0435,0x0442,0x044C)
+    try {
+        [void](New-Item -ItemType Directory -Force -Path $dir)
+        $drv = Join-Path $dir 'drv.cmd'; $in = Join-Path $dir 'in.txt'; $outf = Join-Path $dir 'out.txt'
+        [System.IO.File]::WriteAllLines($drv, [string[]]$body, [System.Text.Encoding]::ASCII)
+        [System.IO.File]::WriteAllText($in, $name + "`r`n", (New-Object System.Text.UTF8Encoding $false))
+        $env:PT156_IN = $in; $env:PT156_OUT = $outf
+        try {
+            $p = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList ('/d /c "' + $drv + '"') -WindowStyle Hidden -PassThru
+            if (-not $p.WaitForExit(30000)) { $p.Kill(); throw 'test 156: the driver did not finish within 30 s.' }
+        }
+        finally { $env:PT156_IN = $null; $env:PT156_OUT = $null }
+        Assert-True (Test-Path -LiteralPath $outf) 'test 156: the driver wrote no result.'
+        $got = [System.IO.File]::ReadAllText($outf, [System.Text.Encoding]::UTF8).Trim()
+        Assert-True ($got -ceq ('[' + $name + ']|[437]')) ("A UTF-8 name read through :Utf8On came back as {0}, not [{1}]|[437] - either the letters or the code page were lost (regression)." -f $got, $name)
+    }
+    finally { if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force } }
 }
 
 # ---- summary ------------------------------------------------------------------------------
