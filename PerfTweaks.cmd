@@ -8,16 +8,22 @@ set "SCRIPT_DIR=%~dp0"
 set "_SELFPATH=%~f0"
 rem  Backup folder too, while delayed expansion is off. Resolves OneDrive-redirected Documents.
 set "DOCS=%USERPROFILE%\Documents"
+rem  Read it with the console on UTF-8: the pipe converts reg's output to the console code page,
+rem  which turns letters it lacks into "?". :Utf8On needs delayed expansion, so this is inline.
+set "_cpDocs="
+for /f "tokens=2 delims=:" %%p in ('chcp') do for /f "delims=. " %%q in ("%%p") do set "_cpDocs=%%q"
+if defined _cpDocs for /f "eol=0 delims=0123456789" %%c in ("%_cpDocs%") do set "_cpDocs="
+if defined _cpDocs chcp 65001 >nul
 for /f "tokens=2,*" %%a in ('reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders" /v Personal 2^>nul ^| findstr /I "Personal"') do set "DOCS=%%b"
+if defined _cpDocs chcp %_cpDocs% >nul
+set "_cpDocs="
 rem  call set expands a registry value stored unexpanded. Only such a value goes through it:
 rem  call re-parses its arguments and would mangle a percent sign or caret in a real path.
 if "%DOCS:~0,1%"=="%%" call set "DOCS=%DOCS%"
 if "%DOCS:~-1%"==" " set "DOCS=%DOCS:~0,-1%"
+rem  Windows forbids ? in a path, so one here means the read was damaged: keep the default.
+if not "%DOCS:?=%"=="%DOCS%" set "DOCS=%USERPROFILE%\Documents"
 set "BACKUP_DIR=%DOCS%\PerfTweaks_Backups"
-setlocal EnableDelayedExpansion
-cd /d "!SCRIPT_DIR!" 2>nul
-color 0D
-title Sincript - Windows 10/11 Optimizer
 rem =====================================================================================
 rem  PerfTweaks - a curated, reversible Windows 10/11 optimizer with a category menu.
 rem  Every registry change is backed up first as a .reg file. Backups and status makes a
@@ -25,43 +31,54 @@ rem  restore point and a full registry export - do that first.
 rem =====================================================================================
 rem ---------- Command line ----------
 rem  Parsed before the elevation probe: a command-line run never self-elevates, so the caller
-rem  gets the exit code of the work. Values are read late, so special characters stay data.
+rem  gets the exit code of the work. Parsed with delayed expansion still off: with it on,
+rem  set "_a=%~1" eats a "!" and expands !NAME! before any check sees the value. Every read is
+rem  inside quotes, so the other special characters stay data.
 set "_CLIPRESET=" & set "_CLIDNS=" & set "_CLINORP=" & set "_CLIHELP=" & set "_CLIBAD=" & set "_CLIPLAN="
 set "_RELAUNCHED=" & set "_CLIANY="
 
 :_argLoop
-if "%~1"=="" goto _argDone
+rem  Test a copy, not "%~1": a quote inside the argument would break the if line (exit 255).
 set "_a=%~1"
+if not defined _a goto _argDone
 shift
+rem  Quotes around only the value (/preset:"light") go, as quotes around the whole option do.
+rem  Nothing left means an empty argument, which ends the list as "%~1"=="" does.
+set "_a=%_a:"=%"
+if not defined _a goto _argDone
 rem  /elevated is the relaunch marker, not a command-line request, so it does not set _CLIANY.
-if /i "!_a!"=="/elevated"   set "_RELAUNCHED=1" & goto _argLoop
+if /i "%_a%"=="/elevated"   set "_RELAUNCHED=1" & goto _argLoop
 rem  Any other argument means command-line mode, even an empty option: :CliRun then reports it.
 set "_CLIANY=1"
-if /i "!_a!"=="/?"          set "_CLIHELP=1" & goto _argLoop
-if /i "!_a!"=="/help"       set "_CLIHELP=1" & goto _argLoop
-if /i "!_a!"=="/norestore"  set "_CLINORP=1" & goto _argLoop
-if /i "!_a:~0,8!"=="/preset:" goto _argPreset
-if /i "!_a:~0,5!"=="/dns:"    goto _argDns
-if /i "!_a:~0,6!"=="/plan:"   goto _argPlan
-set "_CLIBAD=!_a!"
+if /i "%_a%"=="/?"          set "_CLIHELP=1" & goto _argLoop
+if /i "%_a%"=="/help"       set "_CLIHELP=1" & goto _argLoop
+if /i "%_a%"=="/norestore"  set "_CLINORP=1" & goto _argLoop
+if /i "%_a:~0,8%"=="/preset:" goto _argPreset
+if /i "%_a:~0,5%"=="/dns:"    goto _argDns
+if /i "%_a:~0,6%"=="/plan:"   goto _argPlan
+set "_CLIBAD=%_a%"
 goto _argLoop
 rem  One label per value: chaining the empty check and goto on one line makes the goto conditional.
 :_argPreset
-set "_CLIPRESET=!_a:~8!"
-if not defined _CLIPRESET set "_CLIBAD=!_a!"
+set "_CLIPRESET=%_a:~8%"
+if not defined _CLIPRESET set "_CLIBAD=%_a%"
 goto _argLoop
 
 :_argDns
-set "_CLIDNS=!_a:~5!"
-if not defined _CLIDNS set "_CLIBAD=!_a!"
+set "_CLIDNS=%_a:~5%"
+if not defined _CLIDNS set "_CLIBAD=%_a%"
 goto _argLoop
 
 :_argPlan
-set "_CLIPLAN=!_a:~6!"
-if not defined _CLIPLAN set "_CLIBAD=!_a!"
+set "_CLIPLAN=%_a:~6%"
+if not defined _CLIPLAN set "_CLIBAD=%_a%"
 goto _argLoop
 
 :_argDone
+setlocal EnableDelayedExpansion
+cd /d "!SCRIPT_DIR!" 2>nul
+color 0D
+title Sincript - Windows 10/11 Optimizer
 rem ---------- Self-elevate to Administrator (robust, cannot loop) ----------
 rem  net session needs the Server service, so fall back to fltmc, then a service-free reg query.
 set "_ELEV="
@@ -204,7 +221,7 @@ echo ---------------------------------------------------------------------------
 echo     1.  Cleanup ^& repair        (temp/logs, DISM/SFC, Windows Update, Store, WinSxS)
 echo     2.  Performance tweaks       (GameDVR off, priorities, snappier UI)
 echo     3.  Privacy ^& telemetry      (telemetry, ads, Cortana, location off)
-echo     4.  Power plan               (high-performance, no sleep)
+echo     4.  Power plan               (fast plan, optional no-sleep)
 echo     5.  Network ^& DNS            (TCP tweaks, DNS, reset stack)
 echo     6.  Apps ^& files            (OpenAsar, boot.config, hosts, SteamLight, startup)
 echo     7.  Advanced                 (at your own risk - mitigations, timers, IPv6, GPU, WU drivers)
@@ -240,6 +257,13 @@ goto MainMenu
 :ExitScript
 cls
 call :Logo
+rem  Why a run ended on closed input, printed after the cls that would have wiped it.
+if defined _NOINEXIT (
+    echo [ERROR] No input after !_NOIN! empty reads - stdin looks empty or closed.
+    echo         sincript is an interactive menu: run it from a console window, or
+    echo         double-click it. It cannot be driven from a pipe or a redirected file.
+    echo.
+)
 rem  Only name files that exist.
 if exist "!LOGFILE!" (echo   Log saved to: !LOGFILE!) else (echo   No log file could be written this session.)
 if exist "!BACKUP_DIR!\" (echo   Backups in:   !BACKUP_DIR!) else (echo   No backup folder could be created.)
@@ -263,6 +287,9 @@ echo     2.  DISM + SFC system integrity
 echo     3.  Reset Windows Update components
 echo     4.  Re-register Microsoft Store / apps
 echo     5.  Compact WinSxS (free disk space)
+echo     6.  Remove Windows.old (the previous Windows; ends the way back to it)
+echo     7.  Reserved Storage on / off (space Windows keeps for updates)
+echo     8.  Undo CompactOS (decompress the system binaries)
 echo     0.  Back
 echo ==================================================================================================
 
@@ -276,6 +303,9 @@ if "!sel!"=="2" goto SfcDism
 if "!sel!"=="3" goto WUReset
 if "!sel!"=="4" goto StoreRepair
 if "!sel!"=="5" goto CompactWinSxS
+if "!sel!"=="6" goto WinOldRemove
+if "!sel!"=="7" goto ReservedStorage
+if "!sel!"=="8" goto CompactOSUndo
 if "!sel!"=="0" goto MainMenu
 goto MenuCleanup
 rem =====================================================================================
@@ -289,6 +319,7 @@ echo     1.  Apply TCP tweaks        (autotuning/heuristics/RSS/RSC, optional lo
 echo     2.  Set DNS                 (Cloudflare / Google / Quad9 / automatic)
 echo     3.  Reset network stack     (winsock / ip / dns)
 echo     4.  Flush DNS cache          (just the resolver cache - no stack changes)
+echo     5.  NetBIOS + LLMNR off/on   (old LAN name lookups that others can answer)
 echo     0.  Back
 echo ==================================================================================================
 
@@ -301,6 +332,7 @@ if "!sel!"=="1" goto NetworkApply
 if "!sel!"=="2" goto MenuDns
 if "!sel!"=="3" goto NetReset
 if "!sel!"=="4" goto FlushDns
+if "!sel!"=="5" goto NetLegacyNames
 if "!sel!"=="0" goto MainMenu
 goto MenuNetwork
 
@@ -384,7 +416,7 @@ echo     4.  Revert BCDEdit timer tweaks
 echo     5.  Experimental NVMe driver flags
 echo     6.  Disable IPv6 (all adapters)
 echo     7.  Disable memory compression / page combining
-echo     8.  %GPU% telemetry / background tasks off
+echo     8.  %GPU% telemetry / tasks, Intel and AMD usage reports off
 echo     9.  GPU hardware scheduling (HAGS) on/off
 echo    10.  Set permanent process priority  (per .exe, e.g. a game)
 echo    11.  Windows Update driver installs on/off
@@ -478,8 +510,27 @@ set /p "_rb=Also empty the Recycle Bin (irreversible)? (Y/N): "
 if /i not "!_rb!"=="Y" goto _clRbDone
 echo   ^> Emptying Recycle Bin...
 call :Log "EXEC-PS: Clear-RecycleBin"
-start "" /min /wait powershell -NoProfile -Command "try{ Clear-RecycleBin -Force -ErrorAction Stop; exit 0 }catch{ exit 1 }"
-if errorlevel 1 ( echo   [WARN] Recycle Bin could not be emptied. ) else ( echo   [OK] Recycle Bin emptied. )
+rem  Clear-RecycleBin in Windows PowerShell 5.1 can report an error after emptying the bin (it reads a stale
+rem  Windows error code), so the bin's own item count decides. The worker answers "before after"; -1 = unread.
+set "_rbres=!TEMP!\pt_rb_%RANDOM%%RANDOM%.txt"
+del "!_rbres!" >nul 2>&1
+set "PT_RBRES=!_rbres!"
+start "" /min /wait powershell -NoProfile -Command "function N{ try{ (New-Object -ComObject Shell.Application).Namespace(10).Items().Count }catch{ -1 } }; $n0=N; try{ Clear-RecycleBin -Force -ErrorAction SilentlyContinue }catch{}; $n1=N; ('' + $n0 + ' ' + $n1) | Out-File -FilePath $env:PT_RBRES -Encoding ASCII"
+set "PT_RBRES="
+set "_rb0=" & set "_rb1="
+if exist "!_rbres!" for /f "usebackq tokens=1,2" %%a in ("!_rbres!") do ( set "_rb0=%%a" & set "_rb1=%%b" )
+del "!_rbres!" >nul 2>&1
+call :Log "Recycle Bin items before=!_rb0! after=!_rb1!"
+if not defined _rb1 goto _clRbUnk
+if "!_rb1!"=="-1" goto _clRbUnk
+if not "!_rb1!"=="0" (
+    echo   [WARN] Recycle Bin: !_rb1! item^(s^) could not be deleted - a program may still be using them.
+    goto _clRbDone
+)
+if "!_rb0!"=="0" ( echo   [OK] Recycle Bin was already empty. ) else ( echo   [OK] Recycle Bin emptied. )
+goto _clRbDone
+:_clRbUnk
+echo   [WARN] Recycle Bin: its item count could not be read, so emptying it is unconfirmed.
 
 :_clRbDone
 set "_ev="
@@ -606,6 +657,7 @@ if "!_dismrc!"=="0" (
 )
 rem  SFC exit codes are undocumented, so defer to the verdict it prints last.
 echo        SFC reports its own result: the last message it printed above.
+if "!_dismrc!"=="3010" call :RestartNote
 
 :_sdDone
 pause
@@ -618,7 +670,9 @@ cls
 call :Logo
 echo ===============================  Reset Windows Update components  ================================
 echo  Stops update services, renames SoftwareDistribution and catroot2, restarts them.
-echo  Fixes most stuck-update problems. Safe.
+echo  Also empties the BITS download queue, as Microsoft's manual reset does: background
+echo  downloads in progress ^(Store, Edge updates^) are cancelled and their apps start them again.
+echo  Fixes most stuck-update problems.
 echo  The renamed folders are kept as a rollback copy. They are NOT deleted automatically -
 echo  but sincript now offers to clear out the ones left by PREVIOUS resets first, because
 echo  SoftwareDistribution is routinely 1-5 GB and one copy accumulated per run.
@@ -630,11 +684,24 @@ call :WUPruneOld
 for %%S in (wuauserv bits cryptSvc msiserver appidsvc) do call :Run "net stop %%S"
 call :Run "ren ""%SystemRoot%\SoftwareDistribution"" SoftwareDistribution.bak_%RANDOM%"
 call :Run "ren ""%SystemRoot%\System32\catroot2"" catroot2.bak_%RANDOM%"
+rem  Microsoft's step: set aside qmgr*.dat while BITS is stopped. Renamed here, never deleted.
+rem  Windows 10 and 11 keep the queue in qmgr.db, which bitsadmin empties below, so none is normal.
+set "_qmn=0"
+for %%F in ("%ALLUSERSPROFILE%\Microsoft\Network\Downloader\qmgr*.dat") do (
+    ren "%%~fF" "%%~nxF.bak_%RANDOM%" >nul 2>&1 && set /a _qmn+=1
+)
 rem  Check the renames before restarting services: wuauserv and cryptSvc recreate the folders.
 set "_wufail="
 if exist "%SystemRoot%\SoftwareDistribution\" set "_wufail=SoftwareDistribution"
 if exist "%SystemRoot%\System32\catroot2\" set "_wufail=!_wufail! catroot2"
 for %%S in (wuauserv bits cryptSvc msiserver appidsvc) do call :Run "net start %%S"
+rem  Then clear the queue the documented way (bitsadmin, deprecated but still shipped): exit code only.
+set "_bitsrc=skip"
+if exist "%SystemRoot%\System32\bitsadmin.exe" (
+    "%SystemRoot%\System32\bitsadmin.exe" /reset /allusers >nul 2>&1
+    set "_bitsrc=!errorlevel!"
+)
+call :Log "WUReset BITS: bitsadmin=!_bitsrc! qmgr_renamed=!_qmn!"
 if "%_ELEV%"=="0" (
     echo [WARN] Not elevated - Windows Update reset could not run. Re-run as Administrator.
     goto _wuDone
@@ -650,6 +717,9 @@ echo      builds fresh ones.
 echo      The previous SoftwareDistribution / catroot2 were renamed beside the originals as
 echo      a rollback copy. Once Windows Update works again they are dead weight - re-run this
 echo      action, or delete them by hand from %%SystemRoot%%.
+if "!_bitsrc!"=="0" echo      BITS: download queue cleared ^(!_qmn! old qmgr*.dat file^(s^) set aside^).
+if "!_bitsrc!"=="skip" echo      BITS: bitsadmin is not on this Windows, so the BITS queue was left as it is.
+if not "!_bitsrc!"=="0" if not "!_bitsrc!"=="skip" echo      [WARN] BITS: the download queue could not be cleared ^(bitsadmin exit !_bitsrc!^).
 
 :_wuDone
 pause
@@ -742,7 +812,7 @@ echo ========================================  Compact WinSxS  =================
 echo  Removes superseded component-store versions via the supported DISM method, then
 echo  optionally compresses system binaries (CompactOS). Frees disk space. The cleanup cannot
 echo  be undone - it deletes old component versions now instead of after Windows' 30-day wait.
-echo  CompactOS can: compact.exe /compactos:never decompresses the binaries again.
+echo  CompactOS can: Cleanup option 8 decompresses the binaries again.
 echo ==================================================================================================
 set "_c="
 set /p "_c=Run component cleanup now? (Y/N): "
@@ -768,8 +838,155 @@ if "!_cwrc!"=="0" (
 )
 if defined _corc if "!_corc!"=="0" echo [OK] CompactOS: the system binaries are compressed.
 if defined _corc if not "!_corc!"=="0" echo [FAIL] CompactOS did not complete ^(exit code !_corc!^) - see the log.
+if "!_cwrc!"=="3010" call :RestartNote
 
 :_cwDone
+pause
+goto MenuCleanup
+rem =====================================================================================
+rem  ACTION: Remove Windows.old (the previous Windows installation)
+rem =====================================================================================
+:WinOldRemove
+cls
+call :Logo
+echo ======================================  Remove Windows.old  ======================================
+echo  Windows.old holds the previous Windows after an upgrade, so Settings can go back to it.
+echo  Windows deletes it itself when the go-back period ends ^(10 days unless changed^).
+echo  Removing it frees the space now, and the way back is gone for good: there is no undo.
+echo  Uses Microsoft's DISM /Remove-OSUninstall, then checks that the folder is really gone.
+echo ==================================================================================================
+if not exist "%SystemDrive%\Windows.old\" (
+    echo   [i] There is no Windows.old on %SystemDrive% - nothing to remove.
+    pause
+    goto MenuCleanup
+)
+if "%_ELEV%"=="0" (
+    echo [WARN] Not elevated - Windows.old cannot be removed. Re-run as Administrator.
+    pause
+    goto MenuCleanup
+)
+set "_c="
+set /p "_c=Remove Windows.old and the way back to the previous Windows now? (Y/N): "
+if /i not "!_c!"=="Y" goto MenuCleanup
+call :FreeSpaceSnap
+set "_FREE_BEFORE=%_FREE_BYTES%"
+call :RunLive "dism /online /Remove-OSUninstall"
+set "_worc=!_runrc!"
+call :FreeSpaceSnap
+set "_FREE_AFTER=%_FREE_BYTES%"
+rem  Judge by the folder, not the exit code: DISM documents the rollback, not the files.
+if not exist "%SystemDrive%\Windows.old\" (
+    echo [OK] Windows.old is gone; Windows can no longer go back to the previous version.
+    call :Log "OK: Windows.old removed (dism exit !_worc!)"
+) else if "!_worc!"=="0" (
+    echo [WARN] DISM removed the way back, but the Windows.old folder is still there.
+    call :Log "WARN: Remove-OSUninstall ok, Windows.old still present"
+) else (
+    echo [WARN] DISM could not remove it ^(exit code !_worc!^) - often because this Windows.old
+    echo        is not an upgrade that Windows can go back to.
+    call :Log "FAIL: Remove-OSUninstall exit !_worc!, Windows.old still present"
+)
+if exist "%SystemDrive%\Windows.old\" (
+    echo        Remove it the supported way: Settings ^> System ^> Storage ^> Temporary files ^>
+    echo        Previous Windows installation^(s^).
+)
+call :FreeSpaceReport
+pause
+goto MenuCleanup
+rem =====================================================================================
+rem  ACTION: Reserved Storage on / off (DISM, Windows 10 2004+)
+rem =====================================================================================
+:ReservedStorage
+cls
+call :Logo
+echo =======================================  Reserved Storage  =======================================
+echo  Windows keeps some disk space aside, usually several GB, so updates can download and
+echo  install without you freeing space first. Turning it off gives that space back; updates
+echo  may then ask you to free some. Microsoft's DISM switch, for Windows 10 2004 and later.
+echo  Option 2 here turns it back on.
+echo ==================================================================================================
+if defined WIN_BUILD if !WIN_BUILD! LSS 19041 (
+    echo   [i] Build !WIN_BUILD! is older than Windows 10 2004, which this switch needs - nothing changed.
+    pause
+    goto MenuCleanup
+)
+if "%_ELEV%"=="0" (
+    echo [WARN] Not elevated - DISM cannot read or change Reserved Storage. Re-run as Administrator.
+    pause
+    goto MenuCleanup
+)
+echo   Current state, as DISM reports it:
+call :RunLive "dism /online /Get-ReservedStorageState"
+echo.
+echo     1.  Turn Reserved Storage OFF
+echo     2.  Turn Reserved Storage ON ^(the Windows default^)
+echo     0.  Back
+
+:ReservedStorage_ask
+set "_rs="
+set /p "_rs=Choose: "
+if not defined _rs call :NoInput || goto ExitScript
+if not defined _rs goto ReservedStorage_ask
+if "!_rs!"=="0" goto MenuCleanup
+if not "!_rs!"=="1" if not "!_rs!"=="2" goto ReservedStorage_ask
+call :FreeSpaceSnap
+set "_FREE_BEFORE=%_FREE_BYTES%"
+if "!_rs!"=="1" call :RunLive "dism /online /Set-ReservedStorageState /State:Disabled"
+if "!_rs!"=="2" call :RunLive "dism /online /Set-ReservedStorageState /State:Enabled"
+set "_rsrc=!_runrc!"
+call :FreeSpaceSnap
+set "_FREE_AFTER=%_FREE_BYTES%"
+set "_rsto=off"
+if "!_rs!"=="2" set "_rsto=on"
+if "!_rsrc!"=="0" (
+    echo [OK] Reserved Storage is now !_rsto!.
+    call :Log "OK: Reserved Storage !_rsto!"
+) else (
+    echo [FAIL] DISM could not turn Reserved Storage !_rsto! ^(exit code !_rsrc!^). If it said the
+    echo        storage is in use, let pending updates finish or restart Windows, then try again.
+    call :Log "FAIL: Reserved Storage !_rsto! exit !_rsrc!"
+)
+call :FreeSpaceReport
+pause
+goto MenuCleanup
+rem =====================================================================================
+rem  ACTION: Undo CompactOS (compact /compactos:never)
+rem =====================================================================================
+:CompactOSUndo
+cls
+call :Logo
+echo ========================================  Undo CompactOS  ========================================
+echo  CompactOS runs Windows from compressed system files to save space ^(option 5 can turn
+echo  it on^). This decompresses them with Microsoft's compact /compactos:never, so the space
+echo  it saved, usually a few GB, is used again. It takes several minutes; compact shows its
+echo  own progress meanwhile and cannot be stopped from here.
+echo ==================================================================================================
+if "%_ELEV%"=="0" (
+    echo [WARN] Not elevated - compact cannot change CompactOS. Re-run as Administrator.
+    pause
+    goto MenuCleanup
+)
+echo   Current state, as compact reports it:
+rem  The query's exit code is the state, not success (101 = not compact on build 26100), so it
+rem  bypasses :RunLive, which would log the answer as a failure.
+compact.exe /compactos:query
+set "_c="
+set /p "_c=Decompress the system binaries now? (Y/N): "
+if /i not "!_c!"=="Y" goto MenuCleanup
+call :FreeSpaceSnap
+set "_FREE_BEFORE=%_FREE_BYTES%"
+call :RunLive "compact.exe /compactos:never"
+set "_curc=!_runrc!"
+call :FreeSpaceSnap
+set "_FREE_AFTER=%_FREE_BYTES%"
+if "!_curc!"=="0" (
+    echo [OK] CompactOS is off: the system binaries are decompressed.
+    call :Log "OK: compact /compactos:never"
+) else (
+    echo [FAIL] compact did not finish ^(exit code !_curc!^) - see its messages above and the log.
+    call :Log "FAIL: compact /compactos:never exit !_curc!"
+)
+call :FreeSpaceReport
 pause
 goto MenuCleanup
 rem =====================================================================================
@@ -854,6 +1071,11 @@ echo     It is not a speed-up itself.
 set "_q11=" & set /p "_q11=  Show verbose boot/logon messages? (Y/N): "
 if /i "!_q11!"=="Y" call :SafeRegAdd "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" "verbosestatus" REG_DWORD 1 "Verbose startup/logon status messages"
 if /i "!_q11!"=="Y" call :VerboseStatusNote
+echo     Shift five times, a held right Shift or a held Num Lock opens an accessibility
+echo     prompt - and pulls you out of a game. The features stay in Settings.
+set "_q13=" & set /p "_q13=  Turn off the Sticky / Filter / Toggle Keys shortcut pop-ups? (Y/N): "
+if /i "!_q13!"=="Y" call :AccessKeysOff
+call :PageWipeAsk
 call :Summary "Performance tweaks applied."
 pause
 goto MainMenu
@@ -877,6 +1099,52 @@ call :SafeRegAdd "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanc
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\0cc5b647-c1df-4637-891a-dec35c318583" "Attributes" REG_DWORD 0 "Unhide core-parking min cores"
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\3b04d4fd-1cc7-4f23-ab1c-d1337819c4bb" "Attributes" REG_DWORD 0 "Unhide allow-throttle-states option"
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\ea062031-0e34-4ff1-9b6d-eb1059334028" "Attributes" REG_DWORD 0 "Unhide core-parking max cores"
+goto :eof
+
+:PageWipeAsk
+rem  The one page-file setting sincript may change, and only to the Windows default (0). Asked
+rem  only while it is a DWORD 1. Microsoft: no restart needed; a security policy may set it back.
+rem  The policy note follows only a write that worked: :SafeRegAdd exits 1 on a failure.
+set "_pwv="
+for /f "tokens=1-3" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v ClearPageFileAtShutdown 2^>nul') do if /i "%%a"=="ClearPageFileAtShutdown" if /i "%%b"=="REG_DWORD" set "_pwv=%%c"
+if /i not "!_pwv!"=="0x1" goto :eof
+echo     Windows wipes the page file at every shutdown, which can add minutes to it. The wipe keeps
+echo     what was in memory off a drive someone takes out of the PC while it is off; with BitLocker
+echo     on, the page file is encrypted there anyway. It takes effect without a restart.
+set "_q14=" & set /p "_q14=  Stop wiping the page file at shutdown (the Windows default)? (Y/N): "
+if /i not "!_q14!"=="Y" goto :eof
+call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" "ClearPageFileAtShutdown" REG_DWORD 0 "Page file no longer wiped at shutdown" || goto :eof
+echo     If a security policy sets it ^(secpol.msc, or a work or school policy^), Windows may
+echo     write the 1 back; change it there.
+goto :eof
+
+:AccessKeysOff
+rem  Clears only the shortcut bit (0x4, *_HOTKEYACTIVE in the Win32 STICKYKEYS / FILTERKEYS /
+rem  TOGGLEKEYS flags) of each Flags value, so every other choice stays. Next sign-in applies it.
+set "_akdid="
+call :_akOne "StickyKeys" "Sticky Keys"
+call :_akOne "Keyboard Response" "Filter Keys"
+call :_akOne "ToggleKeys" "Toggle Keys"
+if defined _akdid echo     The shortcut pop-ups stop after you sign out and back in.
+goto :eof
+
+:_akOne
+rem  %1 = key under HKCU\Control Panel\Accessibility, %2 = its name on screen.
+set "_akk=HKCU\Control Panel\Accessibility\%~1"
+set "_akn=%~2"
+set "_akv="
+for /f "tokens=1,2,*" %%a in ('reg query "!_akk!" /v Flags 2^>nul') do if /i "%%a"=="Flags" if /i "%%b"=="REG_SZ" set "_akv=%%c"
+set "_akbad="
+if not defined _akv set "_akbad=1"
+if defined _akv for /f "eol=0 delims=0123456789" %%x in ("!_akv!") do set "_akbad=1"
+if defined _akv if not "!_akv:~6!"=="" set "_akbad=1"
+if defined _akv if "!_akv:~0,1!"=="0" if not "!_akv:~1!"=="" set "_akbad=1"
+if defined _akbad echo   [SKIP] !_akn!: its Flags value could not be read - left alone.
+if defined _akbad goto :eof
+set /a "_akx=_akv & 4, _aky=_akv & ~4"
+if "!_akx!"=="0" echo   [SKIP] !_akn!: the shortcut is already off.
+if "!_akx!"=="0" goto :eof
+call :SafeRegAdd "!_akk!" "Flags" REG_SZ !_aky! "!_akn! shortcut off (Flags !_akv! to !_aky!)" && set "_akdid=1"
 goto :eof
 rem =====================================================================================
 rem  ACTION: Privacy
@@ -929,6 +1197,14 @@ set "_od="
 echo   This STOPS OneDrive syncing entirely - not just its telemetry.
 set /p "_od=Also block OneDrive file sync by policy? (Y/N): "
 if /i "!_od!"=="Y" call :DoOneDriveSyncOff
+set "_clip="
+echo   Clipboard sync sends what you copy through Microsoft's cloud to your other devices.
+echo   Both choices below are policies, which Microsoft documents for Pro and higher editions.
+set /p "_clip=Also stop clipboard sync across your devices (Win+V history stays)? (Y/N): "
+if /i "!_clip!"=="Y" call :SafeRegAdd "HKLM\SOFTWARE\Policies\Microsoft\Windows\System" "AllowCrossDeviceClipboard" REG_DWORD 0 "Clipboard sync across devices off (policy)"
+set "_cliph="
+set /p "_cliph=Also turn off clipboard history (Win+V) altogether? (Y/N): "
+if /i "!_cliph!"=="Y" call :SafeRegAdd "HKLM\SOFTWARE\Policies\Microsoft\Windows\System" "AllowClipboardHistory" REG_DWORD 0 "Clipboard history off (policy)"
 call :Summary "Privacy tweaks applied."
 pause
 goto MainMenu
@@ -991,11 +1267,8 @@ call :Run "sc config DiagTrack start= disabled"
 call :Run "sc stop DiagTrack"
 call :Run "sc config dmwappushservice start= disabled"
 call :Run "sc stop dmwappushservice"
-call :Run "schtasks /Change /TN ""\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser"" /Disable"
-call :Run "schtasks /Change /TN ""\Microsoft\Windows\Application Experience\ProgramDataUpdater"" /Disable"
-call :Run "schtasks /Change /TN ""\Microsoft\Windows\Customer Experience Improvement Program\Consolidator"" /Disable"
-call :Run "schtasks /Change /TN ""\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip"" /Disable"
-call :Run "schtasks /Change /TN ""\Microsoft\Windows\Windows Error Reporting\QueueReporting"" /Disable"
+rem  The tasks go by name through :DisableTelemetryTasks, which reports found / disabled / checked:
+rem  a fixed path fails quietly, and 24H2 renamed the Appraiser task and dropped the CEIP ones.
 call :DisableTelemetryTasks
 goto :eof
 rem =====================================================================================
@@ -1051,13 +1324,11 @@ rem  _PWHBOFF: set below when hibernation is turned off with no capture landed o
 set "_PWHBOFF="
 set "_FAILS=0" & set "_RUNTRACK=1"
 if defined _PWPLAN call :DoPowerPlanSwitch
-rem  Balanced is the way back to defaults, so it skips the never-sleep timeouts and just asks.
-if defined _PWPLAN if /i not "!_PWPLAN!"=="balanced" call :DoPowerTimeouts
-if defined _PWPLAN if /i not "!_PWPLAN!"=="balanced" goto _pwOptional
-rem  On the current-plan path the timeouts are asked for, never implied.
+rem  The never-sleep timeouts are asked for on every path, a plan pick included: picking a plan
+rem  is not a yes to them. Presets and the command line keep power=1 = plan + timeouts.
 set "_tmo="
-echo   Costs battery on a laptop.
-set /p "_tmo=Set monitor / standby / disk timeouts to NEVER on the current plan? (Y/N): "
+echo   Costs battery on a laptop: the -dc values are the on-battery ones.
+set /p "_tmo=Set monitor / standby / disk timeouts to NEVER, plugged in and on battery? (Y/N): "
 if /i "!_tmo!"=="Y" call :DoPowerTimeouts
 
 :_pwOptional
@@ -1078,7 +1349,20 @@ set "_pwt="
 echo   Background apps then run at full speed - more heat, more battery drain.
 set /p "_pwt=Also disable CPU power throttling? (Y/N): "
 if /i "!_pwt!"=="Y" call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling" "PowerThrottlingOff" REG_DWORD 1 "CPU power throttling off"
+set "_usb="
+echo   USB devices then stay powered while plugged in, which can cure mouse or audio dropouts.
+echo   Microsoft advises keeping selective suspend on; on battery Windows still uses it.
+set /p "_usb=Turn off USB selective suspend on AC power, for the active plan? (Y/N): "
+if /i "!_usb!"=="Y" call :UsbSuspendOffAc
+rem  Declining every question changed nothing, so it must not end in "[OK] ... applied".
+if not defined _PWPLAN if /i not "!_tmo!"=="Y" if /i not "!_hb!"=="Y" if /i not "!_mp!"=="Y" if /i not "!_pwt!"=="Y" if /i not "!_usb!"=="Y" goto _pwNone
 call :Summary "Power settings applied."
+pause
+goto MainMenu
+
+:_pwNone
+echo [SKIP] Nothing was chosen - no power setting was changed.
+set "_RUNTRACK="
 pause
 goto MainMenu
 
@@ -1151,7 +1435,8 @@ call :Run "powercfg -change -disk-timeout-dc 0"
 goto :eof
 
 :PowerBackup
-rem  Captures the active scheme, idle timeouts, minimum CPU state and hibernation into an undo .bat
+rem  Captures the active scheme, idle timeouts, minimum CPU state, USB selective suspend and
+rem  hibernation into an undo .bat
 rem  once per visit: _PWBAK_FILE is the guard, cleared again if the capture fails. Reads the
 rem  registry, not localized powercfg text. With _PWHBOFF set, the earlier hibernation state is
 rem  written as unknown. A failed capture only warns - all of it is reachable by hand.
@@ -1160,7 +1445,7 @@ set "_PWBAK_FILE=!BACKUP_DIR!\PowerPlan_%RANDOM%%RANDOM%.bat"
 set "PT_PWBAK=!_PWBAK_FILE!"
 set "PT_HBOFF=!_PWHBOFF!"
 del "!_PWBAK_FILE!" >nul 2>&1
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $g=[regex]::Match(((powercfg /getactivescheme) -join ' '),'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}').Value; if(-not $g){exit 1}; $q=[char]34; $defs=@(@('7516b95f-f776-4464-8c53-06167f40cc99','3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e','monitor idle timeout'),@('238c9fa8-0aad-41ed-83f4-97be242c8f20','29f6c1db-86da-48c5-9fdb-f2b67b1f44da','standby idle timeout'),@('0012ee47-9041-4b5d-9b77-535fba8b1442','6738e2c4-e8a5-4a42-b16a-e040e769756e','disk idle timeout'),@('54533251-82be-4824-96c1-47b60b740d00','893dee8e-2bef-41e0-89c6-b55d0929964c','minimum processor state')); $L=@('@echo off','setlocal',('set '+$q+'PT_OK=0'+$q),('set '+$q+'PT_FAIL=0'+$q),'rem  Sincript power-settings undo.','rem  Restores the power scheme that was active before sincript changed it, and the','rem  monitor / standby / disk idle timeouts and the minimum processor state it had,','rem  each in its own native unit (seconds for the timeouts, percent for the CPU floor).','rem  Values are read back from the registry, so this is locale-independent.','rem  A setting this plan never stored explicitly is restored from the plan default','rem  (PowerSettings\...\DefaultPowerSchemeValues), or failing that from the value','rem  that was in effect (powercfg /query, read as hex so it does not depend on the','rem  display language). Without that, sincript''s explicit 0 simply stayed put.','rem  Safe to run more than once. Double-click to restore.','',('rem  scheme: '+$g),'','rem  The plan itself goes back FIRST, on purpose. It is the single line that matters most','rem  in this file, so a partial run - a crash, a closed window, a failed write below -','rem  still leaves you on the plan you started from instead of stranded on the new one.',('call :pt_do powercfg -setactive '+$g),''); foreach($d in $defs){ $p='HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\'+$g+'\'+$d[0]+'\'+$d[1]; $v=Get-ItemProperty -LiteralPath $p -ErrorAction SilentlyContinue; $dp='HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\'+$d[0]+'\'+$d[1]+'\DefaultPowerSchemeValues\'+$g; $dv=Get-ItemProperty -LiteralPath $dp -ErrorAction SilentlyContinue; $qc=$null; foreach($s in @(@('ACSettingIndex','-setacvalueindex','on AC',0),@('DCSettingIndex','-setdcvalueindex','on battery',1))){ $n=$s[0]; $val=$null; $note=''; if($null -ne $v -and $null -ne $v.$n){ $val=[int]$v.$n } elseif($null -ne $dv -and $null -ne $dv.$n){ $val=[int]$dv.$n; $note=' - never set explicitly on this plan; this is the plan default' } else { if($null -eq $qc){ $qc=@([regex]::Matches(((powercfg /query $g $d[0] $d[1]) | Out-String),'0x[0-9a-fA-F]{8}') | ForEach-Object { $_.Value }) }; if($qc.Count -ge 2){ $val=[Convert]::ToInt64($qc[$qc.Count-2+$s[3]].Substring(2),16); $note=' - not stored on this plan; this is the value that was in effect' } } if($null -ne $val){ $L+=('rem  '+$d[2]+', '+$s[2]+$note); $L+=('call :pt_do powercfg '+$s[1]+' '+$g+' '+$d[0]+' '+$d[1]+' '+$val) } else { $L+=('rem  '+$d[2]+' '+$s[2]+' could not be read at backup time - left alone') } } }; $hb=Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -ErrorAction SilentlyContinue; $hv=$null; $hd=$false; if($null -ne $hb){ if($null -ne $hb.HibernateEnabled){ $hv=$hb.HibernateEnabled } elseif($null -ne $hb.HibernateEnabledDefault){ $hv=$hb.HibernateEnabledDefault; $hd=$true } }; $L+=''; if($null -ne $hv){ if($hd){ $L+='rem  HibernateEnabled was not set, so this is the Windows default (HibernateEnabledDefault).' }; if([int]$hv -eq 1){ $L+='rem  hibernation was on before sincript - turn it back on'; $L+='call :pt_do powercfg /hibernate on' } elseif($env:PT_HBOFF){ $L+='rem  sincript turned hibernation off before this file could be written, so whether it was'; $L+='rem  on before is unknown - left alone. If it was on, turn it back on from an elevated'; $L+='rem  prompt with:  powercfg /hibernate on' } else { $L+='rem  hibernation was already off before sincript - left alone' } } else { $L+='rem  hibernation state could not be read at backup time - left alone. If it was on before,'; $L+='rem  turn it back on from an elevated prompt with:  powercfg /hibernate on' }; $L+=@('','rem  Re-activate once more: powercfg only applies changed values to the active scheme','rem  when the scheme is (re)activated, so this is what makes the writes above take effect.',('call :pt_do powercfg -setactive '+$g),'','rem  Report what actually landed. This file used to print a flat restored line whatever','rem  happened, so a run that could not write anything - not elevated, or the scheme since','rem  deleted - still read as success. Generated output is real cmd, so it gets the same','rem  honesty rule as the script that wrote it.',('if '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo [OK] Restored %%PT_OK%% power setting(s).'),('if not '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo [WARN] %%PT_OK%% restored, %%PT_FAIL%% FAILED - see the [FAIL] lines above.'),('if not '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo        Re-run this file from an elevated prompt.'),('if '+$q+'%%~1'+$q+'=='+$q+$q+' pause'),'exit /b %%PT_FAIL%%','','rem  Flat on purpose: no ( ) block, so nothing here depends on delayed expansion.',':pt_do','%%*','if errorlevel 1 goto :pt_bad','set /a PT_OK+=1','exit /b',':pt_bad','set /a PT_FAIL+=1','echo   [FAIL] %%*','exit /b'); Set-Content -LiteralPath $env:PT_PWBAK -Value $L -Encoding ASCII"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $g=[regex]::Match(((powercfg /getactivescheme) -join ' '),'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}').Value; if(-not $g){exit 1}; $q=[char]34; $defs=@(@('7516b95f-f776-4464-8c53-06167f40cc99','3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e','monitor idle timeout'),@('238c9fa8-0aad-41ed-83f4-97be242c8f20','29f6c1db-86da-48c5-9fdb-f2b67b1f44da','standby idle timeout'),@('0012ee47-9041-4b5d-9b77-535fba8b1442','6738e2c4-e8a5-4a42-b16a-e040e769756e','disk idle timeout'),@('54533251-82be-4824-96c1-47b60b740d00','893dee8e-2bef-41e0-89c6-b55d0929964c','minimum processor state'),@('2a737441-1930-4402-8d77-b2bebba308a3','48e6b7a6-50f5-4782-a5d4-53bb8f07e226','USB selective suspend')); $L=@('@echo off','setlocal',('set '+$q+'PT_OK=0'+$q),('set '+$q+'PT_FAIL=0'+$q),'rem  Sincript power-settings undo.','rem  Restores the power scheme that was active before sincript changed it, and the','rem  monitor / standby / disk idle timeouts, the minimum processor state and USB selective','rem  suspend it had, each in its own unit (seconds, percent, 0 or 1 for USB suspend).','rem  Values are read back from the registry, so this is locale-independent.','rem  A setting this plan never stored explicitly is restored from the plan default','rem  (PowerSettings\...\DefaultPowerSchemeValues), or failing that from the value','rem  that was in effect (powercfg /query, read as hex so it does not depend on the','rem  display language). Without that, sincript''s explicit 0 simply stayed put.','rem  Safe to run more than once. Double-click to restore.','',('rem  scheme: '+$g),'','rem  The plan itself goes back FIRST, on purpose. It is the single line that matters most','rem  in this file, so a partial run - a crash, a closed window, a failed write below -','rem  still leaves you on the plan you started from instead of stranded on the new one.',('call :pt_do powercfg -setactive '+$g),''); foreach($d in $defs){ $p='HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\'+$g+'\'+$d[0]+'\'+$d[1]; $v=Get-ItemProperty -LiteralPath $p -ErrorAction SilentlyContinue; $dp='HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\'+$d[0]+'\'+$d[1]+'\DefaultPowerSchemeValues\'+$g; $dv=Get-ItemProperty -LiteralPath $dp -ErrorAction SilentlyContinue; $qc=$null; foreach($s in @(@('ACSettingIndex','-setacvalueindex','on AC',0),@('DCSettingIndex','-setdcvalueindex','on battery',1))){ $n=$s[0]; $val=$null; $note=''; if($null -ne $v -and $null -ne $v.$n){ $val=[int]$v.$n } elseif($null -ne $dv -and $null -ne $dv.$n){ $val=[int]$dv.$n; $note=' - never set explicitly on this plan; this is the plan default' } else { if($null -eq $qc){ $qc=@([regex]::Matches(((powercfg /query $g $d[0] $d[1]) | Out-String),'0x[0-9a-fA-F]{8}') | ForEach-Object { $_.Value }) }; if($qc.Count -ge 2){ $val=[Convert]::ToInt64($qc[$qc.Count-2+$s[3]].Substring(2),16); $note=' - not stored on this plan; this is the value that was in effect' } } if($null -ne $val){ $L+=('rem  '+$d[2]+', '+$s[2]+$note); $L+=('call :pt_do powercfg '+$s[1]+' '+$g+' '+$d[0]+' '+$d[1]+' '+$val) } else { $L+=('rem  '+$d[2]+' '+$s[2]+' could not be read at backup time - left alone') } } }; $hb=Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -ErrorAction SilentlyContinue; $hv=$null; $hd=$false; if($null -ne $hb){ if($null -ne $hb.HibernateEnabled){ $hv=$hb.HibernateEnabled } elseif($null -ne $hb.HibernateEnabledDefault){ $hv=$hb.HibernateEnabledDefault; $hd=$true } }; $L+=''; if($null -ne $hv){ if($hd){ $L+='rem  HibernateEnabled was not set, so this is the Windows default (HibernateEnabledDefault).' }; if([int]$hv -eq 1){ $L+='rem  hibernation was on before sincript - turn it back on'; $L+='call :pt_do powercfg /hibernate on' } elseif($env:PT_HBOFF){ $L+='rem  sincript turned hibernation off before this file could be written, so whether it was'; $L+='rem  on before is unknown - left alone. If it was on, turn it back on from an elevated'; $L+='rem  prompt with:  powercfg /hibernate on' } else { $L+='rem  hibernation was already off before sincript - left alone' } } else { $L+='rem  hibernation state could not be read at backup time - left alone. If it was on before,'; $L+='rem  turn it back on from an elevated prompt with:  powercfg /hibernate on' }; $L+=@('','rem  Re-activate once more: powercfg only applies changed values to the active scheme','rem  when the scheme is (re)activated, so this is what makes the writes above take effect.',('call :pt_do powercfg -setactive '+$g),'','rem  Report what actually landed. This file used to print a flat restored line whatever','rem  happened, so a run that could not write anything - not elevated, or the scheme since','rem  deleted - still read as success. Generated output is real cmd, so it gets the same','rem  honesty rule as the script that wrote it.',('if '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo [OK] Restored %%PT_OK%% power setting(s).'),('if not '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo [WARN] %%PT_OK%% restored, %%PT_FAIL%% FAILED - see the [FAIL] lines above.'),('if not '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo        Re-run this file from an elevated prompt.'),('if '+$q+'%%~1'+$q+'=='+$q+$q+' pause'),'exit /b %%PT_FAIL%%','','rem  Flat on purpose: no ( ) block, so nothing here depends on delayed expansion.',':pt_do','%%*','if errorlevel 1 goto :pt_bad','set /a PT_OK+=1','exit /b',':pt_bad','set /a PT_FAIL+=1','echo   [FAIL] %%*','exit /b'); Set-Content -LiteralPath $env:PT_PWBAK -Value $L -Encoding ASCII"
 set "PT_PWBAK="
 set "PT_HBOFF="
 if not exist "!_PWBAK_FILE!" (
@@ -1183,6 +1468,15 @@ call :Run "powercfg /setacvalueindex scheme_current sub_processor PROCTHROTTLEMI
 call :Run "powercfg /setdcvalueindex scheme_current sub_processor PROCTHROTTLEMIN 5"
 call :Run "powercfg /setactive scheme_current"
 goto :eof
+
+:UsbSuspendOffAc
+rem  AC value only (USB settings subgroup, USB selective suspend setting, 0 = disabled).
+rem  Captured first, so Revert power settings puts the old AC and battery values back.
+call :PowerBackup
+call :Log "USB selective suspend (AC) -> disabled"
+call :Run "powercfg /setacvalueindex scheme_current 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0"
+call :Run "powercfg /setactive scheme_current"
+goto :eof
 rem =====================================================================================
 rem  BACKUP: telemetry services + scheduled tasks
 rem =====================================================================================
@@ -1195,11 +1489,17 @@ set "_TLBAK_FILE=!BACKUP_DIR!\Telemetry_%RANDOM%%RANDOM%.bat"
 del "!_TLBAK_FILE!" >nul 2>&1
 set "PT_TLBAK=!_TLBAK_FILE!"
 set "PT_TL_SVC=DiagTrack|dmwappushservice"
-set "PT_TL_TASKS=Microsoft Compatibility Appraiser|ProgramDataUpdater|Consolidator|UsbCeip|QueueReporting|MareBackup|StartupAppTask|Microsoft-Windows-DiskDiagnosticDataCollector|MapsToastTask"
-start "" /min /wait powershell -NoProfile -Command "$q=[char]34; $map=@{0='boot';1='system';2='auto';3='demand';4='disabled'}; $L=@('@echo off','setlocal',('set '+$q+'PT_OK=0'+$q),('set '+$q+'PT_FAIL=0'+$q),'rem  Sincript telemetry undo.','rem  Puts back the start type of the services and the enabled state of the scheduled','rem  tasks that sincript disabled - each one only if it was in that state beforehand.','rem  Read from the registry and from Get-ScheduledTask, so nothing here depends on the','rem  display language. Safe to run more than once. Double-click to restore.',''); foreach($s in @($env:PT_TL_SVC -split '\|')){ $p='HKLM:\SYSTEM\CurrentControlSet\Services\'+$s; $v=Get-ItemProperty -LiteralPath $p -ErrorAction SilentlyContinue; if($null -eq $v -or $null -eq $v.Start){ $L+=('rem  service '+$s+' is not on this machine - nothing to put back'); continue }; $kw=$map[[int]$v.Start]; if(-not $kw){ $L+=('rem  service '+$s+' had start type '+[int]$v.Start+', which has no sc keyword - left alone'); continue }; if($kw -eq 'disabled'){ $L+=('rem  service '+$s+' was already disabled before sincript - left alone'); continue }; $L+=('rem  '+$s+': start type before sincript'); $L+=('call :pt_do sc config '+$s+' start= '+$kw); if((Get-Service -Name $s -ErrorAction SilentlyContinue).Status -eq 'Running'){ $L+=('rem  '+$s+' was running at the time, so start it again'); $L+=('call :pt_do sc start '+$s) } }; foreach($t in @($env:PT_TL_TASKS -split '\|')){ $o=@(Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue); if($o.Count -eq 0){ $L+=('rem  task '+$t+' is not present on this edition'); continue }; foreach($x in $o){ $f=$x.TaskPath+$x.TaskName; if($x.State -eq 'Disabled'){ $L+=('rem  task '+$f+' was already disabled before sincript - left alone') } else { $L+=('call :pt_do schtasks /Change /TN '+$q+$f+$q+' /Enable') } } }; $L+=@('',('if '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo [OK] Restored %%PT_OK%% item(s).'),('if not '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo [WARN] %%PT_OK%% restored, %%PT_FAIL%% FAILED - see the [FAIL] lines above.'),('if not '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo        Re-run this file from an elevated prompt.'),('if '+$q+'%%~1'+$q+'=='+$q+$q+' pause'),'exit /b %%PT_FAIL%%','','rem  Flat on purpose: no ( ) block, so nothing here depends on delayed expansion.',':pt_do','%%*','if errorlevel 1 goto :pt_bad','set /a PT_OK+=1','exit /b',':pt_bad','set /a PT_FAIL+=1','echo   [FAIL] %%*','exit /b'); Set-Content -LiteralPath $env:PT_TLBAK -Value $L -Encoding ASCII"
+set "PT_TL_TASKS=Microsoft Compatibility Appraiser|Microsoft Compatibility Appraiser Exp|ProgramDataUpdater|Consolidator|UsbCeip|QueueReporting|MareBackup|StartupAppTask|Microsoft-Windows-DiskDiagnosticDataCollector|MapsToastTask"
+start "" /min /wait powershell -NoProfile -Command "$q=[char]34; $map=@{0='boot';1='system';2='auto';3='demand';4='disabled'}; $L=@('@echo off','setlocal',('set '+$q+'PT_OK=0'+$q),('set '+$q+'PT_FAIL=0'+$q),'rem  Sincript telemetry undo.','rem  Puts back the start type of the services and the enabled state of the scheduled','rem  tasks that sincript disabled - each one only if it was in that state beforehand.','rem  Read from the registry and from Get-ScheduledTask, so nothing here depends on the','rem  display language. Safe to run more than once. Double-click to restore.',''); foreach($s in @($env:PT_TL_SVC -split '\|')){ $p='HKLM:\SYSTEM\CurrentControlSet\Services\'+$s; $v=Get-ItemProperty -LiteralPath $p -ErrorAction SilentlyContinue; if($null -eq $v -or $null -eq $v.Start){ $L+=('rem  service '+$s+' is not on this machine - nothing to put back'); continue }; $kw=$map[[int]$v.Start]; if(-not $kw){ $L+=('rem  service '+$s+' had start type '+[int]$v.Start+', which has no sc keyword - left alone'); continue }; if($kw -eq 'disabled'){ $L+=('rem  service '+$s+' was already disabled before sincript - left alone'); continue }; $L+=('rem  '+$s+': start type before sincript'); $L+=('call :pt_do sc config '+$s+' start= '+$kw); if((Get-Service -Name $s -ErrorAction SilentlyContinue).Status -eq 'Running'){ $L+=('rem  '+$s+' was running at the time, so start it again'); $L+=('call :pt_start '+$s) } }; $bad=0; foreach($t in @($env:PT_TL_TASKS -split '\|')){ try{ $o=@(Get-ScheduledTask -TaskName $t -ErrorAction Stop) }catch{ if($_.CategoryInfo.Category -eq 'ObjectNotFound'){ $L+=('rem  task '+$t+' is not present on this edition') } else { $L+=('rem  task '+$t+' could not be read - Task Scheduler did not answer, so it is not restored here'); $bad++ }; continue }; if($o.Count -eq 0){ $L+=('rem  task '+$t+' is not present on this edition'); continue }; foreach($x in $o){ $f=$x.TaskPath+$x.TaskName; if($x.State -eq 'Disabled'){ $L+=('rem  task '+$f+' was already disabled before sincript - left alone') } else { $L+=('call :pt_do schtasks /Change /TN '+$q+$f+$q+' /Enable') } } }; $L+=@('',('if '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo [OK] Restored %%PT_OK%% item(s).'),('if not '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo [WARN] %%PT_OK%% restored, %%PT_FAIL%% FAILED - see the [FAIL] lines above.'),('if not '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo        Re-run this file from an elevated prompt.'),('if '+$q+'%%~1'+$q+'=='+$q+$q+' pause'),'exit /b %%PT_FAIL%%','','rem  Flat on purpose: no ( ) block, so nothing here depends on delayed expansion.',':pt_do','%%*','if errorlevel 1 goto :pt_bad','set /a PT_OK+=1','exit /b',':pt_bad','set /a PT_FAIL+=1','echo   [FAIL] %%*','exit /b','','rem  sc start exits 1056 for a service that is already running, which is the state wanted.',':pt_start','sc start %%1',('set '+$q+'PT_RC=%%errorlevel%%'+$q),('if '+$q+'%%PT_RC%%'+$q+'=='+$q+'1056'+$q+' goto :pt_started'),('if not '+$q+'%%PT_RC%%'+$q+'=='+$q+'0'+$q+' goto :pt_nostart'),':pt_started','set /a PT_OK+=1','exit /b 0',':pt_nostart','set /a PT_FAIL+=1','echo   [FAIL] sc start %%1 - exit %%PT_RC%%','exit /b'); Set-Content -LiteralPath $env:PT_TLBAK -Value $L -Encoding ASCII; if($bad -gt 0){ exit 2 }"
+set "_tlrc=%errorlevel%"
 set "PT_TLBAK=" & set "PT_TL_SVC=" & set "PT_TL_TASKS="
 if not exist "!_TLBAK_FILE!" goto _tlbFailed
 echo   [i] Telemetry undo file: !_TLBAK_FILE!
+rem  Exit 2: a task lookup failed for another reason than "no such task", so that task's state is
+rem  not in the file. "Not present" would be false, and Revert could not put it back.
+if "%_tlrc%"=="2" echo   [WARN] Task Scheduler did not answer for some telemetry tasks: their state is not in
+if "%_tlrc%"=="2" echo          the undo file, so Revert cannot put those back. Task Scheduler can, by hand.
+if "%_tlrc%"=="2" call :Log "WARN: telemetry backup - some task states could not be read"
 set "_LOGMSG=TELEMETRY backup -> !_TLBAK_FILE!" & call :LogVar _LOGMSG
 goto :eof
 
@@ -1274,6 +1574,7 @@ call :Run "netsh int ip reset"
 call :Run "ipconfig /release"
 call :Run "ipconfig /renew"
 call :Summary "Network stack reset. Reboot recommended."
+call :RestartNote
 pause
 goto MenuNetwork
 rem =====================================================================================
@@ -1292,6 +1593,55 @@ call :Run "ipconfig /flushdns"
 call :Summary "DNS resolver cache flushed."
 pause
 goto MenuNetwork
+rem =====================================================================================
+rem  ACTION: NetBIOS over TCP/IP and LLMNR off / on
+rem =====================================================================================
+:NetLegacyNames
+cls
+call :Logo
+echo ======================================  NetBIOS and LLMNR  =======================================
+echo  Two old ways Windows finds names on the local network without DNS. Anyone on the same
+echo  network can answer them and collect sign-in hashes ^(LLMNR / NBT-NS poisoning^), which is
+echo  why security baselines turn them off. DNS and mDNS keep working. An old NAS or printer
+echo  found only by name may stop showing up: use its IP address, or turn them back on here.
+echo  Off writes the LLMNR policy and NetbiosOptions=2 on every adapter, each value backed up;
+echo  on puts the Windows defaults back. Both take full effect after a restart.
+echo ==================================================================================================
+echo     1.  Turn both OFF
+echo     2.  Turn both back ON ^(the Windows defaults^)
+echo     0.  Back
+
+:NetLegacyNames_ask
+set "_nl="
+set /p "_nl=Choose: "
+if not defined _nl call :NoInput || goto ExitScript
+if not defined _nl goto NetLegacyNames_ask
+if "!_nl!"=="0" goto MenuNetwork
+if not "!_nl!"=="1" if not "!_nl!"=="2" goto NetLegacyNames_ask
+set "_FAILS=0"
+set "_nbv=2" & set "_nbw=off"
+if "!_nl!"=="2" set "_nbv=0" & set "_nbw=default (from DHCP)"
+if "!_nl!"=="1" call :SafeRegAdd "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" "EnableMulticast" REG_DWORD 0 "LLMNR off (policy)"
+if "!_nl!"=="2" call :SafeRegDelete "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" "EnableMulticast" "LLMNR policy removed (Windows default)"
+set "_nbn=0"
+for /f "delims=" %%K in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\NetBT\Parameters\Interfaces" 2^>nul') do call :_nlAdapter "%%K"
+if "!_nbn!"=="0" echo   [i] No adapter is listed under NetBT\Parameters\Interfaces - NetBIOS left as it is.
+if "!_nl!"=="1" call :Summary "NetBIOS and LLMNR turned off. Reboot recommended."
+if "!_nl!"=="2" call :Summary "NetBIOS and LLMNR back to the Windows defaults. Reboot recommended."
+if "!_nl!"=="1" echo      Adapters added later start with the Windows default again.
+call :RestartNote
+pause
+goto MenuNetwork
+
+:_nlAdapter
+rem  %1 = one line of the Interfaces listing; only its Tcpip_{GUID} subkeys are adapters.
+set "_nbk=%~1"
+set "_nbs=!_nbk:*\Interfaces\=!"
+if "!_nbs!"=="!_nbk!" goto :eof
+if /i not "!_nbs:~0,6!"=="Tcpip_" goto :eof
+set /a _nbn+=1
+call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Services\NetBT\Parameters\Interfaces\!_nbs!" "NetbiosOptions" REG_DWORD !_nbv! "NetBIOS over TCP/IP !_nbw! (!_nbs!)"
+goto :eof
 
 :ShowCurrentDns
 rem  Lists hand-typed DNS servers per adapter, since no undo file keeps them. Reads the Tcpip keys,
@@ -1340,12 +1690,19 @@ call :_scdTrim
 if not defined _scdVal goto :eof
 set "_scdGuid=!_scdKey:*\Interfaces\=!"
 set "_scdName="
-for /f "tokens=1,2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}\!_scdGuid!\Connection" /v Name 2^>nul') do if /i "%%A"=="Name" if /i "%%B"=="REG_SZ" set "_scdName=%%C"
+rem  The name is printed straight from the read, with delayed expansion off for the echo only:
+rem  copied into a variable with it on, a "!" in the name was lost.
+for /f "tokens=1,2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}\!_scdGuid!\Connection" /v Name 2^>nul') do if /i "%%A"=="Name" if /i "%%B"=="REG_SZ" (
+    set "_scdName=1"
+    if not defined _scdAny echo  DNS servers typed in by hand, per adapter - write down any you want to keep:
+    set "_scdAny=1"
+    for /f "delims=" %%F in ("!_scdFam!  !_scdVal!") do (
+        setlocal DisableDelayedExpansion
+        echo    %%F   ^(%%C^)
+        endlocal
+    )
+)
 if not defined _scdName set /a _scdSkip+=1
-if not defined _scdName goto :eof
-if not defined _scdAny echo  DNS servers typed in by hand, per adapter - write down any you want to keep:
-set "_scdAny=1"
-echo    !_scdFam!  !_scdVal!   ^(!_scdName!^)
 goto :eof
 
 :_scdTrim
@@ -1474,7 +1831,7 @@ call :Log "DNS -> automatic (DHCP)"
 set "_dnsres=!TEMP!\pt_dnsres_%RANDOM%.txt"
 del "!_dnsres!" >nul 2>&1
 set "PT_DNSRES=!_dnsres!"
-start "" /min /wait powershell -NoProfile -Command "$ok=0;$fail=0;Get-NetAdapter -Physical -ErrorAction SilentlyContinue | ForEach-Object { try { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses -ErrorAction Stop; $ok++ } catch { $fail++ } }; ('' + $ok + ' ' + $fail) | Out-File -FilePath $env:PT_DNSRES -Encoding ASCII; if($ok -gt 0){exit 0}else{exit 1}"
+start "" /min /wait powershell -NoProfile -Command "$ok=0;$fail=0;try{ $ad=@(Get-NetAdapter -Physical -ErrorAction Stop) }catch{ 'E 0' | Out-File -FilePath $env:PT_DNSRES -Encoding ASCII; exit 2 }; $ad | ForEach-Object { try { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses -ErrorAction Stop; $ok++ } catch { $fail++ } }; ('' + $ok + ' ' + $fail) | Out-File -FilePath $env:PT_DNSRES -Encoding ASCII; if($ok -gt 0){exit 0}else{exit 1}"
 set "_dnsrc=%errorlevel%"
 set "PT_DNSRES="
 ipconfig /flushdns >nul 2>&1
@@ -1578,7 +1935,25 @@ if not defined _gd (
     pause
     goto MenuApps
 )
+rem  * and ? are wildcards to pushd, which would enter the first match; Windows forbids both in names.
+set "_gdbad="
+for /f "tokens=1* delims=*?" %%a in ("x!_gd!x") do if not "%%b"=="" set "_gdbad=1"
+if defined _gdbad (
+    echo.
+    echo [ERROR] The path holds a * or ? - type or drag the game's own *_Data folder, not a pattern.
+    call :Log "ABORT: Unity boot.config - wildcard in the path"
+    pause
+    goto MenuApps
+)
 if "!_gd:~-1!"=="\" set "_gd=!_gd:~0,-1!"
+rem  A drive root, trimmed to "C:", would mean the current folder - sincript's own.
+if "!_gd:~1!"==":" (
+    echo.
+    echo [ERROR] That is a drive, not a game's *_Data folder.
+    call :Log "ABORT: Unity boot.config - drive root"
+    pause
+    goto MenuApps
+)
 set "_boottmp=!TEMP!\PerfTweaks_boot_%RANDOM%.config"
 set "PT_SRC=!SCRIPT_DIR!boot.config"
 set "PT_OUT=!_boottmp!"
@@ -1587,7 +1962,7 @@ call :PrepareBootConfig
 if errorlevel 1 (
     echo.
     echo [ERROR] Could not prepare boot.config with job-worker-count=!_JWCOUNT!.
-    echo   Check that the bundled boot.config is readable and try again.
+    echo   Check that the bundled boot.config is readable and not blank, then try again.
     call :Log "FAIL: PrepareBootConfig workers=!_JWCOUNT!"
     if exist "!_boottmp!" del /f /q "!_boottmp!" >nul 2>&1
     pause
@@ -1602,6 +1977,21 @@ if errorlevel 1 (
     echo   Check the path and make sure you selected the game's *_Data folder.
     call :Log "ABORT: Unity boot.config - cannot enter path"
     if exist "!_boottmp!" del /f /q "!_boottmp!" >nul 2>&1
+    pause
+    goto MenuApps
+)
+rem  Show the folder pushd entered and ask: nothing is written or backed up before the Y.
+echo.
+echo   Folder: !cd!
+set "_gdn="
+for %%F in ("!cd!") do set "_gdn=%%~nxF"
+if /i not "!_gdn:~-5!"=="_Data" echo   [WARN] The name does not end in _Data: Unity reads boot.config only from *_Data.
+set "_c="
+set /p "_c=Put the tuned boot.config in this folder? (Y/N): "
+if /i not "!_c!"=="Y" (
+    popd
+    del /f /q "!_boottmp!" >nul 2>&1
+    echo   Nothing was changed.
     pause
     goto MenuApps
 )
@@ -1654,9 +2044,23 @@ echo  (single core, no shaders, no Big Picture, etc.) for a lighter, faster Stea
 echo ==================================================================================================
 rem  --- locate the Steam install folder (machine-wide first, then per-user) ---
 set "_STEAMDIR="
-for /f "tokens=2,*" %%a in ('reg query "HKLM\SOFTWARE\WOW6432Node\Valve\Steam" /v InstallPath 2^>nul ^| findstr /I "InstallPath"') do set "_STEAMDIR=%%b"
-if not defined _STEAMDIR for /f "tokens=2,*" %%a in ('reg query "HKLM\SOFTWARE\Valve\Steam" /v InstallPath 2^>nul ^| findstr /I "InstallPath"') do set "_STEAMDIR=%%b"
-if not defined _STEAMDIR for /f "tokens=2,*" %%a in ('reg query "HKCU\Software\Valve\Steam" /v SteamPath 2^>nul ^| findstr /I "SteamPath"') do set "_STEAMDIR=%%b"
+rem  UTF-8 for the read: the pipe would turn letters outside the console code page into "?".
+call :Utf8On
+rem  Read with delayed expansion off, or a "!" in the folder is lost and another folder can match.
+rem  The value comes back through a file: set /p takes it as it is.
+set "PT_SLF=!TEMP!\PerfTweaks_steam_%RANDOM%%RANDOM%.txt"
+del "!PT_SLF!" >nul 2>&1
+for /f "delims=" %%o in ("!PT_SLF!") do (
+    setlocal DisableDelayedExpansion
+    for /f "tokens=2,*" %%a in ('reg query "HKLM\SOFTWARE\WOW6432Node\Valve\Steam" /v InstallPath 2^>nul ^| findstr /I "InstallPath"') do >"%%o" echo(%%b
+    if not exist "%%o" for /f "tokens=2,*" %%a in ('reg query "HKLM\SOFTWARE\Valve\Steam" /v InstallPath 2^>nul ^| findstr /I "InstallPath"') do >"%%o" echo(%%b
+    if not exist "%%o" for /f "tokens=2,*" %%a in ('reg query "HKCU\Software\Valve\Steam" /v SteamPath 2^>nul ^| findstr /I "SteamPath"') do >"%%o" echo(%%b
+    endlocal
+)
+if exist "!PT_SLF!" set /p "_STEAMDIR=" <"!PT_SLF!"
+del "!PT_SLF!" >nul 2>&1
+set "PT_SLF="
+call :Utf8Off
 if defined _STEAMDIR set "_STEAMDIR=!_STEAMDIR:/=\!"
 if not defined _STEAMDIR (
     echo [ERROR] Could not find Steam in the registry. Is Steam installed?
@@ -1792,7 +2196,7 @@ set "_hsrc="
 if exist "%_HOSTS%.bak" set "_hsrc=%_HOSTS%.bak"
 if not defined _hsrc (
     rem  Oldest snapshot by creation time is closest to the original; copy keeps last-write time.
-    for /f "delims=" %%F in ('dir /b /od /tc "!BACKUP_DIR!\hosts_*.bak" 2^>nul') do (
+    for /f "delims=" %%F in ('dir /b /od /tc "%%BACKUP_DIR%%\hosts_*.bak" 2^>nul') do (
         if not defined _hsrc set "_hsrc=!BACKUP_DIR!\%%F"
     )
 )
@@ -1828,6 +2232,8 @@ if exist "%_HOSTS%" (
         goto RestoreHosts
     )
 )
+rem  A failed redirect leaves errorlevel alone, so write a temp file and judge the copy.
+set "_hdef=!TEMP!\pt_hosts_%RANDOM%%RANDOM%.txt"
 (
 echo # Copyright ^(c^) 1993-2009 Microsoft Corp.
 echo #
@@ -1840,9 +2246,12 @@ echo #
 echo # localhost name resolution is handled within DNS itself.
 echo #	127.0.0.1       localhost
 echo #	::1             localhost
-) > "%_HOSTS%"
-if errorlevel 1 (
-    echo [WARN] Reset failed ^(AV tamper protection?^).
+) > "!_hdef!"
+copy /y "!_hdef!" "%_HOSTS%" >nul 2>&1
+set "_hrc=!errorlevel!"
+del "!_hdef!" >nul 2>&1
+if not "!_hrc!"=="0" (
+    echo [WARN] Reset failed - hosts was NOT changed ^(not elevated, or AV tamper protection^).
 ) else (
     echo [OK] hosts reset to Windows default.
     if defined _hbakdoc if exist "!_hbakdoc!" echo      The file it replaced is saved as !_hbakdoc!
@@ -1870,18 +2279,22 @@ echo  "3" alone left it mitigated. Combined value is 0x2000003 ^(decimal 3355443
 echo  the mask must cover the same bits or the extra bit is written but ignored.
 echo  Verify after reboot: PowerShell ^> Get-SpeculationControlSettings
 echo ==================================================================================================
-set "_rp=Y"
-set /p "_rp=Create a restore point first? (Y/N): "
-if /i "!_rp!"=="Y" call :CreateRestorePoint
 set "_c="
 set /p "_c=Disable mitigations now? (Y/N): "
 if /i not "!_c!"=="Y" goto MenuAdvanced
+rem  The restore point is asked after the go-ahead: a side question is not the Y, and declining
+rem  the change must not leave a restore point or System Protection switched on behind it.
+call :RpNote
+set "_rp=Y"
+set /p "_rp=Create a restore point first? (Y/N): "
+if /i "!_rp!"=="Y" call :CreateRestorePoint
 set "_FAILS=0"
 :: 0x2000003 = bits 0-1 Spectre/Meltdown/MDS/SSBD/L1TF + bit 25 Downfall/GDS. The mask needs
 :: the same bits or Windows ignores bit 25. Decimal, since :SafeRegAdd compares with set /a.
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" "FeatureSettingsOverride" REG_DWORD 33554435 "Disable CPU mitigations (Spectre/Meltdown + Downfall)"
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" "FeatureSettingsOverrideMask" REG_DWORD 33554435 "Mitigations override mask (covers Downfall bit)"
 call :Summary "Mitigations disabled (incl. Downfall/GDS). REBOOT required."
+call :RestartNote
 pause
 goto MenuAdvanced
 
@@ -1894,6 +2307,7 @@ set "_FAILS=0"
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" "FeatureSettingsOverride" REG_DWORD 0 "Re-enable CPU mitigations (incl. Downfall)"
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" "FeatureSettingsOverrideMask" REG_DWORD 33554435 "Mitigations override mask (covers Downfall bit)"
 call :Summary "Mitigations restored to secure default (incl. Downfall/GDS). REBOOT required."
+call :RestartNote
 pause
 goto MenuAdvanced
 rem =====================================================================================
@@ -1918,6 +2332,7 @@ call :Run "bcdedit /set useplatformtick yes"
 call :Run "bcdedit /set disabledynamictick yes"
 call :Run "bcdedit /set tscsyncpolicy enhanced"
 call :Summary "Timer tweaks applied. REBOOT required."
+call :RestartNote
 pause
 goto MenuAdvanced
 
@@ -1931,6 +2346,7 @@ call :Run "bcdedit /deletevalue useplatformtick"
 call :Run "bcdedit /deletevalue disabledynamictick"
 call :Run "bcdedit /deletevalue tscsyncpolicy"
 call :Summary "Timer settings reverted to defaults. REBOOT required."
+call :RestartNote
 pause
 goto MenuAdvanced
 rem =====================================================================================
@@ -1946,18 +2362,22 @@ echo  nothing now. Only relevant if your SSD uses the in-box driver. Where it di
 echo  some drives and disk tools misbehaved. Undo: Backups ^& status ^> Restore a single value
 echo  backup, the four ...FeatureManagement_Overrides_*.reg files ^(one per flag^), then reboot.
 echo ==================================================================================================
-set "_rp=Y"
-set /p "_rp=Create a restore point first? (Y/N): "
-if /i "!_rp!"=="Y" call :CreateRestorePoint
 set "_c="
 set /p "_c=Apply NVMe flags? (Y/N): "
 if /i not "!_c!"=="Y" goto MenuAdvanced
+rem  The restore point is asked after the go-ahead: a side question is not the Y, and declining
+rem  the change must not leave a restore point or System Protection switched on behind it.
+call :RpNote
+set "_rp=Y"
+set /p "_rp=Create a restore point first? (Y/N): "
+if /i "!_rp!"=="Y" call :CreateRestorePoint
 set "_FAILS=0"
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Policies\Microsoft\FeatureManagement\Overrides" "1176759950" REG_DWORD 1 "NVMe flag 1"
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Policies\Microsoft\FeatureManagement\Overrides" "1853569164" REG_DWORD 1 "NVMe flag 2"
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Policies\Microsoft\FeatureManagement\Overrides" "156965516" REG_DWORD 1 "NVMe flag 3"
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Policies\Microsoft\FeatureManagement\Overrides" "735209102" REG_DWORD 1 "NVMe flag 4"
 call :Summary "NVMe flags written. REBOOT required."
+call :RestartNote
 pause
 goto MenuAdvanced
 rem =====================================================================================
@@ -1977,6 +2397,7 @@ if /i not "!_c!"=="Y" goto MenuAdvanced
 set "_FAILS=0"
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" "DisabledComponents" REG_DWORD 255 "Disable IPv6 (0xFF)"
 call :Summary "IPv6 disabled. REBOOT required."
+call :RestartNote
 pause
 goto MenuAdvanced
 rem =====================================================================================
@@ -2019,6 +2440,8 @@ if "%_mmrc%"=="0" (
     echo [ERROR] Memory compression / page combining could not be disabled. Reboot and re-run as Administrator.
     call :Log "FAIL: Disable-MMAgent"
 )
+set "_mmok=" & for %%r in (0 1 2) do if "%_mmrc%"=="%%r" set "_mmok=1"
+if defined _mmok call :RestartNote
 pause
 goto MenuAdvanced
 rem =====================================================================================
@@ -2031,9 +2454,8 @@ echo ==================================  GPU telemetry / tasks off  ============
 rem  Test the vendor flags, not GPU, so a machine with both vendors is offered both.
 if defined GPU_NV goto GpuNvidia
 if defined GPU_AMD goto GpuAmd
-echo  No NVIDIA/AMD GPU detected (or detection failed). Nothing to do here.
-pause
-goto MenuAdvanced
+echo  No NVIDIA/AMD GPU detected (or detection failed) - no GPU opt-out to offer.
+goto GpuVendorSvc
 
 :GpuNvidia
 echo  Detected NVIDIA. Disables NVIDIA telemetry tasks and background reporting only. The
@@ -2055,8 +2477,7 @@ if defined GPU_AMD (
     echo.
     goto GpuAmd
 )
-pause
-goto MenuAdvanced
+goto GpuVendorSvc
 
 :GpuAmd
 echo  Detected AMD. This opts you out of the AMD User Experience Program - AMD's usage-data /
@@ -2064,7 +2485,7 @@ echo  telemetry collection - by writing the opt-out to the registry, with a back
 echo  No bulk undocumented AMD register tweaks are applied; those can cause instability.
 set "_c="
 set /p "_c=Apply AMD telemetry opt-out? (Y/N): "
-if /i not "!_c!"=="Y" goto MenuAdvanced
+if /i not "!_c!"=="Y" goto GpuVendorSvc
 set "_FAILS=0"
 call :SafeRegAdd "HKLM\SOFTWARE\AMD\CN" "UserExperienceProgram" REG_DWORD 0 "AMD User Experience Program opt-out"
 echo.
@@ -2072,8 +2493,55 @@ call :Summary "AMD User Experience Program opt-out written."
 echo      AMD has no single guaranteed switch across driver versions, so to be sure also open
 echo      AMD Software ^> Settings ^> Preferences and turn OFF: AMD User Experience Program,
 echo      AMD Image Inspector, and Game Adjustment Tracking and Notifications.
+goto GpuVendorSvc
+
+:GpuVendorSvc
+rem  Intel's System Usage Report (Computing Improvement Program) and AMD's User Experience
+rem  Program services, found by the program they run: their service names vary by version
+rem  and are not documented. Only the Start value changes, backed up first.
+set "_vsn=0" & set "_vsk="
+for /f "delims=" %%L in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services" /s /v ImagePath 2^>nul') do (
+    set "_ln=%%L"
+    if "!_ln:~0,5!"=="HKEY_" (
+        set "_vsk=!_ln:*\Services\=!"
+        if not "!_vsk:\=!"=="!_vsk!" set "_vsk="
+    ) else if defined _vsk (
+        set "_hit="
+        if not "!_ln:\Intel\SUR\=!"=="!_ln!" set "_hit=1"
+        if not "!_ln:\AUEP=!"=="!_ln!" set "_hit=1"
+        if defined _hit (
+            set /a _vsn+=1
+            set "_vs!_vsn!=!_vsk!"
+        )
+        set "_vsk="
+    )
+)
+echo.
+if "!_vsn!"=="0" (
+    echo   [i] No Intel or AMD usage-report service found on this PC.
+    pause
+    goto MenuAdvanced
+)
+echo  Usage-report services found: Intel System Usage Report ^(Computing Improvement Program^)
+echo  or AMD User Experience Program. Disabling stops their collection; a driver or Intel
+echo  Driver ^& Support Assistant update may turn them back on.
+for /l %%i in (1,1,!_vsn!) do echo     - !_vs%%i!
+set "_c="
+set /p "_c=Disable these services? (Y/N): "
+if /i not "!_c!"=="Y" goto MenuAdvanced
+set "_FAILS=0"
+for /l %%i in (1,1,!_vsn!) do call :_gvsOff %%i
+call :Summary "Intel / AMD usage-report services disabled."
 pause
 goto MenuAdvanced
+
+:_gvsOff
+rem  %1 = index into _vs1.._vsN, each a service name. Stopping it is best effort: Start=4 is
+rem  the change that counts, and a service that is not running cannot stop.
+set "_vsx=!_vs%~1!"
+call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Services\!_vsx!" "Start" REG_DWORD 4 "!_vsx! service disabled"
+sc stop "!_vsx!" >nul 2>&1
+goto :eof
 rem =====================================================================================
 rem  ACTION: GPU hardware scheduling (HAGS)
 rem =====================================================================================
@@ -2116,6 +2584,7 @@ goto HagsToggle_ask
 set "_FAILS=0"
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode" REG_DWORD 1 "HAGS off"
 call :Summary "HAGS set OFF. Reboot for the change to take effect."
+call :RestartNote
 pause
 goto MenuAdvanced
 
@@ -2123,6 +2592,7 @@ goto MenuAdvanced
 set "_FAILS=0"
 call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode" REG_DWORD 2 "HAGS on (default)"
 call :Summary "HAGS set ON (default). Reboot for the change to take effect."
+call :RestartNote
 pause
 goto MenuAdvanced
 rem =====================================================================================
@@ -2198,6 +2668,7 @@ set "_SUMCAUSE=Not a failed write: the change was made and read back. The [WARN]
 call :Summary "Block written, but the Group Policy Editor will override it - change it in gpedit.msc."
 
 :_wdOffDone
+if "%_FAILS%"=="0" call :RestartNote
 pause
 goto MenuAdvanced
 
@@ -2241,6 +2712,7 @@ call :Summary "Value deleted, but the Group Policy Editor will put its own value
 :_wdOnDone
 rem  MDM applies only when no Group Policy value is left and gpedit will not write one back.
 if defined _wdmdm if "!_wdst!"=="unset" if not defined _wdgpc echo   [i] Your organization's MDM policy sets this to !_wdmdm! - that value now applies.
+if "%_FAILS%"=="0" call :RestartNote
 pause
 goto MenuAdvanced
 
@@ -2427,6 +2899,12 @@ set /p "_exe=.exe name (e.g. game.exe), blank = cancel: "
 if not defined _exe goto MenuAdvanced
 set "_exe=!_exe:"=!"
 if not defined _exe goto MenuAdvanced
+rem  ! and ^ are consumed by delayed expansion, * and ? expand as wildcards in the for below and
+rem  call expands a percent sign again: each would put the priority on another program's name.
+set "_xb="
+for /f "tokens=1* delims=*?%%!" %%a in ("x!_exe!x") do if not "%%b"=="" set "_xb=1"
+if not "!_exe:^=!"=="!_exe!" set "_xb=1"
+if defined _xb (echo   Use the plain .exe name - no wildcards, percent signs, carets or exclamation marks. & pause & goto MenuAdvanced)
 for %%I in ("!_exe!") do set "_exe=%%~nxI"
 if not defined _exe goto MenuAdvanced
 if /i not "!_exe:~-4!"==".exe" set "_exe=!_exe!.exe"
@@ -2463,6 +2941,11 @@ goto MenuAdvanced
 set "_FAILS=0"
 call :SafeRegDelete "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\!_exe!\PerfOptions" "CpuPriorityClass" "Remove priority override for !_exe!"
 echo.
+if defined _SRD_ABSENT (
+    echo [SKIP] No priority override exists for !_exe! - check the exact .exe name in Task Manager ^> Details.
+    pause
+    goto MenuAdvanced
+)
 call :Summary "Priority override for !_exe! removed (back to Windows default)."
 pause
 goto MenuAdvanced
@@ -2473,6 +2956,14 @@ rem ============================================================================
 cls
 call :Logo
 echo =====================================  Create restore point  =====================================
+rem  Turning System Protection on is a lasting change of its own: when it would happen, ask.
+call :RpNote
+if /i "!_rpst!"=="on" goto _drpGo
+set "_c="
+set /p "_c=Create the restore point anyway? (Y/N): "
+if /i not "!_c!"=="Y" goto MenuBackups
+
+:_drpGo
 call :CreateRestorePoint
 pause
 goto MenuBackups
@@ -2519,13 +3010,13 @@ echo [Min processor state]  (this script can set 5%%)
 rem  Per-call temp file names, so two open sincript windows cannot read or delete each other's.
 set "_mps=!TEMP!\pt_mps_%RANDOM%%RANDOM%.txt"
 set "PT_MPS=!_mps!"
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $g=[regex]::Match(((powercfg /getactivescheme) -join ' '),'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}').Value; $p='HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\'+$g+'\54533251-82be-4824-96c1-47b60b740d00\893dee8e-2bef-41e0-89c6-b55d0929964c'; $ac=(Get-ItemProperty -Path $p).ACSettingIndex; $dc=(Get-ItemProperty -Path $p).DCSettingIndex; if($ac -ne $null){ $s='  AC=' + $ac + '%%   DC=' + $dc + '%%' } else { $s='  (using scheme default)' }; $s | Out-File -FilePath $env:PT_MPS -Encoding ASCII"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $g=[regex]::Match(((powercfg /getactivescheme) -join ' '),'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}').Value; $p='HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\'+$g+'\54533251-82be-4824-96c1-47b60b740d00\893dee8e-2bef-41e0-89c6-b55d0929964c'; $ac=(Get-ItemProperty -Path $p).ACSettingIndex; $dc=(Get-ItemProperty -Path $p).DCSettingIndex; if($ac -eq $null -and $dc -eq $null){ $s='  (using scheme default)' } else { $sa=if($ac -ne $null){'AC='+$ac+'%%'}else{'AC=scheme default'}; $sd=if($dc -ne $null){'DC='+$dc+'%%'}else{'DC=scheme default'}; $s='  '+$sa+'   '+$sd }; $s | Out-File -FilePath $env:PT_MPS -Encoding ASCII"
 set "PT_MPS="
 if exist "!_mps!" ( type "!_mps!" & del "!_mps!" >nul 2>&1 )
 echo [DNS - adapters with DNS configured]
 set "_dnsf=!TEMP!\pt_dns_%RANDOM%%RANDOM%.txt"
 set "PT_DNSF=!_dnsf!"
-start "" /min /wait powershell -NoProfile -Command "function Wu8($p){ [IO.File]::WriteAllLines($p,[string[]]@($input),(New-Object Text.UTF8Encoding $false)) }; Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {$_.ServerAddresses} | ForEach-Object { '  ' + $_.InterfaceAlias + ': ' + ($_.ServerAddresses -join ', ') } | Wu8 $env:PT_DNSF"
+start "" /min /wait powershell -NoProfile -Command "function Wu8($p){ [IO.File]::WriteAllLines($p,[string[]]@($input),(New-Object Text.UTF8Encoding $false)) }; try{ $r=@(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction Stop) }catch{ @('  (could not read the DNS settings - the DNS client did not answer)') | Wu8 $env:PT_DNSF; exit }; $l=@($r | Where-Object {$_.ServerAddresses} | ForEach-Object { '  ' + $_.InterfaceAlias + ': ' + ($_.ServerAddresses -join ', ') }); if($l.Count -eq 0){ $l=@('  (no adapter has a DNS server set)') }; $l | Wu8 $env:PT_DNSF"
 set "PT_DNSF="
 call :Utf8On
 if exist "!_dnsf!" type "!_dnsf!"
@@ -2588,12 +3079,15 @@ echo  sleep to never. On a laptop, or if you undervolt, use menu 4 and pick High
 echo  Optional/risky items are NOT included. A restore point first is strongly advised.
 echo ==================================================================================================
 call :LaptopAdvisory
-set "_rp=Y"
-set /p "_rp=Create a System Restore Point now? (Y/N): "
-if /i "!_rp!"=="Y" call :CreateRestorePoint
 set "_c="
 set /p "_c=Proceed with the recommended set? (Y/N): "
 if /i not "!_c!"=="Y" goto MainMenu
+rem  The restore point is asked after the go-ahead: a side question is not the Y, and declining
+rem  the change must not leave a restore point or System Protection switched on behind it.
+call :RpNote
+set "_rp=Y"
+set /p "_rp=Create a System Restore Point now? (Y/N): "
+if /i "!_rp!"=="Y" call :CreateRestorePoint
 rem  _RUNTRACK on: this path runs all five cores, the most sc/schtasks/powercfg calls of any.
 set "_PWBAK_FILE="
 set "_TLBAK_FILE="
@@ -2607,6 +3101,7 @@ call :DoPowerCore
 call :DoNetworkCore
 echo.
 call :Summary "Recommended set applied. Reboot recommended."
+call :RestartNote
 pause
 goto MainMenu
 rem =====================================================================================
@@ -2632,7 +3127,8 @@ echo.
 echo  Placebo / obsolete / harmful (excluded):
 echo    - XP-era "memory optimization" registry values (fixed pool/cache sizes etc.)
 echo    - Forcing the large system file cache on by default (it is opt-in under Performance)
-echo    - Clearing the pagefile at shutdown (only makes shutdown slower)
+echo    - Turning ON the page-file wipe at shutdown as a tweak: it is a security setting that
+echo      only slows shutdown ^(Performance tweaks offers to turn it back OFF^)
 echo    - Clearing the Prefetch folder (Windows rebuilds it; first launches just get slower)
 echo    - Disabling the prefetcher itself (EnablePrefetcher=0) - same cost as above, made
 echo      permanent, and near zero gain on an SSD (SysMain on/off is offered separately)
@@ -2705,8 +3201,8 @@ echo  Requires an elevated window: unlike the menu, a /preset: run will NOT rela
 echo  itself, because a relaunch returns an exit code for the relaunch and not for the
 echo  work. Start it from an elevated prompt or a task set to run with highest privileges.
 echo.
-echo  Exit codes:  0 applied cleanly   1 applied with failures   2 bad usage
-echo               3 not elevated
+echo  Exit codes:  0 applied cleanly   1 applied with failures   3 not elevated
+echo               2 bad usage, or no writable backup folder
 echo.
 exit /b 0
 
@@ -2764,6 +3260,19 @@ if not exist "!_pfile!" (
     echo         Expected a built-in ^(light / moderate / heavy^) or this file:
     echo           !_pfile!
     set "_LOGMSG=CLI abort: preset file not found - !_pfile!" & call :LogVar _LOGMSG
+    exit /b 2
+)
+rem  A "!" on a directive line would be dropped by the line loop below, so it is refused.
+call :PresetBangCheck
+if errorlevel 2 (
+    echo [ERROR] Could not read !_CLIPRESET!.preset - nothing to apply.
+    set "_LOGMSG=CLI abort: preset file unreadable - !_pfile!" & call :LogVar _LOGMSG
+    exit /b 2
+)
+if errorlevel 1 (
+    echo [ERROR] !_CLIPRESET!.preset has an exclamation mark on a directive line - sincript cannot
+    echo         read that character from a preset. Nothing was applied.
+    set "_LOGMSG=CLI abort: exclamation mark in preset - !_pfile!" & call :LogVar _LOGMSG
     exit /b 2
 )
 rem  Parse and validate the file now - this only fills in _P_* variables, it changes nothing.
@@ -2857,9 +3366,24 @@ call :Summary "Preset applied."
 echo      Preset:          !_CLIPRESET!
 if defined PRESET_LAST (echo      Registry backup: !PRESET_LAST!) else (echo      Registry backup: none - it could not be written, see the [WARN] above.)
 echo      A reboot is recommended.
+call :RestartNote
 call :Log "CLI end: preset=!_CLIPRESET! fails=%_FAILS%"
 if not "%_FAILS%"=="0" exit /b 1
 exit /b 0
+
+:PresetBangCheck
+rem  In: _pfile. errorlevel 0 = no "!" on a directive line, 1 = one has it, 2 = the file could not
+rem  be read. The preset line loop copies values with delayed expansion on, which drops a "!" and
+rem  the text between two, so a malformed value would pass. Comment lines (#) do not count.
+set "_pbrc=2"
+for /f "delims=" %%f in ("!_pfile!") do (
+    setlocal DisableDelayedExpansion
+    findstr /r /c:"^[^#].*!" /c:"^!" "%%f" >nul 2>&1
+    if errorlevel 2 (endlocal & set "_pbrc=2") else if errorlevel 1 (endlocal & set "_pbrc=1") else (endlocal & set "_pbrc=0")
+)
+if "%_pbrc%"=="0" exit /b 1
+if "%_pbrc%"=="1" exit /b 0
+exit /b 2
 
 :NonAsciiCheck
 rem  Sets _naData=1 when _rd holds a non-printable-ASCII char; runs in :SafeRegAdd's setlocal.
@@ -2877,10 +3401,9 @@ rem  Returns, never jumps: the caller does the goto, which keeps the call stack 
 if not defined _NOIN set "_NOIN=0"
 set /a _NOIN+=1
 if !_NOIN! lss 100 exit /b 0
-echo.
-echo [ERROR] No input after !_NOIN! empty reads - stdin looks empty or closed.
-echo         sincript is an interactive menu: run it from a console window, or
-echo         double-click it. It cannot be driven from a pipe or a redirected file.
+rem  Every caller then jumps to :ExitScript, whose cls would wipe a message printed here, so
+rem  :ExitScript prints it after the redraw.
+set "_NOINEXIT=1"
 call :Log "ABORT: input exhausted after !_NOIN! empty reads"
 exit /b 1
 
@@ -2911,11 +3434,23 @@ cls
 call :Logo
 echo ====================================  Apply timer resolution  ====================================
 echo  Installs SetTimerResolution to run hidden at every logon (Task Scheduler) and hold
-echo  a higher Windows timer resolution. On Windows 10 2004+ / 11 it also sets
-echo  GlobalTimerResolutionRequests=1 so the change is system-wide (this needs a REBOOT).
+echo  a higher Windows timer resolution. Since Windows 10 2004 a raised resolution reaches
+echo  only the programs that ask for one. On Windows 11 this also sets the undocumented
+echo  GlobalTimerResolutionRequests=1, which makes it system-wide again (needs a REBOOT).
 echo  Reversible via option 7 (Remove timer resolution).
 echo ==================================================================================================
-call :LaptopAdvisory
+call :LaptopAdvisory timer
+rem  GlobalTimerResolutionRequests exists from build 20348 (Server 2022, Windows 11); before 19041
+rem  the resolution is global anyway. An unreadable build gets the write: it is harmless if unused.
+set "_trglobal="
+if not defined WIN_BUILD set "_trglobal=1"
+if defined WIN_BUILD if !WIN_BUILD! GEQ 20348 set "_trglobal=1"
+if not defined _trglobal if !WIN_BUILD! GEQ 19041 (
+    echo   [ADVISORY] Build !WIN_BUILD! is Windows 10 2004 or later, which has no switch to make a
+    echo              raised resolution system-wide: the helper raises it for itself, and other
+    echo              programs keep whatever they ask for. The CPU still wakes more often, so
+    echo              here this costs power for little gain.
+)
 call :RequireBundledFile SetTimerResolution.exe "raises the Windows timer resolution (autostart helper)"
 if errorlevel 1 goto MenuApps
 echo.
@@ -2935,7 +3470,11 @@ if defined _bad (
 set "_c="
 set /p "_c=Install the timer-resolution autostart with resolution !_res!? (Y/N): "
 if /i not "!_c!"=="Y" goto MenuApps
-set "_TRDIR=%ProgramData%\Sincript"
+rem  Program Files, not ProgramData: a standard user can create a ProgramData folder first, own
+rem  it and swap the exe this highest-privilege logon task runs. The 64-bit one even from a 32-bit
+rem  cmd, whose %ProgramFiles% is the (x86) folder; :TimerResRemove looks in both.
+set "_TRDIR=%ProgramW6432%\Sincript"
+if not defined ProgramW6432 set "_TRDIR=%ProgramFiles%\Sincript"
 if not exist "%_TRDIR%" md "%_TRDIR%" >nul 2>&1
 rem  Stop the helper before copying: Windows will not overwrite a running exe.
 taskkill /f /im SetTimerResolution.exe >nul 2>&1
@@ -2948,8 +3487,9 @@ if errorlevel 1 (
 )
 call :Log "TIMERRES helper copied to %_TRDIR%"
 set "_FAILS=0"
-call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\kernel" "GlobalTimerResolutionRequests" REG_DWORD 1 "Global timer resolution requests on"
-schtasks /Create /F /TN "Sincript Timer Resolution" /SC ONLOGON /RL HIGHEST /TR "%_TRDIR%\SetTimerResolution.exe --resolution !_res! --no-console" >nul 2>&1
+if defined _trglobal call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\kernel" "GlobalTimerResolutionRequests" REG_DWORD 1 "Global timer resolution requests on"
+rem  \" quotes the exe inside /TR: the path has a space.
+schtasks /Create /F /TN "Sincript Timer Resolution" /SC ONLOGON /RL HIGHEST /TR "\"%_TRDIR%\SetTimerResolution.exe\" --resolution !_res! --no-console" >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Could not create the scheduled task ^(schtasks failed^).
     call :Log "TIMERRES schtasks create failed"
@@ -2957,10 +3497,16 @@ if errorlevel 1 (
     goto MenuApps
 )
 call :Log "TIMERRES task created res=!_res!"
+rem  Older installs used ProgramData: drop that copy, the task no longer runs it.
+if exist "%ProgramData%\Sincript\SetTimerResolution.exe" del /f /q "%ProgramData%\Sincript\SetTimerResolution.exe" >nul 2>&1
+rd "%ProgramData%\Sincript" >nul 2>&1
 schtasks /Run /TN "Sincript Timer Resolution" >nul 2>&1
 echo.
 call :Summary "Timer-resolution autostart installed (resolution !_res!). Runs hidden at logon."
-echo      REBOOT for the system-wide effect (GlobalTimerResolutionRequests) to take hold.
+if defined _trglobal echo      REBOOT for the system-wide effect (GlobalTimerResolutionRequests) to take hold.
+if defined _trglobal call :RestartNote
+if not defined _trglobal if !WIN_BUILD! LSS 19041 echo      Before Windows 10 2004 the resolution is system-wide already; no switch was needed.
+if not defined _trglobal if !WIN_BUILD! GEQ 19041 echo      On this build it reaches the helper only - see the advisory above.
 pause
 goto MenuApps
 
@@ -2977,12 +3523,16 @@ set /p "_c=Remove the timer-resolution autostart? (Y/N): "
 if /i not "!_c!"=="Y" goto MenuApps
 schtasks /Delete /F /TN "Sincript Timer Resolution" >nul 2>&1
 taskkill /f /im SetTimerResolution.exe >nul 2>&1
-if exist "%ProgramData%\Sincript\SetTimerResolution.exe" del /f /q "%ProgramData%\Sincript\SetTimerResolution.exe" >nul 2>&1
-rd "%ProgramData%\Sincript" >nul 2>&1
+rem  Every home: Program Files of either bitness now - a 32-bit cmd names the (x86) one in
+rem  %ProgramFiles% - and ProgramData before.
+set "_trw="
+if defined ProgramW6432 set "_trw=%ProgramW6432%\Sincript"
+for %%D in ("%ProgramFiles%\Sincript" "%ProgramData%\Sincript" "!_trw!") do if not "%%~D"=="" if exist "%%~D\SetTimerResolution.exe" del /f /q "%%~D\SetTimerResolution.exe" >nul 2>&1
+for %%D in ("%ProgramFiles%\Sincript" "%ProgramData%\Sincript" "!_trw!") do if not "%%~D"=="" rd "%%~D" >nul 2>&1
 rem  Report what is actually gone: every command above hides its output and exit code.
 set "_trleft=0"
 schtasks /Query /TN "Sincript Timer Resolution" >nul 2>&1 && set "_trleft=1"
-if exist "%ProgramData%\Sincript\SetTimerResolution.exe" set "_trleft=1"
+for %%D in ("%ProgramFiles%\Sincript" "%ProgramData%\Sincript" "!_trw!") do if not "%%~D"=="" if exist "%%~D\SetTimerResolution.exe" set "_trleft=1"
 if "%_trleft%"=="0" (
     call :Log "TIMERRES removed (task + helper)"
     echo [OK] Autostart removed and the helper stopped.
@@ -3000,6 +3550,7 @@ call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\kernel" 
 echo.
 call :Summary "GlobalTimerResolutionRequests reverted to off."
 echo      REBOOT to fully apply.
+call :RestartNote
 pause
 goto MenuApps
 
@@ -3028,6 +3579,8 @@ echo     Quick Assist           Feedback Hub            Microsoft Family
 echo     Sticky Notes           To Do                   Clock and Alarms
 echo.
 echo  Sticky Notes takes its notes with it if they were never synced to an account.
+rem  _dbdid: set where something was actually removed; the closing line depends on it.
+set "_dbdid="
 set "_c="
 set /p "_c=Remove the 15 standard apps listed above? (Y/N): "
 if /i not "!_c!"=="Y" goto DebloatOpt
@@ -3058,6 +3611,12 @@ del "!_odres!" >nul 2>&1
 set "PT_OD_RES=!_odres!"
 start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $ok=0; foreach($q in @(Get-AppxPackage -AllUsers Microsoft.OneDriveSync -ErrorAction SilentlyContinue)){ try{ $q | Remove-AppxPackage -ErrorAction Stop; $ok++ }catch{} }; $s=(Join-Path $env:SystemRoot 'System32\OneDriveSetup.exe'); if(-not (Test-Path -LiteralPath $s)){ $s=(Join-Path $env:SystemRoot 'SysWOW64\OneDriveSetup.exe') }; $rc=-1; if(Test-Path -LiteralPath $s){ $pr=Start-Process -FilePath $s -ArgumentList '/uninstall' -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue; if($pr){ $rc=$pr.ExitCode } }; (''+$ok+' '+$rc) | Out-File -FilePath $env:PT_OD_RES -Encoding ASCII"
 set "PT_OD_RES="
+if not exist "!_odres!" (
+    echo   [FAIL] OneDrive: PowerShell returned no answer - nothing was checked.
+    call :Log "FAIL: DEBLOAT OneDrive - no worker answer"
+    set /a _FAILS+=1
+    goto DebloatDone
+)
 set "_odok=0" & set "_odrc=-1"
 if exist "!_odres!" for /f "usebackq tokens=1,2" %%a in ("!_odres!") do ( set "_odok=%%a" & set "_odrc=%%b" )
 del "!_odres!" >nul 2>&1
@@ -3074,9 +3633,17 @@ if "!_odrc!"=="-1" (
     echo   [OK] OneDrive uninstalled ^(!_odok! sync package^(s^) removed^).
     call :Log "DEBLOAT OneDrive: appx=!_odok! setup rc=0"
 )
+if not "!_odok!"=="0" set "_dbdid=1"
+if "!_odrc!"=="0" set "_dbdid=1"
 
 :DebloatDone
 echo.
+rem  Declining every group, or groups with nothing installed, removed nothing: say so instead.
+if not defined _dbdid (
+    echo Nothing was removed.
+    pause
+    goto MenuApps
+)
 echo Done. Most removed apps can be reinstalled from the Microsoft Store ^(LTSC editions, IoT
 echo LTSC included, have no Store^). OneDrive comes back from Microsoft's OneDrive download page.
 pause
@@ -3090,13 +3657,26 @@ set "_dbres=!TEMP!\pt_debloat_%RANDOM%.txt"
 del "!_dbres!" >nul 2>&1
 set "PT_DB_RES=!_dbres!"
 set "PT_DB_PKGS=%~1"
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $rm=0;$fail=0;$absent=0; foreach($x in @($env:PT_DB_PKGS -split '\|')){ if(-not $x){ continue }; $pk=@(Get-AppxPackage -AllUsers $x -ErrorAction SilentlyContinue); if($pk.Count -eq 0){ $absent++; continue }; foreach($q in $pk){ try{ $q | Remove-AppxPackage -ErrorAction Stop; $rm++ }catch{ $fail++ } } }; (''+$rm+' '+$fail+' '+$absent) | Out-File -FilePath $env:PT_DB_RES -Encoding ASCII"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $rm=0;$fail=0;$absent=0;$err=0; foreach($x in @($env:PT_DB_PKGS -split '\|')){ if(-not $x){ continue }; try{ $pk=@(Get-AppxPackage -AllUsers $x -ErrorAction Stop) }catch{ $err++; continue }; if($pk.Count -eq 0){ $absent++; continue }; foreach($q in $pk){ try{ $q | Remove-AppxPackage -ErrorAction Stop; $rm++ }catch{ $fail++ } } }; (''+$rm+' '+$fail+' '+$absent+' '+$err) | Out-File -FilePath $env:PT_DB_RES -Encoding ASCII"
 set "PT_DB_RES=" & set "PT_DB_PKGS="
-set "_dbrm=0" & set "_dbf=0" & set "_dba=0"
-if exist "!_dbres!" for /f "usebackq tokens=1,2,3" %%a in ("!_dbres!") do ( set "_dbrm=%%a" & set "_dbf=%%b" & set "_dba=%%c" )
+if not exist "!_dbres!" (
+    echo         [FAIL] %~2: PowerShell returned no answer - nothing was checked.
+    call :Log "FAIL: DEBLOAT %~2 - no worker answer"
+    set /a _FAILS+=1
+    goto :eof
+)
+set "_dbrm=0" & set "_dbf=0" & set "_dba=0" & set "_dbe=0"
+if exist "!_dbres!" for /f "usebackq tokens=1,2,3,4" %%a in ("!_dbres!") do ( set "_dbrm=%%a" & set "_dbf=%%b" & set "_dba=%%c" & set "_dbe=%%d" )
 del "!_dbres!" >nul 2>&1
+if not "!_dbrm!"=="0" set "_dbdid=1"
+rem  A lookup that threw was not "not installed": a found-nothing query raises no error.
+if not "!_dbe!"=="0" (
+    echo         [FAIL] %~2: !_dbe! app^(s^) could not be looked up - the app deployment service did not answer.
+    call :Log "FAIL: DEBLOAT %~2 - !_dbe! lookups failed"
+)
 if not "!_dbf!"=="0" goto _dbFail
-if "!_dbrm!"=="0" goto _dbNone
+if "!_dbrm!"=="0" if "!_dbe!"=="0" goto _dbNone
+if "!_dbrm!"=="0" goto :eof
 echo   [OK] %~2: removed !_dbrm! package^(s^); !_dba! were not installed.
 call :Log "OK: DEBLOAT %~2 removed=!_dbrm! absent=!_dba!"
 goto :eof
@@ -3136,7 +3716,8 @@ if not exist "!_sulist!" (
     pause
     goto MenuApps
 )
-rem  Fingerprint of the list shown; the toggle pass refuses if the set changed since.
+rem  Fingerprint of the list shown; the toggle pass refuses (exit 3) if the set changed since,
+rem  or if no fingerprint came back.
 rem  _susigf and _susigv must differ by more than case: cmd variable names ignore case.
 if exist "!_susigf!" for /f "usebackq delims=" %%S in ("!_susigf!") do set "_susigv=%%S"
 del "!_susigf!" >nul 2>&1
@@ -3159,8 +3740,9 @@ echo   #    State      Source           Name
 echo --------------------------------------------------------------------------------------------------
 for /l %%I in (1,1,%_sn%) do call :_suShow %%I
 echo --------------------------------------------------------------------------------------------------
-echo  Names are shown ASCII-only ^(other characters appear as "?"^); a flip still
-echo  targets the exact entry. Disabled entries stay listed and can be re-enabled.
+echo  Letters of any alphabet show as they are; control characters and a few symbols
+echo  ^(such as ^& and %%^) show as "?". A flip still targets the exact entry.
+echo  Disabled entries stay listed and can be re-enabled.
 
 :StartupMgr_ask
 set "sel="
@@ -3187,6 +3769,8 @@ del "!_sures!" >nul 2>&1
 if "%_surc%"=="0" (
     echo [OK] Flipped. Takes effect at the next sign-in; flip it again any time to undo.
     call :Log "STARTUP flip #%sel% ok"
+) else if "%_surc%"=="3" (
+    call :Log "STARTUP flip #%sel% refused - the list changed or could not be checked"
 ) else (
     echo [ERROR] The flip failed - nothing was changed. If it is an HKLM / Common entry,
     echo         make sure this window is elevated, then try again.
@@ -3213,7 +3797,8 @@ rem PowerShell worker, minimized. Enumerates Run keys and Startup folders in a f
 rem so the listed number addresses the same entry on toggle; names never round-trip through cmd.
 rem A flip writes a .reg backup of the prior state first, then the StartupApproved value.
 rem Keep literal-path / .NET registry calls: a name with [ ] * ? must not match another value.
-rem PT_SU_SIG / PT_SU_SIGIN: the toggle pass re-checks the list fingerprint and refuses on change.
+rem PT_SU_SIG / PT_SU_SIGIN: the toggle pass re-checks the list fingerprint and refuses (exit 3) on
+rem a change or a missing fingerprint.
 set "PT_SU_MODE=%~1"
 set "PT_SU_IDX=%~2"
 set "PT_SU_LIST=!_sulist!"
@@ -3221,7 +3806,7 @@ set "PT_SU_RES=!_sures!"
 set "PT_SU_BAK=!BACKUP_DIR!"
 set "PT_SU_SIG=!_susigf!"
 set "PT_SU_SIGIN=%_susigv%"
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; function Wu8($p){ [IO.File]::WriteAllLines($p,[string[]]@($input),(New-Object Text.UTF8Encoding $false)) }; $srcs=@(@('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run','HKCU-Run'),@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run','HKLM-Run'),@('HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32','HKLM-Run32')); $E=@(); foreach($s in $srcs){ $k=Get-Item -LiteralPath $s[0] -ErrorAction SilentlyContinue; if($k){ foreach($n in ($k.GetValueNames() | Sort-Object)){ if($n -ne ''){ $E+=,@($s[2],$s[1],$n) } } } }; $dirs=@(@([Environment]::GetFolderPath('Startup'),'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder','User-Startup'),@([Environment]::GetFolderPath('CommonStartup'),'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder','Common-Startup')); foreach($s in $dirs){ if($s[0] -and (Test-Path -LiteralPath $s[0])){ foreach($f in (Get-ChildItem -LiteralPath $s[0] -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' } | Sort-Object Name)){ $E+=,@($s[2],$s[1],$f.Name) } } }; function S($a,$n){ $k=Get-Item -LiteralPath $a -ErrorAction SilentlyContinue; if($k){ $v=$k.GetValue($n); if($v -and $v.Length -ge 1 -and (($v[0] -band 1) -eq 1)){ return 'Disabled' } }; return 'Enabled' }; $sg=[BitConverter]::ToString([Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::Unicode.GetBytes((($E | ForEach-Object { $_[0]+'\'+$_[2] }) -join ';')))).Replace('-',''); if($env:PT_SU_MODE -eq 'list'){ $i=0; $o=@(); foreach($x in $E){ $i++; $dn=$x[2] -replace '[\x00-\x1f\x7f]','?' -replace '[\x21\x22\x25\x26\x3c\x3e\x5e\x7c]','?'; $o+=(''+$i+'|'+(S $x[1] $x[2])+'|'+$x[0]+'|'+$dn) }; $o | Wu8 $env:PT_SU_LIST; if($env:PT_SU_SIG){ $sg | Out-File -FilePath $env:PT_SU_SIG -Encoding ASCII }; exit 0 }; if($env:PT_SU_SIGIN -and $env:PT_SU_SIGIN -ne $sg){ 'The startup list changed since it was displayed - something added or removed an entry. Nothing was modified. The refreshed list is shown below; pick again.' | Wu8 $env:PT_SU_RES; exit 1 }; $n=0; try{ $n=[int]$env:PT_SU_IDX }catch{ $n=0 }; if($n -lt 1 -or $n -gt $E.Count){ 'Entry not found - the startup list changed. Nothing was modified.' | Wu8 $env:PT_SU_RES; exit 1 }; $x=$E[$n-1]; $appr=$x[1]; $name=$x[2]; $cur=S $appr $name; $had=$false; $raw=$null; $k=Get-Item -LiteralPath $appr -ErrorAction SilentlyContinue; if($k){ $raw=$k.GetValue($name); if($null -ne $raw){ $had=$true } }; $rk=$appr.Replace('HKCU:','HKEY_CURRENT_USER').Replace('HKLM:','HKEY_LOCAL_MACHINE'); $q=[char]34; $en=$name.Replace('\','\\').Replace([string]$q,'\'+$q); $bak=Join-Path $env:PT_SU_BAK ('StartupApproved_'+(Get-Random)+'.reg'); $body=@('Windows Registry Editor Version 5.00','','['+$rk+']'); if($had -and ($raw -is [byte[]])){ $hex=(($raw | ForEach-Object { $_.ToString('x2') }) -join ','); $body+=($q+$en+$q+'=hex:'+$hex) } elseif($had){ $body+=('; original value was not REG_BINARY - not auto-restorable from this file') } else { $body+=($q+$en+$q+'=-') }; $body | Out-File -FilePath $bak -Encoding Unicode; if(-not (Test-Path -LiteralPath $bak)){ 'Could not write the undo backup - antivirus or Controlled Folder Access may be blocking the backup folder. The startup entry was NOT changed.' | Wu8 $env:PT_SU_RES; exit 1 }; if($cur -eq 'Enabled'){ $new=[byte[]](3,0,0,0)+[BitConverter]::GetBytes([DateTime]::Now.ToFileTime()); $ns='Disabled' } else { $new=[byte[]](2,0,0,0,0,0,0,0,0,0,0,0); $ns='Enabled' }; try{ [Microsoft.Win32.Registry]::SetValue($rk,$name,[byte[]]$new,[Microsoft.Win32.RegistryValueKind]::Binary) }catch{ Remove-Item -LiteralPath $bak -ErrorAction SilentlyContinue; ('Could not write the new state: '+$_.Exception.Message) | Wu8 $env:PT_SU_RES; exit 1 }; $dn=$name -replace '[\x00-\x1f\x7f]','?'; ((''+$dn+' : '+$cur+' -> '+$ns),('Backup of the previous state: '+$bak)) | Wu8 $env:PT_SU_RES; exit 0"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; function Wu8($p){ [IO.File]::WriteAllLines($p,[string[]]@($input),(New-Object Text.UTF8Encoding $false)) }; $srcs=@(@('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run','HKCU-Run'),@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run','HKLM-Run'),@('HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32','HKLM-Run32')); $E=@(); foreach($s in $srcs){ $k=Get-Item -LiteralPath $s[0] -ErrorAction SilentlyContinue; if($k){ foreach($n in ($k.GetValueNames() | Sort-Object)){ if($n -ne ''){ $E+=,@($s[2],$s[1],$n) } } } }; $dirs=@(@([Environment]::GetFolderPath('Startup'),'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder','User-Startup'),@([Environment]::GetFolderPath('CommonStartup'),'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder','Common-Startup')); foreach($s in $dirs){ if($s[0] -and (Test-Path -LiteralPath $s[0])){ foreach($f in (Get-ChildItem -LiteralPath $s[0] -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' } | Sort-Object Name)){ $E+=,@($s[2],$s[1],$f.Name) } } }; function S($a,$n){ $k=Get-Item -LiteralPath $a -ErrorAction SilentlyContinue; if($k){ $v=$k.GetValue($n); if($v -and $v.Length -ge 1 -and (($v[0] -band 1) -eq 1)){ return 'Disabled' } }; return 'Enabled' }; $sg=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::Unicode.GetBytes((($E | ForEach-Object { $_[0]+'\'+$_[2]+'='+(S $_[1] $_[2]) }) -join ';')))).Replace('-',''); if($env:PT_SU_MODE -eq 'list'){ $i=0; $o=@(); foreach($x in $E){ $i++; $dn=$x[2] -replace '[\x00-\x1f\x7f]','?' -replace '[\x21\x22\x25\x26\x3c\x3e\x5e\x7c]','?'; $o+=(''+$i+'|'+(S $x[1] $x[2])+'|'+$x[0]+'|'+$dn) }; $o | Wu8 $env:PT_SU_LIST; if($env:PT_SU_SIG){ $sg | Out-File -FilePath $env:PT_SU_SIG -Encoding ASCII }; exit 0 }; if(-not $env:PT_SU_SIGIN -or $env:PT_SU_SIGIN -ne $sg){ 'The startup list changed since it was displayed, or it could not be checked. Nothing was modified. The refreshed list is shown below; pick again.' | Wu8 $env:PT_SU_RES; exit 3 }; $n=0; try{ $n=[int]$env:PT_SU_IDX }catch{ $n=0 }; if($n -lt 1 -or $n -gt $E.Count){ 'Entry not found - the startup list changed. Nothing was modified.' | Wu8 $env:PT_SU_RES; exit 3 }; $x=$E[$n-1]; $appr=$x[1]; $name=$x[2]; $cur=S $appr $name; $had=$false; $raw=$null; $k=Get-Item -LiteralPath $appr -ErrorAction SilentlyContinue; if($k){ $raw=$k.GetValue($name); if($null -ne $raw){ $had=$true } }; $rk=$appr.Replace('HKCU:','HKEY_CURRENT_USER').Replace('HKLM:','HKEY_LOCAL_MACHINE'); $q=[char]34; $en=$name.Replace('\','\\').Replace([string]$q,'\'+$q); $bak=Join-Path $env:PT_SU_BAK ('StartupApproved_'+(Get-Random)+'.reg'); $body=@('Windows Registry Editor Version 5.00','','['+$rk+']'); if($had -and ($raw -is [byte[]])){ $hex=(($raw | ForEach-Object { $_.ToString('x2') }) -join ','); $body+=($q+$en+$q+'=hex:'+$hex) } elseif($had){ $body+=('; original value was not REG_BINARY - not auto-restorable from this file') } else { $body+=($q+$en+$q+'=-') }; $body | Out-File -FilePath $bak -Encoding Unicode; if(-not (Test-Path -LiteralPath $bak)){ 'Could not write the undo backup - antivirus or Controlled Folder Access may be blocking the backup folder. The startup entry was NOT changed.' | Wu8 $env:PT_SU_RES; exit 1 }; if($cur -eq 'Enabled'){ $new=[byte[]](3,0,0,0)+[BitConverter]::GetBytes([DateTime]::Now.ToFileTime()); $ns='Disabled' } else { $new=[byte[]](2,0,0,0,0,0,0,0,0,0,0,0); $ns='Enabled' }; try{ [Microsoft.Win32.Registry]::SetValue($rk,$name,[byte[]]$new,[Microsoft.Win32.RegistryValueKind]::Binary) }catch{ Remove-Item -LiteralPath $bak -ErrorAction SilentlyContinue; ('Could not write the new state: '+$_.Exception.Message) | Wu8 $env:PT_SU_RES; exit 1 }; $dn=$name -replace '[\x00-\x1f\x7f]','?'; ((''+$dn+' : '+$cur+' -> '+$ns),('Backup of the previous state: '+$bak)) | Wu8 $env:PT_SU_RES; exit 0"
 set "_swrc=%errorlevel%"
 set "PT_SU_MODE=" & set "PT_SU_IDX=" & set "PT_SU_LIST=" & set "PT_SU_RES=" & set "PT_SU_BAK="
 set "PT_SU_SIG=" & set "PT_SU_SIGIN="
@@ -3319,12 +3904,16 @@ goto :eof
 :PrepareBootConfig
 rem  In: PT_SRC = source boot.config, PT_OUT = output path, PT_JW = count for both worker keys.
 rem  Set by the caller, not passed as call arguments, so special characters in the path survive.
-start "" /min /wait powershell -NoProfile -Command "try{$n=$env:PT_JW;$out=@();foreach($line in Get-Content -LiteralPath $env:PT_SRC){if($line -match '^job-worker-count='){$out+='job-worker-count='+$n}elseif($line -match '^job-worker-maximum-count='){$out+='job-worker-maximum-count='+$n}else{$out+=$line}};Set-Content -LiteralPath $env:PT_OUT -Value $out -Encoding ASCII;exit 0}catch{exit 1}"
+rem  A blank source raises no read error, so the worker refuses it; a worker key the source lacks
+rem  is added, so the file always carries the counts the screen reports.
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='Stop';try{$n=$env:PT_JW;$src=@(Get-Content -LiteralPath $env:PT_SRC);if(-not ($src -match '\S')){exit 1};$out=@();$c=0;$m=0;foreach($line in $src){if($line -match '^job-worker-count='){$out+='job-worker-count='+$n;$c++}elseif($line -match '^job-worker-maximum-count='){$out+='job-worker-maximum-count='+$n;$m++}else{$out+=$line}};if($c -eq 0){$out+='job-worker-count='+$n};if($m -eq 0){$out+='job-worker-maximum-count='+$n};Set-Content -LiteralPath $env:PT_OUT -Value $out -Encoding ASCII;exit 0}catch{exit 1}"
 set "_pbc=%errorlevel%"
 set "_pbout=!PT_OUT!"
 set "PT_SRC=" & set "PT_OUT=" & set "PT_JW="
 if "%_pbc%"=="1" exit /b 1
 if not exist "!_pbout!" exit /b 1
+rem  An empty result means the source could not be read; never install it.
+for %%F in ("!_pbout!") do if %%~zF EQU 0 exit /b 1
 exit /b 0
 rem =====================================================================================
 rem  SUBMENU: System tools
@@ -3341,6 +3930,7 @@ echo  A PATH edit is backed up first; closing a process cannot be undone ^(its u
 echo     1.  Edit PATH (System / User environment variable)
 echo     2.  Find what is locking a file (and optionally close it)
 echo     3.  Crash ^& hardware-error report (read-only, from the event logs)
+echo     4.  Leftover settings check (boot flags, UAC, core services; fixes only if asked)
 echo     0.  Back
 echo ==================================================================================================
 
@@ -3352,8 +3942,185 @@ if not defined sel goto MenuTools_ask
 if "!sel!"=="1" goto PathEditor
 if "!sel!"=="2" goto LockFinder
 if "!sel!"=="3" goto CrashReport
+if "!sel!"=="4" goto LeftoverCheck
 if "!sel!"=="0" goto MainMenu
 goto MenuTools
+rem =====================================================================================
+rem  ACTION: Leftover settings check (read-only; every fix is its own question)
+rem =====================================================================================
+:LeftoverCheck
+cls
+call :Logo
+echo ===================================  Leftover settings check  ====================================
+echo  Reads settings that other tweak tools often leave behind: boot flags that cap the CPU or
+echo  memory or weaken boot security, UAC switched off, and core Windows services set to Disabled.
+echo  It changes nothing by itself: each fix at the end is its own question, backed up first.
+echo  A setting you chose on purpose ^(Test Mode for driver work, say^) is fine to keep.
+echo ==================================================================================================
+set "_lcn=0" & set "_lccap=" & set "_lcuac=" & set "_lcsvn=0" & set "_lcdid=" & set "_lcpart="
+echo.
+echo  [Boot configuration]
+if "%_ELEV%"=="0" echo   [i] Skipped: reading it needs Administrator.
+if "%_ELEV%"=="0" set "_lcpart=1"
+if not "%_ELEV%"=="0" call :_lcBcd
+echo.
+echo  [User Account Control]
+call :_lcUac
+echo.
+echo  [Core services]
+call :_lcSvcAll
+echo.
+if "!_lcn!"=="0" if not defined _lcpart echo [OK] Nothing left behind among the settings this checks.
+if "!_lcn!"=="0" if defined _lcpart echo [OK] Nothing left behind in what could be read - the boot flags were not checked.
+if "!_lcn!"=="0" goto _lcEnd
+if "%_ELEV%"=="0" echo [WARN] Not elevated - nothing can be fixed from here. Re-run as Administrator.
+if "%_ELEV%"=="0" goto _lcEnd
+set "_FAILS=0" & set "_RUNTRACK=1"
+
+:_lcFixCaps
+if not defined _lccap goto _lcFixUac
+set "_c="
+set /p "_c=Remove the processor / memory limits from the boot configuration? (Y/N): "
+if /i not "!_c!"=="Y" goto _lcFixUac
+rem  A copy of the whole store first: bcdedit /import puts it back.
+set "_lcbak=!BACKUP_DIR!\BCD_%RANDOM%%RANDOM%.bak"
+set "_lccmd=bcdedit /export "!_lcbak!""
+call :RunVar _lccmd
+if not "!_runrc!"=="0" (
+    echo   [FAIL] The boot configuration could not be saved first - the limits were left alone.
+    set /a _FAILS+=1
+    goto _lcFixUac
+)
+echo   [BACKUP] Boot configuration -^> !_lcbak!
+set "_lcdid=1"
+for %%e in (!_lccap!) do call :_lcCapDel %%e
+
+:_lcFixUac
+if not defined _lcuac goto _lcFixSvc
+set "_c="
+set /p "_c=Turn UAC back on (EnableLUA=1, the Windows default)? (Y/N): "
+if /i not "!_c!"=="Y" goto _lcFixSvc
+set "_lcdid=1"
+call :SafeRegAdd "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" "EnableLUA" REG_DWORD 1 "UAC back on (EnableLUA=1)"
+
+:_lcFixSvc
+if "!_lcsvn!"=="0" goto _lcFixDone
+set "_c="
+set /p "_c=Set these services back to their Windows start type? (Y/N): "
+if /i not "!_c!"=="Y" goto _lcFixDone
+set "_lcdid=1"
+for /l %%i in (1,1,!_lcsvn!) do call :_lcSvcFix %%i
+
+:_lcFixDone
+if defined _lcdid call :Summary "Selected leftovers fixed. Reboot recommended."
+if defined _lcdid call :RestartNote
+
+:_lcEnd
+pause
+goto MenuTools
+
+:_lcBcd
+rem  Read-only worker: the BCD WMI provider, so no localized bcdedit text is parsed. It opens
+rem  {current} by its well-known ID; an element that is not set throws and is skipped.
+set "_lcres=!TEMP!\pt_lc_%RANDOM%%RANDOM%.txt"
+set "PT_LC_RES=!_lcres!"
+del "!_lcres!" >nul 2>&1
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $r=New-Object System.Collections.Generic.List[string]; try{ $st=(Invoke-CimMethod -Namespace root\wmi -ClassName BcdStore -MethodName OpenStore -Arguments @{File=''}).Store; $o=Invoke-CimMethod -InputObject $st -MethodName OpenObject -Arguments @{Id='{fa926493-6f1c-4193-a414-58f0b2456d1e}'}; if(-not $o.ReturnValue){throw 'no current entry'}; foreach($e in @(@('testsigning',0x16000049),@('nointegritychecks',0x16000048),@('nx',0x25000020),@('numproc',0x25000061),@('onecpu',0x26000060),@('truncatememory',0x15000007),@('removememory',0x25000031))){ try{ $g=Invoke-CimMethod -InputObject $o.Object -MethodName GetElement -Arguments @{Type=[uint32]$e[1]} }catch{ continue }; if(-not $g.ReturnValue){continue}; $p=$g.Element.CimInstanceProperties; if($p['Boolean']){ $v=[int][bool]$p['Boolean'].Value } elseif($p['Integer']){ $v=[uint64]$p['Integer'].Value } else { continue }; $r.Add('BCD|'+$e[0]+'|'+$v) }; $r.Add('END|ok') }catch{ $r.Clear(); $r.Add('BCD|unreadable') }; Set-Content -LiteralPath $env:PT_LC_RES -Value $r -Encoding ASCII"
+set "PT_LC_RES="
+set "_lcok=" & set "_lcbcdn=0"
+if exist "!_lcres!" for /f "usebackq tokens=1-3 delims=|" %%a in ("!_lcres!") do (
+    if "%%a"=="END" set "_lcok=1"
+    if "%%a"=="BCD" call :_lcBcdRec "%%b" "%%c"
+)
+del "!_lcres!" >nul 2>&1
+if not defined _lcok echo   [i] The boot configuration could not be read - nothing judged here.
+if not defined _lcok set "_lcpart=1"
+if defined _lcok if "!_lcbcdn!"=="0" echo   [OK] No leftover boot flags.
+goto :eof
+
+:_lcBcdRec
+rem  %1 = element, %2 = its value from the worker; booleans arrive as 0 or 1.
+set "_lce=%~1" & set "_lcv=%~2"
+if "!_lce!"=="testsigning" if "!_lcv!"=="1" goto _lcTest
+if "!_lce!"=="nointegritychecks" if "!_lcv!"=="1" goto _lcNoInt
+if "!_lce!"=="nx" if "!_lcv!"=="2" goto _lcNx
+if "!_lce!"=="onecpu" if "!_lcv!"=="1" goto _lcCap
+if "!_lce!"=="numproc" goto _lcCap
+if "!_lce!"=="truncatememory" goto _lcCap
+if "!_lce!"=="removememory" goto _lcCap
+goto :eof
+
+:_lcTest
+set /a _lcn+=1, _lcbcdn+=1
+echo   [ADVISORY] Test Mode is on ^(testsigning^): Windows loads test-signed drivers. Unless you
+echo              need it for driver work:  bcdedit /set {current} testsigning off
+echo              If BitLocker is on, suspend it first: this flag is one it checks at boot.
+goto :eof
+
+:_lcNoInt
+set /a _lcn+=1, _lcbcdn+=1
+echo   [ADVISORY] Driver signature checks are off ^(nointegritychecks^). To turn them back on:
+echo                bcdedit /deletevalue {current} nointegritychecks
+echo              If BitLocker is on, suspend it first: this flag is one it checks at boot.
+goto :eof
+
+:_lcNx
+set /a _lcn+=1, _lcbcdn+=1
+echo   [ADVISORY] DEP is off for every program ^(nx AlwaysOff^), which drops a basic exploit
+echo              protection. The Windows default:  bcdedit /set {current} nx OptIn
+echo              If BitLocker is on, suspend it first: this flag is one it checks at boot.
+goto :eof
+
+:_lcCap
+rem  Processor and memory caps: BitLocker does not check these by default, so they are fixable here.
+set /a _lcn+=1, _lcbcdn+=1
+set "_lccap=!_lccap! !_lce!"
+if "!_lce!"=="numproc" echo   [ADVISORY] numproc=!_lcv!: Windows starts at most !_lcv! logical processors.
+if "!_lce!"=="onecpu" echo   [ADVISORY] onecpu: Windows starts only the first processor.
+if "!_lce!"=="truncatememory" echo   [ADVISORY] truncatememory=!_lcv!: Windows ignores memory above that address.
+if "!_lce!"=="removememory" echo   [ADVISORY] removememory=!_lcv!: Windows ignores that many MB of memory.
+goto :eof
+
+:_lcCapDel
+call :Run "bcdedit /deletevalue {current} %~1"
+if not "!_runrc!"=="0" set /a _FAILS+=1
+goto :eof
+
+:_lcUac
+set "_lcl="
+for /f "tokens=1,3" %%a in ('reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLUA 2^>nul') do if /i "%%a"=="EnableLUA" set "_lcl=%%b"
+if /i not "!_lcl!"=="0x0" echo   [OK] UAC is on.
+if /i not "!_lcl!"=="0x0" goto :eof
+set /a _lcn+=1
+set "_lcuac=1"
+echo   [ADVISORY] UAC is off ^(EnableLUA=0^): every program you start runs with full administrator
+echo              rights, and Store apps may refuse to open. The Windows default is 1.
+goto :eof
+
+:_lcSvcAll
+rem  name:start type Windows ships:display name. Start types from Microsoft's service guidance
+rem  (2 Automatic, 3 Manual). Only Disabled (4) is reported; a missing service is skipped.
+for %%s in (Dnscache:2:DNS_Client Dhcp:2:DHCP_Client nsi:2:Network_Store_Interface NlaSvc:2:Network_Location_Awareness BFE:2:Base_Filtering_Engine MpsSvc:2:Windows_Firewall EventLog:2:Windows_Event_Log Schedule:2:Task_Scheduler Winmgmt:2:Windows_Management_Instrumentation SystemEventsBroker:2:System_Events_Broker BrokerInfrastructure:2:Background_Tasks Appinfo:3:Application_Information BITS:3:Background_Transfer msiserver:3:Windows_Installer TrustedInstaller:3:Windows_Modules_Installer) do call :_lcSvc %%s
+if "!_lcsvn!"=="0" echo   [OK] None of the core services checked here is disabled.
+goto :eof
+
+:_lcSvc
+for /f "tokens=1-3 delims=:" %%a in ("%~1") do set "_lcs=%%a" & set "_lcd=%%b" & set "_lcdn=%%c"
+set "_lcdn=!_lcdn:_= !"
+set "_lcst="
+for /f "tokens=1,3" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\!_lcs!" /v Start 2^>nul') do if /i "%%a"=="Start" set "_lcst=%%b"
+if /i not "!_lcst!"=="0x4" goto :eof
+set /a _lcn+=1, _lcsvn+=1
+set "_lcsv!_lcsvn!=!_lcs!:!_lcd!"
+set "_lctn=Automatic"
+if "!_lcd!"=="3" set "_lctn=Manual"
+echo   [ADVISORY] !_lcdn! ^(!_lcs!^) is Disabled; default: !_lctn!.
+goto :eof
+
+:_lcSvcFix
+rem  %1 = index into _lcsv1.._lcsvN, each name:start type.
+for /f "tokens=1,2 delims=:" %%a in ("!_lcsv%~1!") do call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Services\%%a" "Start" REG_DWORD %%b "%%a start type back to %%b"
+goto :eof
 rem =====================================================================================
 rem  ACTION: PATH editor  (System Manager\Environment or HKCU\Environment)
 rem =====================================================================================
@@ -3391,13 +4158,20 @@ if /i "%PT_PE_SCOPE%"=="machine" if "%_ELEV%"=="0" (
 )
 set "_pelist=!TEMP!\pt_path_%RANDOM%.txt"
 set "_peres=!TEMP!\pt_pathres_%RANDOM%.txt"
+set "_pesigf=!TEMP!\pt_pathsig_%RANDOM%%RANDOM%.txt"
 del "!_pelist!" >nul 2>&1
+set "_pesigv="
 call :PathWorker list ""
 if not exist "!_pelist!" (
     echo [ERROR] Could not read the PATH value ^(PowerShell blocked or unavailable^).
     pause
     goto MenuTools
 )
+rem  Fingerprint of the PATH shown; remove-by-number refuses if PATH changed since, or if no
+rem  fingerprint came back.
+rem  _pesigf and _pesigv must differ by more than case: cmd variable names ignore case.
+if exist "!_pesigf!" for /f "usebackq delims=" %%S in ("!_pesigf!") do set "_pesigv=%%S"
+del "!_pesigf!" >nul 2>&1
 set "_pen=0"
 call :Utf8On
 for /f "usebackq tokens=1,2,* delims=|" %%a in ("!_pelist!") do (
@@ -3414,8 +4188,8 @@ echo ---------------------------------------------------------------------------
 for /l %%I in (1,1,%_pen%) do call :_peShow %%I
 echo --------------------------------------------------------------------------------------------------
 echo  [missing] = the folder does not exist on disk ^(a dead PATH entry^).
-echo  Folders are shown ASCII-only ^("?"^ for other characters^); an edit still targets
-echo  the exact entry.
+echo  Letters of any alphabet show as they are; control characters, ^^! and ^^^^ show as "?". An edit
+echo  still targets the exact entry.
 
 :PathEditor_ask
 echo.
@@ -3498,6 +4272,8 @@ call :Utf8Off
 del "!_peres!" >nul 2>&1
 if "%_perc%"=="0" (
     call :Log "PATH %PT_PE_SCOPE% %_pverb% ok"
+) else if "%_perc%"=="3" (
+    call :Log "PATH %PT_PE_SCOPE% %_pverb% refused - PATH changed since it was listed, or could not be checked"
 ) else (
     echo [ERROR] The PATH edit failed - nothing was changed. If this is the System PATH,
     echo         make sure the window is elevated, then try again.
@@ -3526,9 +4302,11 @@ rem  Overwrite PT_PE_ARG only when an argument is passed: add sets it directly, 
 if not "%~2"=="" set "PT_PE_ARG=%~2"
 set "PT_PE_LIST=!_pelist!"
 set "PT_PE_RES=!_peres!"
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; function Wu8($p){ [IO.File]::WriteAllLines($p,[string[]]@($input),(New-Object Text.UTF8Encoding $false)) }; $scope=$env:PT_PE_SCOPE; if($scope -eq 'machine'){ $root=[Microsoft.Win32.Registry]::LocalMachine; $sub='SYSTEM\CurrentControlSet\Control\Session Manager\Environment' } else { $root=[Microsoft.Win32.Registry]::CurrentUser; $sub='Environment' }; $k=$root.OpenSubKey($sub,$false); $raw=''; if($k){ $raw=[string]$k.GetValue('Path',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); $k.Close() }; $parts=@(); if($raw){ foreach($p in ($raw -split ';')){ if($p -ne ''){ $parts+=$p } } }; $mode=$env:PT_PE_MODE; if($mode -eq 'list'){ $i=0; $o=@(); foreach($p in $parts){ $i++; $exp=[Environment]::ExpandEnvironmentVariables($p); $state=if(Test-Path -LiteralPath $exp -PathType Container){'ok'}else{'[missing]'}; $dn=$p -replace '[\x00-\x1f\x7f]','?'; $o+=(''+$i+'|'+$state+'|'+$dn) }; $o | Wu8 $env:PT_PE_LIST; exit 0 }; $orig=$parts.Count; $changed=$false; $note=''; if($mode -eq 'add'){ $f=$env:PT_PE_ARG; if($f){ if($f.EndsWith('\')){ $f=$f.TrimEnd('\') }; $exists=$false; foreach($p in $parts){ if($p -ieq $f){ $exists=$true } }; if($exists){ $note='That folder is already in PATH - nothing added.' } else { $parts+=$f; $changed=$true; $note='Added: '+($f -replace '[\x00-\x1f\x7f]','?') } } } elseif($mode -eq 'removeidx'){ $n=0; try{ $n=[int]$env:PT_PE_ARG }catch{ $n=0 }; if($n -ge 1 -and $n -le $parts.Count){ $rm=$parts[$n-1]; $keep=@(); for($j=0;$j -lt $parts.Count;$j++){ if($j -ne ($n-1)){ $keep+=$parts[$j] } }; $parts=$keep; $changed=$true; $note='Removed: '+($rm -replace '[\x00-\x1f\x7f]','?') } else { $note='That number is not in the list - nothing removed.' } } elseif($mode -eq 'dropdead'){ $keep=@(); $drop=0; foreach($p in $parts){ $exp=[Environment]::ExpandEnvironmentVariables($p); if(Test-Path -LiteralPath $exp -PathType Container){ $keep+=$p } else { $drop++ } }; if($drop -gt 0){ $parts=$keep; $changed=$true }; $note='Removed '+$drop+' dead entry(ies).' } elseif($mode -eq 'dedupe'){ $seen=@{}; $keep=@(); $drop=0; foreach($p in $parts){ $key=$p.ToLowerInvariant(); if($seen.ContainsKey($key)){ $drop++ } else { $seen[$key]=$true; $keep+=$p } }; if($drop -gt 0){ $parts=$keep; $changed=$true }; $note='Removed '+$drop+' duplicate entry(ies).' }; if(-not $changed){ $note | Wu8 $env:PT_PE_RES; exit 0 }; $new=($parts -join ';'); if($scope -eq 'machine'){ $kw=$root.OpenSubKey($sub,$true) } else { $kw=$root.OpenSubKey($sub,$true) }; if(-not $kw){ ('Could not open PATH for writing.') | Wu8 $env:PT_PE_RES; exit 1 }; try{ $kw.SetValue('Path',$new,[Microsoft.Win32.RegistryValueKind]::ExpandString); $kw.Close() }catch{ ('Write failed: '+$_.Exception.Message) | Wu8 $env:PT_PE_RES; exit 1 }; try{ $sig='using System;using System.Runtime.InteropServices;namespace PTB{public static class N{[DllImport(\"user32.dll\",CharSet=CharSet.Auto)]public static extern IntPtr SendMessageTimeout(IntPtr h,uint m,IntPtr w,string l,uint f,uint t,out UIntPtr r);}}'; Add-Type -TypeDefinition $sig -Language CSharp; $r=[UIntPtr]::Zero; [void][PTB.N]::SendMessageTimeout([IntPtr]0xffff,0x1A,[IntPtr]::Zero,'Environment',2,5000,[ref]$r) }catch{}; ($note+[Environment]::NewLine+'PATH updated. New programs and shells see it now; already-open ones keep the old value until restarted.') | Wu8 $env:PT_PE_RES; exit 0"
+set "PT_PE_SIG=!_pesigf!"
+set "PT_PE_SIGIN=!_pesigv!"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; function Wu8($p){ [IO.File]::WriteAllLines($p,[string[]]@($input),(New-Object Text.UTF8Encoding $false)) }; function NP($x){ $t=$x.TrimEnd('\'); if($t -match '\A[A-Za-z]:\z'){ $t=$t+'\' }; $t }; $scope=$env:PT_PE_SCOPE; if($scope -eq 'machine'){ $root=[Microsoft.Win32.Registry]::LocalMachine; $sub='SYSTEM\CurrentControlSet\Control\Session Manager\Environment' } else { $root=[Microsoft.Win32.Registry]::CurrentUser; $sub='Environment' }; $k=$root.OpenSubKey($sub,$false); $raw=''; if($k){ $raw=[string]$k.GetValue('Path',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); $k.Close() }; $parts=@(); if($raw){ foreach($p in ($raw -split ';')){ if($p -ne ''){ $parts+=$p } } }; $sg=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::Unicode.GetBytes([string]$raw))).Replace('-',''); $mode=$env:PT_PE_MODE; if($mode -eq 'list'){ $i=0; $o=@(); foreach($p in $parts){ $i++; $exp=[Environment]::ExpandEnvironmentVariables($p); $state=if(Test-Path -LiteralPath $exp -PathType Container){'ok'}else{'[missing]'}; $dn=$p -replace '[\x00-\x1f\x7f]','?' -replace '[\x21\x5e]','?'; $o+=(''+$i+'|'+$state+'|'+$dn) }; $o | Wu8 $env:PT_PE_LIST; if($env:PT_PE_SIG){ $sg | Out-File -FilePath $env:PT_PE_SIG -Encoding ASCII }; exit 0 }; $orig=$parts.Count; $changed=$false; $note=''; if($mode -eq 'add'){ $f=$env:PT_PE_ARG; if($f){ $f=NP $f }; if($f){ $exists=$false; foreach($p in $parts){ if((NP $p) -ieq $f){ $exists=$true } }; if($exists){ $note='That folder is already in PATH - nothing added.' } else { $parts+=$f; $changed=$true; $note='Added: '+($f -replace '[\x00-\x1f\x7f]','?') } } } elseif($mode -eq 'removeidx'){ if(-not $env:PT_PE_SIGIN -or $env:PT_PE_SIGIN -ne $sg){ 'PATH changed since it was listed, or it could not be checked - nothing was removed. The refreshed list is shown below; pick again.' | Wu8 $env:PT_PE_RES; exit 3 }; $n=0; try{ $n=[int]$env:PT_PE_ARG }catch{ $n=0 }; if($n -ge 1 -and $n -le $parts.Count){ $rm=$parts[$n-1]; $keep=@(); for($j=0;$j -lt $parts.Count;$j++){ if($j -ne ($n-1)){ $keep+=$parts[$j] } }; $parts=$keep; $changed=$true; $note='Removed: '+($rm -replace '[\x00-\x1f\x7f]','?') } else { $note='That number is not in the list - nothing removed.' } } elseif($mode -eq 'dropdead'){ $keep=@(); $drop=0; foreach($p in $parts){ $exp=[Environment]::ExpandEnvironmentVariables($p); if(Test-Path -LiteralPath $exp -PathType Container){ $keep+=$p } else { $drop++ } }; if($drop -gt 0){ $parts=$keep; $changed=$true }; $note='Removed '+$drop+' dead entry(ies).' } elseif($mode -eq 'dedupe'){ $seen=@{}; $keep=@(); $drop=0; foreach($p in $parts){ $key=(NP $p).ToLowerInvariant(); if($seen.ContainsKey($key)){ $drop++ } else { $seen[$key]=$true; $keep+=$p } }; if($drop -gt 0){ $parts=$keep; $changed=$true }; $note='Removed '+$drop+' duplicate entry(ies).' }; if(-not $changed){ $note | Wu8 $env:PT_PE_RES; exit 0 }; $new=($parts -join ';'); if($scope -eq 'machine'){ $kw=$root.OpenSubKey($sub,$true) } else { $kw=$root.OpenSubKey($sub,$true) }; if(-not $kw){ ('Could not open PATH for writing.') | Wu8 $env:PT_PE_RES; exit 1 }; try{ $kw.SetValue('Path',$new,[Microsoft.Win32.RegistryValueKind]::ExpandString); $kw.Close() }catch{ ('Write failed: '+$_.Exception.Message) | Wu8 $env:PT_PE_RES; exit 1 }; try{ $sig='using System;using System.Runtime.InteropServices;namespace PTB{public static class N{[DllImport(\"user32.dll\",CharSet=CharSet.Auto)]public static extern IntPtr SendMessageTimeout(IntPtr h,uint m,IntPtr w,string l,uint f,uint t,out UIntPtr r);}}'; Add-Type -TypeDefinition $sig -Language CSharp; $r=[UIntPtr]::Zero; [void][PTB.N]::SendMessageTimeout([IntPtr]0xffff,0x1A,[IntPtr]::Zero,'Environment',2,5000,[ref]$r) }catch{}; ($note+[Environment]::NewLine+'PATH updated. New programs and shells see it now; already-open ones keep the old value until restarted.') | Wu8 $env:PT_PE_RES; exit 0"
 set "_pwrc=%errorlevel%"
-set "PT_PE_MODE=" & set "PT_PE_ARG=" & set "PT_PE_LIST=" & set "PT_PE_RES="
+set "PT_PE_MODE=" & set "PT_PE_ARG=" & set "PT_PE_LIST=" & set "PT_PE_RES=" & set "PT_PE_SIG=" & set "PT_PE_SIGIN="
 exit /b %_pwrc%
 rem =====================================================================================
 rem  ACTION: Find what is locking a file  (Restart Manager)
@@ -3549,6 +4327,20 @@ if not defined _lfpath goto MenuTools
 rem  Strip quotes, as Explorer's Copy as path adds them.
 if defined _lfpath set "_lfpath=!_lfpath:"=!"
 if not defined _lfpath goto MenuTools
+rem  One file only: if exist accepts a folder or a wildcard, and the Restart Manager refuses both.
+rem  A folder is told by its d attribute: if exist "path\" also matched a plain file in testing.
+set "_lfbad=" & set "_lfat="
+for /f "tokens=1* delims=*?" %%a in ("x!_lfpath!x") do if not "%%b"=="" set "_lfbad=1"
+if not defined _lfbad for %%F in ("!_lfpath!") do set "_lfat=%%~aF"
+if defined _lfat if /i "!_lfat:~0,1!"=="d" set "_lfbad=1"
+if defined _lfbad (
+    echo.
+    echo  [ERROR] That is a folder or a wildcard pattern: !_lfpath!
+    echo          Give the full path to one file.
+    echo.
+    pause
+    goto LockFinder
+)
 rem  Print the path late, with delayed expansion: at parse time a paren in it ends the block.
 if not exist "!_lfpath!" (
     echo.
@@ -3620,6 +4412,15 @@ echo  Any unsaved work in that program will be LOST. This does not delete the fi
 set "_lc="
 set /p "_lc=Proceed? (Y/N): "
 if /i not "!_lc!"=="Y" goto LockFinder_ask
+rem  Windows reuses a PID once its process ends: list the holders again, close only a PID on it.
+del "!_lflist!" >nul 2>&1
+set "PT_LF_FILE=!_lfpath!"
+call :LockWorker list
+if not exist "!_lflist!" goto _lfRecheckFail
+set "_lfstill="
+for /f "usebackq tokens=2 delims=|" %%a in ("!_lflist!") do if "%%a"=="!_lfpid[%_lfi%]!" set "_lfstill=1"
+del "!_lflist!" >nul 2>&1
+if not defined _lfstill goto _lfGone
 call :Run "taskkill /PID !_lfpid[%_lfi%]! /F"
 echo.
 echo  If it closed, the file should now be free. Re-checking...
@@ -3637,6 +4438,13 @@ if "%_lfn2%"=="0" (
     echo  [NOTE] %_lfn2% process^(es^) still hold it - it may have relaunched, or another
     echo         program opened it. Re-run to see the current list.
 )
+pause
+goto MenuTools
+
+:_lfGone
+echo.
+echo  [NOTE] PID !_lfpid[%_lfi%]! no longer holds the file, so nothing was closed. Run the lock
+echo         finder again to see the current list.
 pause
 goto MenuTools
 
@@ -3664,7 +4472,7 @@ rem  Arg 1 = list. The path comes in PT_LF_FILE, set by the caller, so special c
 rem  Restart Manager lists the holders; critical ones are never closed. The PID drives any close.
 rem  A failed query exits 4 and writes NO list, so it never reads as nothing holds the file.
 set "PT_LF_LIST=!_lflist!"
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; function Wu8($p){ [IO.File]::WriteAllLines($p,[string[]]@($input),(New-Object Text.UTF8Encoding $false)) }; $sig='using System;using System.Runtime.InteropServices;namespace PTR{[StructLayout(LayoutKind.Sequential)]public struct RUP{public int pid;public System.Runtime.InteropServices.ComTypes.FILETIME ft;}public enum AT{Unknown=0,MainWindow=1,OtherWindow=2,Service=3,Explorer=4,Console=5,Critical=1000}[StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]public struct PI{public RUP Process;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=256)]public string app;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=64)]public string svc;public AT AppType;public uint Status;public uint Sess;[MarshalAs(UnmanagedType.Bool)]public bool restart;}public static class Rm{[DllImport(\"rstrtmgr.dll\",CharSet=CharSet.Unicode)]public static extern int RmStartSession(out uint h,int f,string k);[DllImport(\"rstrtmgr.dll\")]public static extern int RmEndSession(uint h);[DllImport(\"rstrtmgr.dll\",CharSet=CharSet.Unicode)]public static extern int RmRegisterResources(uint h,uint nf,string[] fs,uint na,RUP[] a,uint ns,string[] s);[DllImport(\"rstrtmgr.dll\")]public static extern int RmGetList(uint h,out uint need,ref uint have,[In,Out]PI[] arr,ref uint reason);}}'; try{ Add-Type -TypeDefinition $sig -Language CSharp }catch{ exit 3 }; $file=$env:PT_LF_FILE; $key=[Guid]::NewGuid().ToString(); $h=0; if([PTR.Rm]::RmStartSession([ref]$h,0,$key) -ne 0){ exit 4 }; $out=@(); $bad=$false; try{ if([PTR.Rm]::RmRegisterResources($h,1,@($file),0,$null,0,$null) -ne 0){ throw }; [uint32]$need=0;[uint32]$have=0;[uint32]$reason=0; $rc=[PTR.Rm]::RmGetList($h,[ref]$need,[ref]$have,$null,[ref]$reason); if($rc -ne 0 -and $rc -ne 234){ throw }; if($need -gt 0){ $arr=[PTR.PI[]]::new($need); $have=$need; $rc=[PTR.Rm]::RmGetList($h,[ref]$need,[ref]$have,$arr,[ref]$reason); if($rc -ne 0){ throw }; if($rc -eq 0){ $i=0; for($j=0;$j -lt [int]$have;$j++){ $p=$arr[$j]; $i++; $nm=$p.app; if(-not $nm){ $nm='(pid '+$p.Process.pid+')' }; $dn=$nm -replace '[\x00-\x1f\x7f]','?'; $crit=if($p.AppType -eq [PTR.AT]::Critical){'critical'}else{'normal'}; $out+=(''+$i+'|'+$p.Process.pid+'|'+$crit+'|'+$dn+'|') } } } }catch{ $bad=$true }; [PTR.Rm]::RmEndSession($h) | Out-Null; if($bad){ exit 4 }; $out | Wu8 $env:PT_LF_LIST; exit 0"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; function Wu8($p){ [IO.File]::WriteAllLines($p,[string[]]@($input),(New-Object Text.UTF8Encoding $false)) }; $sig='using System;using System.Runtime.InteropServices;namespace PTR{[StructLayout(LayoutKind.Sequential)]public struct RUP{public int pid;public System.Runtime.InteropServices.ComTypes.FILETIME ft;}public enum AT{Unknown=0,MainWindow=1,OtherWindow=2,Service=3,Explorer=4,Console=5,Critical=1000}[StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]public struct PI{public RUP Process;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=256)]public string app;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=64)]public string svc;public AT AppType;public uint Status;public uint Sess;[MarshalAs(UnmanagedType.Bool)]public bool restart;}public static class Rm{[DllImport(\"rstrtmgr.dll\",CharSet=CharSet.Unicode)]public static extern int RmStartSession(out uint h,int f,string k);[DllImport(\"rstrtmgr.dll\")]public static extern int RmEndSession(uint h);[DllImport(\"rstrtmgr.dll\",CharSet=CharSet.Unicode)]public static extern int RmRegisterResources(uint h,uint nf,string[] fs,uint na,RUP[] a,uint ns,string[] s);[DllImport(\"rstrtmgr.dll\")]public static extern int RmGetList(uint h,out uint need,ref uint have,[In,Out]PI[] arr,ref uint reason);}}'; try{ Add-Type -TypeDefinition $sig -Language CSharp }catch{ exit 3 }; $file=$env:PT_LF_FILE; $key=[Guid]::NewGuid().ToString(); $h=0; if([PTR.Rm]::RmStartSession([ref]$h,0,$key) -ne 0){ exit 4 }; $out=@(); $bad=$false; try{ if([PTR.Rm]::RmRegisterResources($h,1,@($file),0,$null,0,$null) -ne 0){ throw }; [uint32]$need=0;[uint32]$have=0;[uint32]$reason=0; $rc=[PTR.Rm]::RmGetList($h,[ref]$need,[ref]$have,$null,[ref]$reason); if($rc -ne 0 -and $rc -ne 234){ throw }; if($need -gt 0){ $arr=[PTR.PI[]]::new($need); $have=$need; $rc=[PTR.Rm]::RmGetList($h,[ref]$need,[ref]$have,$arr,[ref]$reason); if($rc -ne 0){ throw }; if($rc -eq 0){ $i=0; for($j=0;$j -lt [int]$have;$j++){ $p=$arr[$j]; $i++; $nm=$p.app; if(-not $nm){ $nm='(pid '+$p.Process.pid+')' }; $dn=$nm -replace '[\x00-\x1f\x7f]','?' -replace '[\x21\x5e]','?'; $crit=if($p.AppType -eq [PTR.AT]::Critical){'critical'}else{'normal'}; $out+=(''+$i+'|'+$p.Process.pid+'|'+$crit+'|'+$dn+'|') } } } }catch{ $bad=$true }; [PTR.Rm]::RmEndSession($h) | Out-Null; if($bad){ exit 4 }; $out | Wu8 $env:PT_LF_LIST; exit 0"
 set "_lwrc=%errorlevel%"
 set "PT_LF_LIST=" & set "PT_LF_FILE="
 exit /b %_lwrc%
@@ -3936,7 +4744,7 @@ rem  Helper names carry an x prefix: PowerShell aliases beat functions, e.g. R a
 set "PT_CR_OUT=!_crcsv!"
 set "PT_CR_BAK=!BACKUP_DIR!"
 set "PT_CR_DAYS=!_crdays!"
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; if(-not $env:PT_CR_OUT){ exit 2 }; $days=30; try{ $days=[int]$env:PT_CR_DAYS }catch{ $days=30 }; if($days -lt 1 -or $days -gt 365){ $days=30 }; $now=Get-Date; $from=$now.AddDays(-$days); $ic=[Globalization.CultureInfo]::InvariantCulture; $ap=[char]39; $rows=New-Object System.Collections.Generic.List[object]; function xR($k,$t,$l,$p,$i,$v,$x,$y,$z){ $rows.Add([pscustomobject]@{K=$k;T=$t;Log=$l;Prov=$p;Id=$i;Lvl=$v;A=$x;B=$y;C=$z}) }; function xS($s){ if($null -eq $s){ return '' }; $s=([string]$s) -replace '[^\x20-\x7e]','?' -replace '[\x21\x22\x25\x26\x2c\x3c\x3e\x5e\x7c]','?'; if($s.Length -gt 40){ $s=$s.Substring(0,40) }; return $s.Trim() }; function xRd($l,$x,$v){ $q=New-Object System.Diagnostics.Eventing.Reader.EventLogQuery($l,[System.Diagnostics.Eventing.Reader.PathType]::LogName,$x); if($v){ $q.ReverseDirection=$true }; return (New-Object System.Diagnostics.Eventing.Reader.EventLogReader($q)) }; function xWhy($e){ $x=$e.Exception; while($x.InnerException){ $x=$x.InnerException }; if($x -is [UnauthorizedAccessException]){ return 'denied' }; if($x -is [System.Diagnostics.Eventing.Reader.EventLogNotFoundException]){ return 'missing' }; return 'error' }; function xD($x,$n){ foreach($d in @($x.Event.EventData.Data)){ if($d -isnot [string] -and $d.Name -eq $n){ return [string]$d.InnerText } }; return '' }; function xP($x,$i){ $v=@($x.Event.EventData.Data); if($v.Count -gt $i){ if($v[$i] -is [string]){ return $v[$i] }; return [string]$v[$i].InnerText }; return '' }; function xAll($x){ return ((@($x.Event.EventData.Data) | ForEach-Object { if($_ -is [string]){ $_ } else { $_.InnerText } }) -join ' ') }; function xPv($p,$ids){ return ('(Provider[@Name='+$ap+$p+$ap+'] and ('+((@($ids) | ForEach-Object { 'EventID='+$_ }) -join ' or ')+'))') }; $st=@{}; $old=@{}; foreach($l in @('System','Application')){ $st[$l]='ok'; try{ $r=xRd $l '*'; $e=$r.ReadEvent(); if($null -ne $e){ $old[$l]=$e.TimeCreated; $e.Dispose() } else { $st[$l]='empty' } }catch{ $st[$l]=xWhy $_ } }; $clr=@{}; if($st['System'] -eq 'ok'){ try{ $r=xRd 'System' ('*[System['+(xPv 'Microsoft-Windows-Eventlog' @(104))+']]'); while($null -ne ($e=$r.ReadEvent())){ $ch=[string]([xml]$e.ToXml()).Event.UserData.LogFileCleared.Channel; if($ch -eq 'System' -or $ch -eq 'Application'){ $clr[$ch]=$e.TimeCreated.ToString('yyyy-MM-dd HH:mm',$ic) }; $e.Dispose() } }catch{} }; $w='TimeCreated[timediff(@SystemTime) <= '+([int64]$days*86400000)+']'; $sel=@((xPv 'Microsoft-Windows-Kernel-Power' @(41)),(xPv 'EventLog' @(6008)),(xPv 'Microsoft-Windows-WER-SystemErrorReporting' @(1001)),('(Provider[@Name='+$ap+'Microsoft-Windows-WHEA-Logger'+$ap+'] and (Level=1 or Level=2 or Level=3))'),(xPv 'Display' @(4101)),(xPv 'disk' @(7,153)),(xPv 'storahci' @(129)),(xPv 'stornvme' @(129)),(xPv 'Ntfs' @(55)),(xPv 'Microsoft-Windows-Ntfs' @(55,98)),(xPv 'Microsoft-Windows-Resource-Exhaustion-Detector' @(2004)),(xPv 'volmgr' @(46)),(xPv 'Service Control Manager' @(7045))); $bn=@{'A'='IRQL_NOT_LESS_OR_EQUAL';'1A'='MEMORY_MANAGEMENT';'3B'='SYSTEM_SERVICE_EXCEPTION';'50'='PAGE_FAULT_IN_NONPAGED_AREA';'7E'='SYSTEM_THREAD_EXCEPTION_NOT_HANDLED';'9F'='DRIVER_POWER_STATE_FAILURE';'D1'='DRIVER_IRQL_NOT_LESS_OR_EQUAL';'EF'='CRITICAL_PROCESS_DIED';'101'='CLOCK_WATCHDOG_TIMEOUT';'116'='VIDEO_TDR_FAILURE';'124'='WHEA_UNCORRECTABLE_ERROR';'133'='DPC_WATCHDOG_VIOLATION';'139'='KERNEL_SECURITY_CHECK_FAILURE'}; function xBn($s){ $k=$s.Substring(2).TrimStart('0'); if($bn.ContainsKey($k)){ return $bn[$k] }; return '' }; $wco=@(2,17,19,21,23,25,27,28,41,43,45,47,49); $wcpu=@(18,19,28,29); $cap=30000; $n=0; $cp=@{}; $lt=$now; if($st['System'] -eq 'ok'){ try{ $r=xRd 'System' ('*[System[('+($sel -join ' or ')+') and '+$w+']]') 1; while($null -ne ($e=$r.ReadEvent())){ if($n -ge $cap){ $cp['System']=$lt; $e.Dispose(); break }; $n++; $lt=$e.TimeCreated; $p=$e.ProviderName; $id=[int]$e.Id; $A=''; $B=''; $C=''; if($p -eq 'Microsoft-Windows-WHEA-Logger'){ $A='uncorrected'; if($wco -contains $id){ $A='corrected' }; if($wcpu -contains $id){ $B='cpu' } } elseif($p -ne 'EventLog' -and $p -ne 'volmgr'){ $x=[xml]$e.ToXml(); if($id -eq 41){ $v=xD $x 'BugcheckCode'; if($v -match '^[0-9]{1,10}$' -and $v -ne '0'){ $A='0x{0:X8}' -f [uint32]$v; $C=xBn $A }; $B=xD $x 'PowerButtonTimestamp' } elseif($id -eq 1001){ $m=[regex]::Match((xD $x 'param1'),'^0x([0-9A-Fa-f]{1,8})'); if($m.Success){ $A='0x{0:X8}' -f [Convert]::ToUInt32($m.Groups[1].Value,16); $C=xBn $A } } elseif($id -eq 4101){ $A=xP $x 0 } elseif($id -eq 7 -or $id -eq 153 -or $id -eq 129){ $A=[regex]::Match((xAll $x),'(Harddisk|RaidPort)[0-9]+').Value } elseif($id -eq 55){ $A=xD $x 'DriveName' } elseif($id -eq 98){ $A=xD $x 'CorruptionActionState'; $B=xD $x 'DriveName' } elseif($id -eq 2004){ $A=xD $x 'SystemCommitCharge'; $B=xD $x 'SystemCommitLimit' } elseif($id -eq 7045){ $A=xD $x 'ServiceName'; $ip=(xD $x 'ImagePath').Trim(); $B='service'; if($ip -match '\.sys\W*$'){ $B='driver' } } }; xR 'E' $e.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss',$ic) 'System' $p $id ([int]$e.Level) (xS $A) (xS $B) (xS $C); $e.Dispose() } }catch{ $st['System']=xWhy $_ } }; $lt=$now; if($st['Application'] -eq 'ok'){ try{ $r=xRd 'Application' ('*[System['+(xPv 'Application Error' @(1000))+' and '+$w+']]') 1; while($null -ne ($e=$r.ReadEvent())){ if($n -ge $cap){ $cp['Application']=$lt; $e.Dispose(); break }; $n++; $lt=$e.TimeCreated; $x=[xml]$e.ToXml(); $A=xD $x 'AppName'; if(-not $A){ $A=xP $x 0 }; $B=xD $x 'ModuleName'; if(-not $B){ $B=xP $x 3 }; $C=xD $x 'ExceptionCode'; if(-not $C){ $C=xP $x 6 }; xR 'E' $e.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss',$ic) 'Application' $e.ProviderName ([int]$e.Id) ([int]$e.Level) (xS $A) (xS $B) (xS $C); $e.Dispose() } }catch{ $st['Application']=xWhy $_ } }; foreach($l in @('System','Application')){ $cov=0; $o=''; $s=$st[$l]; if($old.ContainsKey($l)){ $o=$old[$l].ToString('yyyy-MM-dd HH:mm',$ic); if($old[$l] -le $from){ $cov=$days } else { $cov=[int][Math]::Floor(($now-$old[$l]).TotalDays) } }; if($s -eq 'ok' -and $cp.ContainsKey($l)){ $s='capped'; $c2=[int][Math]::Floor(($now-$cp[$l]).TotalDays); if($c2 -lt $cov){ $cov=$c2 } }; xR 'L' $o $l '' '' '' $s $cov ([string]$clr[$l]) }; if($env:PT_CR_BAK -and (Test-Path -LiteralPath $env:PT_CR_BAK)){ $fs=@(Get-ChildItem -LiteralPath $env:PT_CR_BAK -File); $bk=@($fs | Where-Object { ($_.Name -match '_[0-9]+\.reg$' -and $_.Name -notlike 'FullReg_*') -or $_.Name -like 'Preset_*.json' -or $_.Name -like 'PowerPlan_*.bat' -or $_.Name -like 'Telemetry_*.bat' }); foreach($f in @($fs | Where-Object { $_.Name -like 'PerfTweaks_*.log' -and $_.CreationTime -ge $from })){ $s0=$f.CreationTime; $s1=$f.LastWriteTime.AddMinutes(1); $nb=@($bk | Where-Object { $_.CreationTime -ge $s0 -and $_.CreationTime -le $s1 }).Count; xR 'S' $s0.ToString('yyyy-MM-dd HH:mm:ss',$ic) '' 'sincript' '' '' ([string]$nb) '' '' } }; $wc='0'; if($cp.Count -gt 0){ $wc=[string]$cap }; xR 'W' $now.ToString('yyyy-MM-dd HH:mm',$ic) '' '' '' '' ([string]$days) $now.ToString('yyyyMMdd_HHmm',$ic) $wc; $rows | Export-Csv -LiteralPath $env:PT_CR_OUT -NoTypeInformation -Encoding ASCII; exit 0"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; if(-not $env:PT_CR_OUT){ exit 2 }; $days=30; try{ $days=[int]$env:PT_CR_DAYS }catch{ $days=30 }; if($days -lt 1 -or $days -gt 365){ $days=30 }; $now=Get-Date; $from=$now.AddDays(-$days); $ic=[Globalization.CultureInfo]::InvariantCulture; $ap=[char]39; $rows=New-Object System.Collections.Generic.List[object]; function xR($k,$t,$l,$p,$i,$v,$x,$y,$z){ $rows.Add([pscustomobject]@{K=$k;T=$t;Log=$l;Prov=$p;Id=$i;Lvl=$v;A=$x;B=$y;C=$z}) }; function xS($s){ if($null -eq $s){ return '' }; $s=([string]$s) -replace '[^\x20-\x7e]','?' -replace '[\x21\x22\x25\x26\x2c\x3c\x3e\x5e\x7c]','?'; if($s.Length -gt 40){ $s=$s.Substring(0,40) }; return $s.Trim() }; function xRd($l,$x,$v){ $q=New-Object System.Diagnostics.Eventing.Reader.EventLogQuery($l,[System.Diagnostics.Eventing.Reader.PathType]::LogName,$x); if($v){ $q.ReverseDirection=$true }; return (New-Object System.Diagnostics.Eventing.Reader.EventLogReader($q)) }; function xWhy($e){ $x=$e.Exception; while($x.InnerException){ $x=$x.InnerException }; if($x -is [UnauthorizedAccessException]){ return 'denied' }; if($x -is [System.Diagnostics.Eventing.Reader.EventLogNotFoundException]){ return 'missing' }; return 'error' }; function xD($x,$n){ foreach($d in @($x.Event.EventData.Data)){ if($d -isnot [string] -and $d.Name -eq $n){ return [string]$d.InnerText } }; return '' }; function xP($x,$i){ $v=@($x.Event.EventData.Data); if($v.Count -gt $i){ if($v[$i] -is [string]){ return $v[$i] }; return [string]$v[$i].InnerText }; return '' }; function xAll($x){ return ((@($x.Event.EventData.Data) | ForEach-Object { if($_ -is [string]){ $_ } else { $_.InnerText } }) -join ' ') }; function xPv($p,$ids){ return ('(Provider[@Name='+$ap+$p+$ap+'] and ('+((@($ids) | ForEach-Object { 'EventID='+$_ }) -join ' or ')+'))') }; $st=@{}; $old=@{}; foreach($l in @('System','Application')){ $st[$l]='ok'; try{ $r=xRd $l '*'; $e=$r.ReadEvent(); if($null -ne $e){ $old[$l]=$e.TimeCreated; $e.Dispose() } else { $st[$l]='empty' } }catch{ $st[$l]=xWhy $_ } }; $clr=@{}; if($st['System'] -eq 'ok'){ try{ $r=xRd 'System' ('*[System['+(xPv 'Microsoft-Windows-Eventlog' @(104))+']]'); while($null -ne ($e=$r.ReadEvent())){ $ch=[string]([xml]$e.ToXml()).Event.UserData.LogFileCleared.Channel; if($ch -eq 'System' -or $ch -eq 'Application'){ $clr[$ch]=$e.TimeCreated.ToString('yyyy-MM-dd HH:mm',$ic) }; $e.Dispose() } }catch{} }; $w='TimeCreated[timediff(@SystemTime) <= '+([int64]$days*86400000)+']'; $sel=@((xPv 'Microsoft-Windows-Kernel-Power' @(41)),(xPv 'EventLog' @(6008)),(xPv 'Microsoft-Windows-WER-SystemErrorReporting' @(1001)),('(Provider[@Name='+$ap+'Microsoft-Windows-WHEA-Logger'+$ap+'] and (Level=1 or Level=2 or Level=3))'),(xPv 'Display' @(4101)),(xPv 'disk' @(7,153)),(xPv 'storahci' @(129)),(xPv 'stornvme' @(129)),(xPv 'Ntfs' @(55)),(xPv 'Microsoft-Windows-Ntfs' @(55,98)),(xPv 'Microsoft-Windows-Resource-Exhaustion-Detector' @(2004)),(xPv 'volmgr' @(46)),(xPv 'Service Control Manager' @(7045))); $bn=@{'A'='IRQL_NOT_LESS_OR_EQUAL';'1A'='MEMORY_MANAGEMENT';'3B'='SYSTEM_SERVICE_EXCEPTION';'50'='PAGE_FAULT_IN_NONPAGED_AREA';'7E'='SYSTEM_THREAD_EXCEPTION_NOT_HANDLED';'9F'='DRIVER_POWER_STATE_FAILURE';'D1'='DRIVER_IRQL_NOT_LESS_OR_EQUAL';'EF'='CRITICAL_PROCESS_DIED';'101'='CLOCK_WATCHDOG_TIMEOUT';'116'='VIDEO_TDR_FAILURE';'124'='WHEA_UNCORRECTABLE_ERROR';'133'='DPC_WATCHDOG_VIOLATION';'139'='KERNEL_SECURITY_CHECK_FAILURE'}; function xBn($s){ $k=$s.Substring(2).TrimStart('0'); if($bn.ContainsKey($k)){ return $bn[$k] }; return '' }; $wco=@(2,17,19,21,23,25,27,28,41,43,45,47,49); $wcpu=@(18,19,28,29); $cap=30000; $n=0; $cp=@{}; $lt=$now; if($st['System'] -eq 'ok'){ try{ $r=xRd 'System' ('*[System[('+($sel -join ' or ')+') and '+$w+']]') 1; while($null -ne ($e=$r.ReadEvent())){ if($n -ge $cap){ $cp['System']=$lt; $e.Dispose(); break }; $n++; $lt=$e.TimeCreated; $p=$e.ProviderName; $id=[int]$e.Id; $A=''; $B=''; $C=''; if($p -eq 'Microsoft-Windows-WHEA-Logger'){ $A='uncorrected'; if($wco -contains $id){ $A='corrected' }; if($wcpu -contains $id){ $B='cpu' } } elseif($p -ne 'EventLog' -and $p -ne 'volmgr'){ $x=[xml]$e.ToXml(); if($id -eq 41){ $v=xD $x 'BugcheckCode'; if($v -match '^[0-9]{1,10}$' -and $v -ne '0'){ $A='0x{0:X8}' -f [uint32]$v; $C=xBn $A }; $B=xD $x 'PowerButtonTimestamp' } elseif($id -eq 1001){ $m=[regex]::Match((xD $x 'param1'),'^0x([0-9A-Fa-f]{1,8})'); if($m.Success){ $A='0x{0:X8}' -f [Convert]::ToUInt32($m.Groups[1].Value,16); $C=xBn $A } } elseif($id -eq 4101){ $A=xP $x 0 } elseif($id -eq 7 -or $id -eq 153 -or $id -eq 129){ $A=[regex]::Match((xAll $x),'(Harddisk|RaidPort)[0-9]+').Value } elseif($id -eq 55){ $A=xD $x 'DriveName' } elseif($id -eq 98){ $A=xD $x 'CorruptionActionState'; $B=xD $x 'DriveName' } elseif($id -eq 2004){ $A=xD $x 'SystemCommitCharge'; $B=xD $x 'SystemCommitLimit' } elseif($id -eq 7045){ $A=xD $x 'ServiceName'; $ip=(xD $x 'ImagePath').Trim(); $B='service'; if($ip -match '\.sys\W*$'){ $B='driver' } } }; xR 'E' $e.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss',$ic) 'System' $p $id ([int]$e.Level) (xS $A) (xS $B) (xS $C); $e.Dispose() } }catch{ $st['System']=xWhy $_ } }; $lt=$now; if($st['Application'] -eq 'ok'){ try{ $r=xRd 'Application' ('*[System['+(xPv 'Application Error' @(1000))+' and '+$w+']]') 1; while($null -ne ($e=$r.ReadEvent())){ if($n -ge $cap){ $cp['Application']=$lt; $e.Dispose(); break }; $n++; $lt=$e.TimeCreated; $x=[xml]$e.ToXml(); $A=xD $x 'AppName'; if(-not $A){ $A=xP $x 0 }; $B=xD $x 'ModuleName'; if(-not $B){ $B=xP $x 3 }; $C=xD $x 'ExceptionCode'; if(-not $C){ $C=xP $x 6 }; xR 'E' $e.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss',$ic) 'Application' $e.ProviderName ([int]$e.Id) ([int]$e.Level) (xS $A) (xS $B) (xS $C); $e.Dispose() } }catch{ $st['Application']=xWhy $_ } }; foreach($l in @('System','Application')){ $cov=0; $o=''; $s=$st[$l]; if($old.ContainsKey($l)){ $o=$old[$l].ToString('yyyy-MM-dd HH:mm',$ic); if($old[$l] -le $from){ $cov=$days } else { $cov=[int][Math]::Floor(($now-$old[$l]).TotalDays) } }; if($s -eq 'ok' -and $cp.ContainsKey($l)){ $s='capped'; $c2=[int][Math]::Floor(($now-$cp[$l]).TotalDays); if($c2 -lt $cov){ $cov=$c2 } }; xR 'L' $o $l '' '' '' $s $cov ([string]$clr[$l]) }; if($env:PT_CR_BAK -and (Test-Path -LiteralPath $env:PT_CR_BAK)){ $fs=@(Get-ChildItem -LiteralPath $env:PT_CR_BAK -File); $bk=@($fs | Where-Object { ($_.Name -match '_[0-9]+\.reg$' -and $_.Name -notlike 'FullReg_*') -or $_.Name -like 'Preset_*.json' -or $_.Name -like 'PowerPlan_*.bat' -or $_.Name -like 'Telemetry_*.bat' -or $_.Name -like 'hosts_*.bak' -or $_.Name -like 'BCD_*.bak' -or $_.Name -like 'Discord*.bak' }); foreach($f in @($fs | Where-Object { $_.Name -like 'PerfTweaks_*.log' -and $_.CreationTime -ge $from })){ $s0=$f.CreationTime; $s1=$f.LastWriteTime.AddMinutes(1); $nb=@($bk | Where-Object { $_.CreationTime -ge $s0 -and $_.CreationTime -le $s1 }).Count; xR 'S' $s0.ToString('yyyy-MM-dd HH:mm:ss',$ic) '' 'sincript' '' '' ([string]$nb) '' '' } }; $wc='0'; if($cp.Count -gt 0){ $wc=[string]$cap }; xR 'W' $now.ToString('yyyy-MM-dd HH:mm',$ic) '' '' '' '' ([string]$days) $now.ToString('yyyyMMdd_HHmm',$ic) $wc; $rows | Export-Csv -LiteralPath $env:PT_CR_OUT -NoTypeInformation -Encoding ASCII; exit 0"
 set "PT_CR_OUT=" & set "PT_CR_BAK=" & set "PT_CR_DAYS="
 goto :eof
 
@@ -4008,9 +4816,14 @@ if defined SYSDISK goto :eof
 set "SYSDISK=unknown"
 rem  ---- tier 1: the answer this machine already gave, if the hardware has not changed ----
 rem  Add-Type compiles C# for the probe, which is slow, so the answer is cached per machine, keyed
-rem  on disk 0's device instance path, which changes with the hardware. Delete the file to re-probe.
+rem  on the device instance path of every internal disk: Windows moved or cloned to another disk
+rem  changes the list, where disk 0 alone could be a data disk that stays. USB disks are left out,
+rem  so plugging one in does not re-probe. Delete the file to re-probe.
 set "_sdkey="
-for /f "tokens=2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\disk\Enum" /v 0 2^>nul ^| findstr /I /C:"REG_SZ"') do set "_sdkey=%%B"
+for /f "tokens=1,2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\disk\Enum" 2^>nul ^| findstr /I /C:"REG_SZ"') do (
+    set "_sdv=%%C"
+    if /i not "!_sdv:~0,8!"=="USBSTOR\" set "_sdkey=!_sdkey!%%C;"
+)
 set "_sddir=!LOCALAPPDATA!\Sincript"
 set "_sdcache=!_sddir!\sysdisk.cache"
 if not defined LOCALAPPDATA goto _sdProbe
@@ -4267,26 +5080,43 @@ rem  PRIVACY HELPERS: extra telemetry tasks, and the DiagTrack firewall block
 rem =====================================================================================
 :DisableTelemetryTasks
 rem  Disables a vetted set of telemetry tasks BY NAME via Get-ScheduledTask - a wrong schtasks path
-rem  fails quietly. Reports found / disabled / checked, so absent and failed stay distinct.
+rem  fails quietly. Reports found / disabled / checked, so absent and failed stay distinct; a worker
+rem  that answered nothing is a [FAIL], never 'none present'. Keep the list equal to PT_TL_TASKS.
 rem  Only the DiskDiagnostic DataCollector, never the Resolver: that one warns of a dying disk.
 set "_tkres=!TEMP!\pt_tasks_%RANDOM%.txt"
 del "!_tkres!" >nul 2>&1
 set "PT_TK_RES=!_tkres!"
-set "PT_TK_NAMES=MareBackup|StartupAppTask|Microsoft-Windows-DiskDiagnosticDataCollector|MapsToastTask"
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $names=@($env:PT_TK_NAMES -split '\|'); $found=0; $ok=0; foreach($n in $names){ if($n){ $ts=@(Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue); foreach($t in $ts){ $found++; try{ Disable-ScheduledTask -InputObject $t -ErrorAction Stop | Out-Null; $ok++ }catch{} } } }; (''+$found+' '+$ok+' '+$names.Count) | Out-File -FilePath $env:PT_TK_RES -Encoding ASCII"
+set "PT_TK_NAMES=Microsoft Compatibility Appraiser|Microsoft Compatibility Appraiser Exp|ProgramDataUpdater|Consolidator|UsbCeip|QueueReporting|MareBackup|StartupAppTask|Microsoft-Windows-DiskDiagnosticDataCollector|MapsToastTask"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $names=@($env:PT_TK_NAMES -split '\|'); $found=0; $ok=0; $err=0; foreach($n in $names){ if($n){ try{ $ts=@(Get-ScheduledTask -TaskName $n -ErrorAction Stop) }catch{ if($_.CategoryInfo.Category -ne 'ObjectNotFound'){ $err++ }; $ts=@() }; foreach($t in $ts){ $found++; try{ Disable-ScheduledTask -InputObject $t -ErrorAction Stop | Out-Null; $ok++ }catch{} } } }; (''+$found+' '+$ok+' '+$names.Count+' '+$err) | Out-File -FilePath $env:PT_TK_RES -Encoding ASCII"
 set "PT_TK_RES=" & set "PT_TK_NAMES="
-set "_tkf=0" & set "_tko=0" & set "_tkn=0"
-if exist "!_tkres!" for /f "usebackq tokens=1,2,3" %%a in ("!_tkres!") do ( set "_tkf=%%a" & set "_tko=%%b" & set "_tkn=%%c" )
+if not exist "!_tkres!" (
+    echo         [FAIL] Extra telemetry tasks: PowerShell returned no answer - nothing was checked.
+    call :Log "FAIL: TASKS extra - no worker answer"
+    set /a _FAILS+=1
+    goto :eof
+)
+set "_tkf=0" & set "_tko=0" & set "_tkn=0" & set "_tke=0"
+if exist "!_tkres!" for /f "usebackq tokens=1,2,3,4" %%a in ("!_tkres!") do ( set "_tkf=%%a" & set "_tko=%%b" & set "_tkn=%%c" & set "_tke=%%d" )
 del "!_tkres!" >nul 2>&1
+rem  A lookup that failed for another reason than "no such task" means Task Scheduler did not
+rem  answer: those tasks were not checked, which is not "none exist".
+if not "!_tke!"=="0" (
+    echo         [FAIL] Extra telemetry tasks: Task Scheduler did not answer for !_tke! of !_tkn! - those were not checked.
+    call :Log "FAIL: TASKS extra - !_tke! of !_tkn! lookups failed"
+    set /a _FAILS+=1
+)
+if "!_tkf!"=="0" if not "!_tke!"=="0" goto :eof
 if "!_tkf!"=="0" (
     echo   [SKIP] Extra telemetry tasks: none of the !_tkn! exist on this edition.
     call :Log "TASKS extra: none of !_tkn! present"
     goto :eof
 )
 if "!_tko!"=="0" (
-    echo         [FAIL] Extra telemetry tasks: found !_tkf! but disabled none - run as Administrator.
+    set "_why=run as Administrator"
+    if not "%_ELEV%"=="0" set "_why=Windows or a policy protects them, see the log"
+    echo         [FAIL] Extra telemetry tasks: found !_tkf! but disabled none - !_why!.
     call :Log "FAIL: TASKS extra found=!_tkf! disabled=0"
-    if defined _RUNTRACK if "%_ELEV%"=="0" set /a _FAILS+=1
+    set /a _FAILS+=1
     goto :eof
 )
 echo   [OK] Extra telemetry tasks: disabled !_tko! of !_tkf! found.
@@ -4304,11 +5134,24 @@ set "_nvundo="
 if exist "!BACKUP_DIR!\" set "_nvundo=!BACKUP_DIR!\Telemetry_nvidia_%RANDOM%%RANDOM%.bat"
 set "PT_NV_RES=!_nvres!"
 set "PT_NV_UNDO=!_nvundo!"
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $q=[char]34; $ts=@(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -match '^(NvTmRep_|NvTmMon_)' }); $found=$ts.Count; $ok=0; $wrote=0; if($found -gt 0 -and $env:PT_NV_UNDO){ $L=@('@echo off','setlocal',('set '+$q+'PT_OK=0'+$q),('set '+$q+'PT_FAIL=0'+$q),'rem  Sincript NVIDIA telemetry tasks undo.','rem  Re-enables the NVIDIA telemetry scheduled tasks that were enabled before sincript','rem  disabled them - only those. Read from Get-ScheduledTask, so nothing here depends on','rem  the display language. Safe to run more than once. Double-click to restore.',''); foreach($t in $ts){ $f=$t.TaskPath+$t.TaskName; if($t.State -eq 'Disabled'){ $L+=('rem  task '+$f+' was already disabled before sincript - left alone') } else { $L+=('call :pt_do schtasks /Change /TN '+$q+$f+$q+' /Enable') } }; $L+=@('',('if '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo [OK] Restored %%PT_OK%% item(s).'),('if not '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo [WARN] %%PT_OK%% restored, %%PT_FAIL%% FAILED - see the [FAIL] lines above.'),('if not '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo        Re-run this file from an elevated prompt.'),('if '+$q+'%%~1'+$q+'=='+$q+$q+' pause'),'exit /b %%PT_FAIL%%','','rem  Flat on purpose: no ( ) block, so nothing here depends on delayed expansion.',':pt_do','%%*','if errorlevel 1 goto :pt_bad','set /a PT_OK+=1','exit /b',':pt_bad','set /a PT_FAIL+=1','echo   [FAIL] %%*','exit /b'); Set-Content -LiteralPath $env:PT_NV_UNDO -Value $L -Encoding ASCII; if(Test-Path -LiteralPath $env:PT_NV_UNDO){ $wrote=1 } }; foreach($t in $ts){ try{ Disable-ScheduledTask -InputObject $t -ErrorAction Stop | Out-Null; $ok++ }catch{} }; (''+$found+' '+$ok+' '+$wrote) | Out-File -FilePath $env:PT_NV_RES -Encoding ASCII"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $q=[char]34; try{ $all=@(Get-ScheduledTask -ErrorAction Stop) }catch{ 'E 0 0' | Out-File -FilePath $env:PT_NV_RES -Encoding ASCII; exit 2 }; $ts=@($all | Where-Object { $_.TaskName -match '^(NvTmRep_|NvTmMon_)' }); $found=$ts.Count; $ok=0; $wrote=0; if($found -gt 0 -and $env:PT_NV_UNDO){ $L=@('@echo off','setlocal',('set '+$q+'PT_OK=0'+$q),('set '+$q+'PT_FAIL=0'+$q),'rem  Sincript NVIDIA telemetry tasks undo.','rem  Re-enables the NVIDIA telemetry scheduled tasks that were enabled before sincript','rem  disabled them - only those. Read from Get-ScheduledTask, so nothing here depends on','rem  the display language. Safe to run more than once. Double-click to restore.',''); foreach($t in $ts){ $f=$t.TaskPath+$t.TaskName; if($t.State -eq 'Disabled'){ $L+=('rem  task '+$f+' was already disabled before sincript - left alone') } else { $L+=('call :pt_do schtasks /Change /TN '+$q+$f+$q+' /Enable') } }; $L+=@('',('if '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo [OK] Restored %%PT_OK%% item(s).'),('if not '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo [WARN] %%PT_OK%% restored, %%PT_FAIL%% FAILED - see the [FAIL] lines above.'),('if not '+$q+'%%PT_FAIL%%'+$q+'=='+$q+'0'+$q+' echo        Re-run this file from an elevated prompt.'),('if '+$q+'%%~1'+$q+'=='+$q+$q+' pause'),'exit /b %%PT_FAIL%%','','rem  Flat on purpose: no ( ) block, so nothing here depends on delayed expansion.',':pt_do','%%*','if errorlevel 1 goto :pt_bad','set /a PT_OK+=1','exit /b',':pt_bad','set /a PT_FAIL+=1','echo   [FAIL] %%*','exit /b'); Set-Content -LiteralPath $env:PT_NV_UNDO -Value $L -Encoding ASCII; if(Test-Path -LiteralPath $env:PT_NV_UNDO){ $wrote=1 } }; foreach($t in $ts){ try{ Disable-ScheduledTask -InputObject $t -ErrorAction Stop | Out-Null; $ok++ }catch{} }; (''+$found+' '+$ok+' '+$wrote) | Out-File -FilePath $env:PT_NV_RES -Encoding ASCII"
 set "PT_NV_RES=" & set "PT_NV_UNDO="
+if not exist "!_nvres!" (
+    echo         [FAIL] NVIDIA telemetry tasks: PowerShell returned no answer - nothing was checked.
+    call :Log "FAIL: TASKS nvidia - no worker answer"
+    set /a _FAILS+=1
+    goto :eof
+)
 set "_nvf=0" & set "_nvo=0" & set "_nvw=0"
 if exist "!_nvres!" for /f "usebackq tokens=1,2,3" %%a in ("!_nvres!") do ( set "_nvf=%%a" & set "_nvo=%%b" & set "_nvw=%%c" )
 del "!_nvres!" >nul 2>&1
+rem  E: the task list itself could not be read, which is not "none found".
+if "!_nvf!"=="E" (
+    echo         [FAIL] NVIDIA telemetry tasks: Task Scheduler did not answer - nothing was checked.
+    call :Log "FAIL: TASKS nvidia - the task list could not be read"
+    set /a _FAILS+=1
+    goto :eof
+)
 if "!_nvf!"=="0" (
     echo   [SKIP] NVIDIA telemetry tasks: none found on this system.
     call :Log "TASKS nvidia: none present"
@@ -4319,7 +5162,9 @@ if "!_nvw!"=="1" (set "_LOGMSG=NVIDIA tasks backup -> !_nvundo!" & call :LogVar 
 if not "!_nvw!"=="1" echo   [WARN] No undo file could be written for the NVIDIA tasks. Task Scheduler can
 if not "!_nvw!"=="1" echo          re-enable them by hand.
 if "!_nvo!"=="0" (
-    echo         [FAIL] NVIDIA telemetry tasks: found !_nvf! but disabled none - run as Administrator.
+    set "_why=run as Administrator"
+    if not "%_ELEV%"=="0" set "_why=Windows or a policy protects them, see the log"
+    echo         [FAIL] NVIDIA telemetry tasks: found !_nvf! but disabled none - !_why!.
     call :Log "FAIL: TASKS nvidia found=!_nvf! disabled=0"
     set /a _FAILS+=1
     goto :eof
@@ -4335,20 +5180,36 @@ rem  Set-NetFirewallRule -Group DiagTrack -Action Allow
 set "_fwres=!TEMP!\pt_fw_%RANDOM%.txt"
 del "!_fwres!" >nul 2>&1
 set "PT_FW_RES=!_fwres!"
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $r=@(Get-NetFirewallRule -Group DiagTrack -ErrorAction SilentlyContinue); $n=0; foreach($x in $r){ try{ Set-NetFirewallRule -InputObject $x -Enabled True -Action Block -ErrorAction Stop; $n++ }catch{} }; (''+$n+' '+$r.Count) | Out-File -FilePath $env:PT_FW_RES -Encoding ASCII"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $r=@(); try{ $r=@(Get-NetFirewallRule -Group DiagTrack -ErrorAction Stop) }catch{ if($_.CategoryInfo.Category -ne 'ObjectNotFound'){ 'E 0' | Out-File -FilePath $env:PT_FW_RES -Encoding ASCII; exit 2 } }; $n=0; foreach($x in $r){ try{ Set-NetFirewallRule -InputObject $x -Enabled True -Action Block -ErrorAction Stop; $n++ }catch{} }; (''+$n+' '+$r.Count) | Out-File -FilePath $env:PT_FW_RES -Encoding ASCII"
 set "PT_FW_RES="
+if not exist "!_fwres!" (
+    echo         [FAIL] Telemetry firewall: PowerShell returned no answer - nothing was checked.
+    call :Log "FAIL: FW DiagTrack - no worker answer"
+    set /a _FAILS+=1
+    goto :eof
+)
 set "_fwn=0" & set "_fwc=0"
 if exist "!_fwres!" for /f "usebackq tokens=1,2" %%a in ("!_fwres!") do ( set "_fwn=%%a" & set "_fwc=%%b" )
 del "!_fwres!" >nul 2>&1
+rem  E: the query itself failed (ObjectNotFound, the only "no such group" answer, is not E).
+if "!_fwn!"=="E" (
+    echo         [FAIL] Telemetry firewall: Windows Firewall did not answer - nothing was blocked.
+    echo                Its service may be stopped or disabled.
+    call :Log "FAIL: FW DiagTrack - firewall query failed"
+    set /a _FAILS+=1
+    goto :eof
+)
 if "!_fwc!"=="0" (
     echo   [SKIP] Telemetry firewall: this Windows has no DiagTrack rule group - nothing to block.
     call :Log "FW DiagTrack: no rules present"
     goto :eof
 )
 if "!_fwn!"=="0" (
-    echo         [FAIL] Telemetry firewall: found !_fwc! rule^(s^) but changed none - run as Administrator.
+    set "_why=run as Administrator"
+    if not "%_ELEV%"=="0" set "_why=Windows or a policy protects them, see the log"
+    echo         [FAIL] Telemetry firewall: found !_fwc! rule^(s^) but changed none - !_why!.
     call :Log "FAIL: FW DiagTrack found=!_fwc! blocked=0"
-    if defined _RUNTRACK if "%_ELEV%"=="0" set /a _FAILS+=1
+    set /a _FAILS+=1
     goto :eof
 )
 echo   [OK] Telemetry firewall: blocked !_fwn! of !_fwc! DiagTrack rule^(s^).
@@ -4410,7 +5271,7 @@ echo [Page file]  ^(shown only - sincript never changes the page file or the cra
 set "_pgfres=!TEMP!\pt_pgf_%RANDOM%%RANDOM%.txt"
 del "!_pgfres!" >nul 2>&1
 set "PT_PGF_RES=!_pgfres!"
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue';$o=New-Object Collections.Generic.List[string];$av=New-Object Collections.Generic.List[string];function Cl($v,$n){$s=(([string]$v) -replace '[^A-Za-z0-9 :.?_\\-]','').Trim();if($s.Length -gt $n){$s=$s.Substring(0,$n).Trim()};if($s -eq ''){$s='-'};$s};function Nm($v){if($null -eq $v){return '-'};try{$d=[double]$v}catch{return '-'};if($d -lt 0 -or $d -gt 99999999){return '-'};[string][int64][math]::Floor($d)};$sd='C';if($env:SystemDrive -match '^([A-Za-z]):'){$sd=$Matches[1].ToUpper()};$rk='HKLM:\SYSTEM\CurrentControlSet\Control\';$cfg='unreadable';$es=@();$mm=$null;try{$mm=Get-ItemProperty -LiteralPath ($rk+'Session Manager\Memory Management') -ErrorAction Stop}catch{$mm=$null};if($mm){$pv=$mm.PSObject.Properties['PagingFiles'];if(-not $pv){$cfg='absent'}else{foreach($e in @($pv.Value)){$t=([string]$e).Trim();if($t -eq ''){continue};$x=[pscustomobject]@{D='-';K='unrec';I=[int64]0;X=[int64]0;R=(Cl $t 40)};$m=[regex]::Match($t,'^([A-Za-z?]):\\[^\\\s]+(?:\s+(\d{1,8})\s+(\d{1,8}))?$');if($m.Success){$x.D=$m.Groups[1].Value.ToUpper();$z=$m.Groups[2].Success;if($z){$i=[int64]$m.Groups[2].Value;$j=[int64]$m.Groups[3].Value};if($x.D -eq '?'){if(-not $z -or ($i -eq 0 -and $j -eq 0)){$x.K='auto'}}elseif($z){if($i -eq 0 -and $j -eq 0){$x.K='sys'}elseif($i -ge 1 -and $j -ge $i){$x.K='custom';$x.I=$i;$x.X=$j}}}elseif($t -match '^([A-Za-z]):'){$x.D=$Matches[1].ToUpper()};$es+=$x};if($es.Count -eq 0){$cfg='none'}elseif($es.Count -eq 1 -and $es[0].K -eq 'auto'){$cfg='auto'}else{$cfg='list'}}};$us=@();$src='unknown';$ud=0;try{$w=@(Get-CimInstance -ClassName Win32_PageFileUsage -ErrorAction Stop);$src='wmi';foreach($u in $w){$n=[string]$u.Name;$d='-';if($n -match '^([A-Za-z]):'){$d=$Matches[1].ToUpper()};$us+=[pscustomobject]@{N=(Cl $n 30);D=$d;A=(Nm $u.AllocatedBaseSize);C=(Nm $u.CurrentUsage);P=(Nm $u.PeakUsage);T=($u.TempPageFile -eq $true)}}}catch{$us=@();if($mm){$ev=$mm.PSObject.Properties['ExistingPageFiles'];if($ev){$src='reg';foreach($e in @($ev.Value)){$t=([string]$e).Trim() -replace '^\\\?\?\\','';if($t -eq ''){continue};$d='-';if($t -match '^([A-Za-z]):'){$d=$Matches[1].ToUpper()};$us+=[pscustomobject]@{N=(Cl $t 30);D=$d;A='-';C='-';P='-';T=$false}}}}};if($src -eq 'wmi' -and $us.Count -eq 0 -and $mm){$ev=$mm.PSObject.Properties['ExistingPageFiles'];if($ev){foreach($e in @($ev.Value)){if(([string]$e).Trim() -ne ''){$ud=1}}};if($ud){$src='unknown'}};$rv='-';$ri='-';$cn='-';$cl='-';$cp='-';try{$os=Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop;if($os.TotalVisibleMemorySize -gt 0){$rv=Nm ($os.TotalVisibleMemorySize/1024)};if($os.TotalVirtualMemorySize -gt 0){$cl=Nm ($os.TotalVirtualMemorySize/1024);if($null -ne $os.FreeVirtualMemory){$cn=Nm (($os.TotalVirtualMemorySize-$os.FreeVirtualMemory)/1024)}}}catch{};try{$s=[double]0;foreach($p in @(Get-CimInstance -ClassName Win32_PhysicalMemory -ErrorAction Stop)){$s+=[double]$p.Capacity};if($s -gt 0){$ri=Nm ($s/1MB)}}catch{};$dt='R';$dr='-';$dd=0;try{$cc=Get-ItemProperty -LiteralPath ($rk+'CrashControl') -ErrorAction Stop;$dt='U';$cv=$cc.PSObject.Properties['CrashDumpEnabled'];if($cv){$dt='X';if($cv.Value -is [int]){$v=[int64]$cv.Value;$dr=Nm $v;if(@(0,1,2,3,7) -contains $v){$dt=[string]$v};$fp=$cc.PSObject.Properties['FilterPages'];if($v -eq 1 -and $fp -and $fp.Value -is [int] -and $fp.Value -eq 1){$dt='A'}}};$dv=$cc.PSObject.Properties['DedicatedDumpFile'];if($dv -and ([string]$dv.Value).Trim() -ne ''){$dd=1}}catch{$dt='R'};$pn=0;if($cfg -eq 'none' -and $us.Count -gt 0){$pn=1};if($cfg -eq 'list' -and $src -ne 'unknown'){$ok=$true;foreach($x in $es){if($x.K -eq 'unrec' -or $x.K -eq 'auto'){$ok=$false}};foreach($u in $us){if($u.D -eq '-'){$ok=$false}};if($ok){if(((@($es|ForEach-Object{$_.D})|Sort-Object -Unique) -join '') -ne ((@($us|ForEach-Object{$_.D})|Sort-Object -Unique) -join '')){$pn=1};foreach($x in $es){if($x.K -eq 'custom'){foreach($u in $us){if($u.D -eq $x.D -and $u.A -ne '-'){if([int64]$u.A -lt $x.I -or [int64]$u.A -gt $x.X){$pn=1}}}}}}};$wn='now';if($pn -eq 1 -or $src -eq 'unknown'){$wn='next'};$don=@('1','2','3','7','A') -contains $dt;if($cfg -eq 'none'){$av.Add('ADV|none|'+$wn)};$bk=@('none','list') -contains $cfg;$bh=$false;if($cfg -eq 'list'){foreach($x in $es){if($x.D -eq '-' -or $x.D -eq '?'){$bk=$false};if($x.D -eq $sd){$bh=$true}}};if($don -and $dd -eq 0 -and $bk -and -not $bh){$av.Add('ADV|nodump|'+$sd+'|'+$wn)};if($dt -eq '1' -and $dd -eq 0 -and $rv -ne '-' -and $cfg -eq 'list'){$f1=[int64]$rv+1;$f2=[int64]$rv+257;if($f2 -le 99999999){foreach($x in $es){if($x.D -eq $sd -and $x.K -eq 'custom'){if($x.X -lt $f1){$av.Add('ADV|dumpsize|'+$sd+'|'+$f1+'|'+$x.X)}elseif($x.X -lt $f2){$av.Add('ADV|dumpshort|'+$sd+'|'+$f2+'|'+$x.X)}}}}};$fx=$cfg -eq 'none' -and $src -ne 'unknown';if($cfg -eq 'list' -and $src -eq 'wmi'){$fx=$true;foreach($x in $es){$h=$false;if($x.K -eq 'custom'){foreach($u in $us){if($u.D -eq $x.D -and $u.A -ne '-'){if([int64]$u.A -ge $x.X){$h=$true}}}};if(-not $h){$fx=$false}}};if($fx -and $pn -eq 0){try{if(-not ('PTPf.N' -as [type])){$q=[char]34;Add-Type -TypeDefinition ('using System.Runtime.InteropServices;namespace PTPf{public static class N{[DllImport('+$q+'kernel32.dll'+$q+',EntryPoint='+$q+'K32GetPerformanceInfo'+$q+')]public static extern bool GPI([Out] byte[] b,int cb);}}')};$z=[IntPtr]::Size;$b=New-Object byte[] (@(56,104)[[int]($z -eq 8)]);if([PTPf.N]::GPI($b,$b.Length)){$r={param($i)if($z -eq 8){[double][BitConverter]::ToUInt64($b,8+8*$i)}else{[double][BitConverter]::ToUInt32($b,4+4*$i)}};$g=(& $r 9)/1MB;$cn=Nm ((& $r 0)*$g);$cl=Nm ((& $r 1)*$g);$cp=Nm ((& $r 2)*$g)}}catch{};if($cp -ne '-' -and $cl -ne '-'){if([int64]$cl -gt 0 -and [int64]$cp*10 -ge [int64]$cl*9){$av.Add('ADV|commit|'+$cp+'|'+$cl)}}};if(@($us|Where-Object{$_.T}).Count -gt 0){$av.Add('ADV|temp')};if($cfg -eq 'list'){foreach($x in $es){if($x.K -eq 'custom'){$o.Add('SET|custom|'+$x.D+'|'+$x.I+'|'+$x.X)}elseif($x.K -eq 'sys'){$o.Add('SET|sys|'+$x.D)}elseif($x.K -eq 'auto'){$o.Add('SET|auto')}else{$o.Add('SET|unrec|'+$x.R)}}}else{$o.Add('SET|'+$cfg)};if($src -eq 'unknown'){if($ud){$o.Add('USE|disagree')}else{$o.Add('USE|unknown')}}elseif($us.Count -eq 0){$o.Add('USE|none')}else{foreach($u in $us){$o.Add('USE|'+$u.N+'|'+$u.A+'|'+$u.C+'|'+$u.P)}};$o.Add('MEM|'+$rv+'|'+$ri+'|'+$cn+'|'+$cl+'|'+$cp);$o.Add('DMP|'+$dt+'|'+$dd+'|'+$dr);if($pn -eq 1){$o.Add('PND|1')};foreach($a in $av){$o.Add($a)};$o.Add('END|ok');$o|Out-File -FilePath $env:PT_PGF_RES -Encoding ASCII"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue';$o=New-Object Collections.Generic.List[string];$av=New-Object Collections.Generic.List[string];function Cl($v,$n){$s=(([string]$v) -replace '[^A-Za-z0-9 :.?_\\-]','').Trim();if($s.Length -gt $n){$s=$s.Substring(0,$n).Trim()};if($s -eq ''){$s='-'};$s};function Nm($v){if($null -eq $v){return '-'};try{$d=[double]$v}catch{return '-'};if($d -lt 0 -or $d -gt 99999999){return '-'};[string][int64][math]::Floor($d)};$sd='C';if($env:SystemDrive -match '^([A-Za-z]):'){$sd=$Matches[1].ToUpper()};$rk='HKLM:\SYSTEM\CurrentControlSet\Control\';$cfg='unreadable';$es=@();$mm=$null;try{$mm=Get-ItemProperty -LiteralPath ($rk+'Session Manager\Memory Management') -ErrorAction Stop}catch{$mm=$null};if($mm){$pv=$mm.PSObject.Properties['PagingFiles'];if(-not $pv){$cfg='absent'}else{foreach($e in @($pv.Value)){$t=([string]$e).Trim();if($t -eq ''){continue};$x=[pscustomobject]@{D='-';K='unrec';I=[int64]0;X=[int64]0;R=(Cl $t 40)};$m=[regex]::Match($t,'^([A-Za-z?]):\\[^\\\s]+(?:\s+(\d{1,8})\s+(\d{1,8}))?$');if($m.Success){$x.D=$m.Groups[1].Value.ToUpper();$z=$m.Groups[2].Success;if($z){$i=[int64]$m.Groups[2].Value;$j=[int64]$m.Groups[3].Value};if($x.D -eq '?'){if(-not $z -or ($i -eq 0 -and $j -eq 0)){$x.K='auto'}}elseif($z){if($i -eq 0 -and $j -eq 0){$x.K='sys'}elseif($i -ge 1 -and $j -ge $i){$x.K='custom';$x.I=$i;$x.X=$j}}}elseif($t -match '^([A-Za-z]):'){$x.D=$Matches[1].ToUpper()};$es+=$x};if($es.Count -eq 0){$cfg='none'}elseif($es.Count -eq 1 -and $es[0].K -eq 'auto'){$cfg='auto'}else{$cfg='list'}}};$us=@();$src='unknown';$ud=0;try{$w=@(Get-CimInstance -ClassName Win32_PageFileUsage -ErrorAction Stop);$src='wmi';foreach($u in $w){$n=[string]$u.Name;$d='-';if($n -match '^([A-Za-z]):'){$d=$Matches[1].ToUpper()};$us+=[pscustomobject]@{N=(Cl $n 30);D=$d;A=(Nm $u.AllocatedBaseSize);C=(Nm $u.CurrentUsage);P=(Nm $u.PeakUsage);T=($u.TempPageFile -eq $true)}}}catch{$us=@();if($mm){$ev=$mm.PSObject.Properties['ExistingPageFiles'];if($ev){$src='reg';foreach($e in @($ev.Value)){$t=([string]$e).Trim() -replace '^\\\?\?\\','';if($t -eq ''){continue};$d='-';if($t -match '^([A-Za-z]):'){$d=$Matches[1].ToUpper()};$us+=[pscustomobject]@{N=(Cl $t 30);D=$d;A='-';C='-';P='-';T=$false}}}}};if($src -eq 'wmi' -and $us.Count -eq 0 -and $mm){$ev=$mm.PSObject.Properties['ExistingPageFiles'];if($ev){foreach($e in @($ev.Value)){if(([string]$e).Trim() -ne ''){$ud=1}}};if($ud){$src='unknown'}};$rv='-';$ri='-';$cn='-';$cl='-';$cp='-';try{$os=Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop;if($os.TotalVisibleMemorySize -gt 0){$rv=Nm ($os.TotalVisibleMemorySize/1024)};if($os.TotalVirtualMemorySize -gt 0){$cl=Nm ($os.TotalVirtualMemorySize/1024);if($null -ne $os.FreeVirtualMemory){$cn=Nm (($os.TotalVirtualMemorySize-$os.FreeVirtualMemory)/1024)}}}catch{};try{$s=[double]0;foreach($p in @(Get-CimInstance -ClassName Win32_PhysicalMemory -ErrorAction Stop)){$s+=[double]$p.Capacity};if($s -gt 0){$ri=Nm ($s/1MB)}}catch{};$dt='R';$dr='-';$dd=0;try{$cc=Get-ItemProperty -LiteralPath ($rk+'CrashControl') -ErrorAction Stop;$dt='U';$cv=$cc.PSObject.Properties['CrashDumpEnabled'];if($cv){$dt='X';if($cv.Value -is [int]){$v=[int64]$cv.Value;$dr=Nm $v;if(@(0,1,2,3,7) -contains $v){$dt=[string]$v};$fp=$cc.PSObject.Properties['FilterPages'];if($v -eq 1 -and $fp -and $fp.Value -is [int] -and $fp.Value -eq 1){$dt='A'}}};$dv=$cc.PSObject.Properties['DedicatedDumpFile'];if($dv -and ([string]$dv.Value).Trim() -ne ''){$dd=1}}catch{$dt='R'};$pn=0;if($cfg -eq 'none' -and $us.Count -gt 0){$pn=1};if($cfg -eq 'list' -and $src -ne 'unknown'){$ok=$true;foreach($x in $es){if($x.K -eq 'unrec' -or $x.K -eq 'auto'){$ok=$false}};foreach($u in $us){if($u.D -eq '-'){$ok=$false}};if($ok){if(((@($es|ForEach-Object{$_.D})|Sort-Object -Unique) -join '') -ne ((@($us|ForEach-Object{$_.D})|Sort-Object -Unique) -join '')){$pn=1};foreach($x in $es){if($x.K -eq 'custom'){foreach($u in $us){if($u.D -eq $x.D -and $u.A -ne '-'){if([int64]$u.A -lt $x.I -or [int64]$u.A -gt $x.X){$pn=1}}}}}}};$wn='now';if($pn -eq 1 -or $src -eq 'unknown'){$wn='next'};$don=@('1','2','3','7','A') -contains $dt;if($cfg -eq 'none'){$av.Add('ADV|none|'+$wn)};$bk=@('none','list') -contains $cfg;$bh=$false;if($cfg -eq 'list'){foreach($x in $es){if($x.D -eq '-' -or $x.D -eq '?'){$bk=$false};if($x.D -eq $sd){$bh=$true}}};if($don -and $dd -eq 0 -and $bk -and -not $bh){$av.Add('ADV|nodump|'+$sd+'|'+$wn)};if($dt -eq '1' -and $dd -eq 0 -and $rv -ne '-' -and $cfg -eq 'list'){$f1=[int64]$rv+1;$f2=[int64]$rv+257;if($f2 -le 99999999){foreach($x in $es){if($x.D -eq $sd -and $x.K -eq 'custom'){if($x.X -lt $f1){$av.Add('ADV|dumpsize|'+$sd+'|'+$f1+'|'+$x.X)}elseif($x.X -lt $f2){$av.Add('ADV|dumpshort|'+$sd+'|'+$f2+'|'+$x.X)}}}}};$fx=$cfg -eq 'none' -and $src -ne 'unknown';if($cfg -eq 'list' -and $src -eq 'wmi'){$fx=$true;foreach($x in $es){$h=$false;if($x.K -eq 'custom'){foreach($u in $us){if($u.D -eq $x.D -and $u.A -ne '-'){if([int64]$u.A -ge $x.X){$h=$true}}}};if(-not $h){$fx=$false}}};if($fx -and $pn -eq 0){try{if(-not ('PTPf.N' -as [type])){$q=[char]34;Add-Type -TypeDefinition ('using System.Runtime.InteropServices;namespace PTPf{public static class N{[DllImport('+$q+'kernel32.dll'+$q+',EntryPoint='+$q+'K32GetPerformanceInfo'+$q+')]public static extern bool GPI([Out] byte[] b,int cb);}}')};$z=[IntPtr]::Size;$b=New-Object byte[] (@(56,104)[[int]($z -eq 8)]);if([PTPf.N]::GPI($b,$b.Length)){$r={param($i)if($z -eq 8){[double][BitConverter]::ToUInt64($b,8+8*$i)}else{[double][BitConverter]::ToUInt32($b,4+4*$i)}};$g=(& $r 9)/1MB;$cn=Nm ((& $r 0)*$g);$cl=Nm ((& $r 1)*$g);$cp=Nm ((& $r 2)*$g)}}catch{};if($cp -ne '-' -and $cl -ne '-'){if([int64]$cl -gt 0 -and [int64]$cp*10 -ge [int64]$cl*9){$av.Add('ADV|commit|'+$cp+'|'+$cl)}}};if(@($us|Where-Object{$_.T}).Count -gt 0){$av.Add('ADV|temp')};if($mm){$cs=$mm.PSObject.Properties['ClearPageFileAtShutdown'];if($cs -and $cs.Value -is [int] -and $cs.Value -eq 1){$av.Add('ADV|clear')}};if($cfg -eq 'list'){foreach($x in $es){if($x.K -eq 'custom'){$o.Add('SET|custom|'+$x.D+'|'+$x.I+'|'+$x.X)}elseif($x.K -eq 'sys'){$o.Add('SET|sys|'+$x.D)}elseif($x.K -eq 'auto'){$o.Add('SET|auto')}else{$o.Add('SET|unrec|'+$x.R)}}}else{$o.Add('SET|'+$cfg)};if($src -eq 'unknown'){if($ud){$o.Add('USE|disagree')}else{$o.Add('USE|unknown')}}elseif($us.Count -eq 0){$o.Add('USE|none')}else{foreach($u in $us){$o.Add('USE|'+$u.N+'|'+$u.A+'|'+$u.C+'|'+$u.P)}};$o.Add('MEM|'+$rv+'|'+$ri+'|'+$cn+'|'+$cl+'|'+$cp);$o.Add('DMP|'+$dt+'|'+$dd+'|'+$dr);if($pn -eq 1){$o.Add('PND|1')};foreach($a in $av){$o.Add($a)};$o.Add('END|ok');$o|Out-File -FilePath $env:PT_PGF_RES -Encoding ASCII"
 set "PT_PGF_RES="
 call :_pgfShow
 del "!_pgfres!" >nul 2>&1
@@ -4427,8 +5288,9 @@ for /f "usebackq tokens=1-6 delims=|" %%a in ("!_pgfres!") do (
     call :_pgfRec
 )
 if not defined _pgfadv goto :eof
-echo   [i] sincript changes neither setting. Both are in SystemPropertiesAdvanced: Performance
-echo       Settings ^> Advanced ^> Virtual memory, and Startup and Recovery for the crash-dump type.
+echo   [i] sincript does not change the page file size or the crash-dump type. Both are in
+echo       SystemPropertiesAdvanced: Performance Settings ^> Advanced ^> Virtual memory, and
+echo       Startup and Recovery for the crash-dump type.
 goto :eof
 
 :_pgfNone
@@ -4507,6 +5369,7 @@ if "!_pgf1!"=="dumpsize" goto _pgfAdvDumpSize
 if "!_pgf1!"=="dumpshort" goto _pgfAdvDumpShort
 if "!_pgf1!"=="commit" goto _pgfAdvCommit
 if "!_pgf1!"=="temp" goto _pgfAdvTemp
+if "!_pgf1!"=="clear" goto _pgfAdvClear
 goto :eof
 
 :_pgfAdvNone
@@ -4566,6 +5429,14 @@ goto :eof
 set "_pgfadv=1"
 echo   [ADVISORY] Windows is running on a TEMPORARY page file, which it creates usually because
 echo              there is no permanent one. Check the setting above.
+goto :eof
+
+:_pgfAdvClear
+echo   [ADVISORY] Windows wipes the page file at every shutdown ^(ClearPageFileAtShutdown=1^),
+echo              which Microsoft documents as making shutdown slower, more so with a large page
+echo              file. It is a security setting someone may have chosen. Performance tweaks
+echo              offers to turn it off; it is also in secpol.msc ^> Local Policies ^> Security
+echo              Options ^> Shutdown: Clear virtual memory pagefile.
 goto :eof
 rem  HELPER: prove a cleanup root before anything is deleted under it
 rem =====================================================================================
@@ -4694,6 +5565,7 @@ goto :eof
 
 :LaptopAdvisory
 rem  Warning-only laptop and undervolt advisory: never blocks or changes a default or preset.
+rem  %1 = timer for the timer-resolution screen; otherwise the undervolt text is the power plan's.
 call :DetectUndervolt
 if /i not "%MACHINE%"=="laptop" goto _lapUv
 echo   [ADVISORY] This machine looks like a laptop - this action typically costs battery
@@ -4701,6 +5573,7 @@ echo              life / heat there for little gain. It stays your call.
 
 :_lapUv
 if not defined UVTOOL goto :eof
+if /i "%~1"=="timer" goto _lapUvTimer
 echo   [ADVISORY] !UVTOOL! is installed, so this machine may be UNDERVOLTED. Pushing the CPU
 echo              to sustained maximum clocks is where an otherwise-stable undervolt fails,
 echo              and the CPU reports it as an uncorrectable machine check ^(bugcheck 0x124^),
@@ -4708,11 +5581,33 @@ echo              not as something that looks like a software crash. If you are 
 echo              prefer High Performance or Balanced over Ultimate.
 goto :eof
 
+:_lapUvTimer
+echo   [ADVISORY] !UVTOOL! is installed, so this machine may be UNDERVOLTED.
+echo              A raised timer resolution wakes the CPU far more often ^(2000 times a second
+echo              at 0.5 ms^) and, Microsoft notes, can keep it out of its power-saving states,
+echo              so the CPU idles differently from when the undervolt was tested. If crashes
+echo              or WHEA hardware errors follow, remove the timer resolution first ^(option 7^)
+echo              and retest the undervolt; System tools ^> 3 lists WHEA errors.
+goto :eof
+
 :DesktopAdvisory
-rem  Desktop counterpart, for the LargeSystemCache prompt only.
 if /i not "%MACHINE%"=="desktop" goto :eof
 echo   [ADVISORY] This machine looks like a desktop - this option mainly helps some laptops
 echo              and can hurt desktop performance.
+goto :eof
+
+:RestartNote
+rem  With Fast Startup on, Shut down hibernates the kernel, so a change that needs a reboot loads
+rem  only on Restart (Microsoft: Fast Startup does not apply to Restart). Silent when Fast Startup
+rem  is off, or cannot run because hibernation is off. Unreadable values count as on.
+set "_fsv=" & set "_fsp=" & set "_fsh="
+for /f "tokens=1,3" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v HiberbootEnabled 2^>nul') do if /i "%%a"=="HiberbootEnabled" set "_fsv=%%b"
+for /f "tokens=1,3" %%a in ('reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\System" /v HiberbootEnabled 2^>nul') do if /i "%%a"=="HiberbootEnabled" set "_fsp=%%b"
+for /f "tokens=1,3" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Power" /v HibernateEnabled 2^>nul') do if /i "%%a"=="HibernateEnabled" set "_fsh=%%b"
+if /i "!_fsh!"=="0x0" goto :eof
+if /i not "!_fsp!"=="0x1" if /i "!_fsv!"=="0x0" goto :eof
+echo      Use Restart, not Shut down: with Fast Startup on, Shut down and power on do not
+echo      reload Windows, so the change waits for a real restart.
 goto :eof
 
 :ApplyDns
@@ -4722,7 +5617,7 @@ call :Log "DNS -> %~1 : %DNSSRV%"
 set "_dnsres=!TEMP!\pt_dnsres_%RANDOM%.txt"
 del "!_dnsres!" >nul 2>&1
 set "PT_DNSRES=!_dnsres!"
-start "" /min /wait powershell -NoProfile -Command "$ok=0;$fail=0;Get-NetAdapter -Physical -ErrorAction SilentlyContinue | ForEach-Object { try { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses @(%DNSSRV%) -ErrorAction Stop; $ok++ } catch { $fail++ } }; ('' + $ok + ' ' + $fail) | Out-File -FilePath $env:PT_DNSRES -Encoding ASCII; if($ok -gt 0){exit 0}else{exit 1}"
+start "" /min /wait powershell -NoProfile -Command "$ok=0;$fail=0;try{ $ad=@(Get-NetAdapter -Physical -ErrorAction Stop) }catch{ 'E 0' | Out-File -FilePath $env:PT_DNSRES -Encoding ASCII; exit 2 }; $ad | ForEach-Object { try { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses @(%DNSSRV%) -ErrorAction Stop; $ok++ } catch { $fail++ } }; ('' + $ok + ' ' + $fail) | Out-File -FilePath $env:PT_DNSRES -Encoding ASCII; if($ok -gt 0){exit 0}else{exit 1}"
 set "_dnsrc=%errorlevel%"
 set "PT_DNSRES="
 ipconfig /flushdns >nul 2>&1
@@ -4737,6 +5632,14 @@ set "_phrase=%~2"
 set "_okN=0" & set "_failN=0"
 if exist "!_dnsres!" for /f "usebackq tokens=1,2" %%a in ("!_dnsres!") do ( set "_okN=%%a" & set "_failN=%%b" )
 del "!_dnsres!" >nul 2>&1
+rem  E: the adapter list itself could not be read - not a missing adapter, not an elevation issue.
+if "!_okN!"=="E" (
+    echo [ERROR] !_phrase!: the network adapters could not be listed - Windows Management
+    echo         Instrumentation ^(WMI^) did not answer, so nothing was changed.
+    call :Log "FAIL: DNS - !_phrase! - the adapters could not be listed"
+    set /a _FAILS+=1
+    goto :eof
+)
 if "%~1"=="0" (
     echo [OK] !_phrase! on !_okN! adapter^(s^), !_failN! failed.
     call :Log "OK: DNS - !_phrase! ok=!_okN! fail=!_failN!"
@@ -4819,11 +5722,13 @@ set "_rk=!_rk:HKCU\=HKEY_CURRENT_USER\!"
 set "_rk=!_rk:HKCR\=HKEY_CLASSES_ROOT\!"
 set "_rk=!_rk:HKU\=HKEY_USERS\!"
 set "_rk=!_rk:HKCC\=HKEY_CURRENT_CONFIG\!"
-> "!_bkp!" echo Windows Registry Editor Version 5.00
->>"!_bkp!" echo.
->>"!_bkp!" echo [!_rk!]
-call :BackupValueLine
-rem  No backup file on disk: refuse the live write.
+call :_BakWrite 2>nul
+rem  Header plus the value's line is at least four lines; anything less is not an undo.
+set "_bkn=0"
+rem  The child reads _bkp itself; given the path, it would expand a variable reference in it.
+if exist "!_bkp!" for /f %%c in ('find /c /v "" ^< "%%_bkp%%"') do set "_bkn=%%c"
+if !_bkn! LSS 4 del "!_bkp!" >nul 2>&1
+rem  No complete backup on disk: refuse the live write.
 if not exist "!_bkp!" (
     echo         [FAIL] "!_desc!" was NOT applied - could not write a per-value backup ^(AV / Controlled Folder Access / disk full^).
     call :Log "  FAIL backup !_key! !_val! - write aborted"
@@ -4851,6 +5756,8 @@ endlocal & set /a _FAILS+=%_rc% & exit /b %_rc%
 
 :SafeRegDelete
 rem %1=Key %2=Value %3=Description. Backs up the single value (same as SafeRegAdd), then deletes it.
+rem A value that is already absent prints [SKIP] and sets _SRD_ABSENT for the caller.
+set "_SRD_ABSENT="
 setlocal EnableDelayedExpansion
 set "_key=%~1"
 set "_val=%~2"
@@ -4858,7 +5765,11 @@ set "_desc=%~3"
 echo   [REG] !_desc!
 set "_ln="
 for /f "delims=" %%L in ('reg query "!_key!" /v "!_val!" 2^>nul ^| findstr /I /C:"REG_"') do set "_ln=%%L"
-if not defined _ln ( call :Log "REGDEL !_key! !_val! (already absent)" & endlocal & goto :eof )
+if not defined _ln (
+    echo   [SKIP] !_desc! - the value is not set, nothing to remove.
+    call :Log "REGDEL !_key! !_val! (already absent)"
+    endlocal & set "_SRD_ABSENT=1" & goto :eof
+)
 if defined PRESET_MODE goto _srdJson
 set "_safe=!_key:\=_!"
 set "_safe=!_safe::=!"
@@ -4870,10 +5781,12 @@ set "_rk=!_rk:HKCU\=HKEY_CURRENT_USER\!"
 set "_rk=!_rk:HKCR\=HKEY_CLASSES_ROOT\!"
 set "_rk=!_rk:HKU\=HKEY_USERS\!"
 set "_rk=!_rk:HKCC\=HKEY_CURRENT_CONFIG\!"
-> "!_bkp!" echo Windows Registry Editor Version 5.00
->>"!_bkp!" echo.
->>"!_bkp!" echo [!_rk!]
-call :BackupValueLine
+call :_BakWrite 2>nul
+rem  Header plus the value's line is at least four lines; anything less is not an undo.
+set "_bkn=0"
+rem  The child reads _bkp itself, as in :SafeRegAdd.
+if exist "!_bkp!" for /f %%c in ('find /c /v "" ^< "%%_bkp%%"') do set "_bkn=%%c"
+if !_bkn! LSS 4 del "!_bkp!" >nul 2>&1
 if not exist "!_bkp!" (
     echo         [FAIL] "!_desc!" was NOT applied - could not write a per-value backup ^(AV / Controlled Folder Access / disk full^).
     call :Log "  FAIL backup !_key! !_val! - write aborted"
@@ -4897,6 +5810,15 @@ if errorlevel 1 set "_rc=1"
 if "!_rc!"=="1" echo         [FAIL] "!_desc!" was NOT applied - run as Administrator, or the key is protected.
 if "!_rc!"=="1" ( call :Log "  FAIL regdel !_key! !_val!" ) else ( call :Log "  OK regdel !_key! !_val!" )
 endlocal & set /a _FAILS+=%_rc% & exit /b %_rc%
+
+:_BakWrite
+rem  The .reg header and the value's prior state, into !_bkp!; runs in the caller's setlocal.
+rem  Called with 2>nul: an unwritable folder fails once, at the caller's check, not as raw errors.
+> "!_bkp!" echo Windows Registry Editor Version 5.00
+>>"!_bkp!" echo.
+>>"!_bkp!" echo [!_rk!]
+call :BackupValueLine
+goto :eof
 
 :BackupValueLine
 rem  appends the prior state of ONE value to !_bkp! (runs inside SafeRegAdd's setlocal scope)
@@ -4931,15 +5853,43 @@ if /i "!_rt!"=="REG_SZ" (
 >>"!_bkp!" echo ; not auto-restorable from this file - use the full registry backup or a restore point
 goto :eof
 
+:RpState
+rem  _rpst = on, off or unknown: is System Protection on for the system drive? Enable-ComputerRestore
+rem  runs before a restore point and that setting stays, so callers say it before the question.
+rem  The protected-volume list is not documented: it is the value System Properties keeps under
+rem  SPP\Clients, so a failed read is "unknown", never "off".
+set "_rpst=unknown"
+set "_rpsf=!TEMP!\pt_rpst_%RANDOM%%RANDOM%.txt"
+set "PT_RPST=!_rpsf!"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $s='unknown'; try{ $v=(Get-CimInstance -ClassName Win32_Volume -Filter ('DriveLetter='+[char]39+$env:SystemDrive+[char]39)).DeviceID; $k=Get-Item -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SPP\Clients'; $l=@($k.GetValue('{09F7EDC5-294E-4180-AF6A-FB0E6A0E9513}')); if($v){ $s='off'; foreach($e in $l){ if([string]$e -like ($v+'*')){ $s='on' } } } }catch{}; $s | Out-File -FilePath $env:PT_RPST -Encoding ASCII"
+set "PT_RPST="
+if exist "!_rpsf!" set /p "_rpst=" <"!_rpsf!"
+del "!_rpsf!" >nul 2>&1
+goto :eof
+
+:RpNote
+rem  Says, before a restore-point question, when a restore point would turn System Protection on.
+call :RpState
+if /i "!_rpst!"=="off" echo   System Protection is OFF for %SystemDrive%: a restore point turns it on, and it stays on.
+if /i "!_rpst!"=="unknown" echo   Could not tell if System Protection is on for %SystemDrive%; if off, a restore point turns it on.
+goto :eof
+
 :CreateRestorePoint
 echo Creating a System Restore Point (may take a moment)...
-call :Log "Creating restore point"
+rem  The state is read again here, for the log: the command line reaches this with no question.
+call :RpState
+if /i "!_rpst!"=="off" echo   Turning System Protection on for %SystemDrive% so the point can be made.
+call :Log "Creating restore point - System Protection for %SystemDrive% was !_rpst! before"
 set "_rpf=!TEMP!\pt_rp_%RANDOM%%RANDOM%.txt"
 set "PT_RPF=!_rpf!"
 rem  Compare the newest restore point before and after: a skipped one is only a warning.
-start "" /min /wait powershell -NoProfile -Command "& { $bn=0; $b=@(Get-ComputerRestorePoint -ErrorAction SilentlyContinue); if ($b.Count -gt 0) { $bn=($b | Select-Object -Last 1).SequenceNumber }; $err=$null; try { Enable-ComputerRestore -Drive '%SystemDrive%\' -ErrorAction SilentlyContinue; Checkpoint-Computer -Description 'PerfTweaks' -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop -WarningAction SilentlyContinue } catch { $err=$_.Exception.Message }; if ($err) { 'Restore point FAILED: ' + $err } else { $an=0; $a=@(Get-ComputerRestorePoint -ErrorAction SilentlyContinue); if ($a.Count -gt 0) { $an=($a | Select-Object -Last 1).SequenceNumber }; if ($an -gt $bn) { 'Restore point created.' } else { 'NO restore point was created - Windows skips one within 24 hours of the last, and System Protection may be off for ' + $env:SystemDrive + '. Continuing without it.' } } } | Out-File -FilePath $env:PT_RPF -Encoding ASCII"
+start "" /min /wait powershell -NoProfile -Command "& { $bn=0; $b=@(Get-ComputerRestorePoint -ErrorAction SilentlyContinue); if ($b.Count -gt 0) { $bn=($b | Select-Object -Last 1).SequenceNumber }; $err=$null; try { Enable-ComputerRestore -Drive '%SystemDrive%\' -ErrorAction SilentlyContinue; Checkpoint-Computer -Description 'PerfTweaks' -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop -WarningAction SilentlyContinue } catch { $err=$_.Exception.Message }; if ($err) { 'Restore point FAILED: ' + $err } else { $an=0; $a=@(Get-ComputerRestorePoint -ErrorAction SilentlyContinue); if ($a.Count -gt 0) { $an=($a | Select-Object -Last 1).SequenceNumber }; if ($an -gt $bn) { 'Restore point created.' } else { 'NO restore point was created - Windows skips one within 24 hours of the last, or System Protection could not be turned on for ' + $env:SystemDrive + '. Continuing without it.' } } } | ForEach-Object { [IO.File]::WriteAllLines($env:PT_RPF,[string[]]@($_),(New-Object Text.UTF8Encoding $false)) }"
 set "PT_RPF="
-if exist "!_rpf!" ( type "!_rpf!" & del "!_rpf!" >nul 2>&1 )
+rem  UTF-8 file, shown under UTF-8: the failure reason is in the display language.
+call :Utf8On
+if exist "!_rpf!" type "!_rpf!"
+call :Utf8Off
+del "!_rpf!" >nul 2>&1
 goto :eof
 
 :CreateRegBackup
@@ -4983,7 +5933,8 @@ set "PT_OARES=!_oares!"
 start "" /min /wait powershell -NoProfile -Command "$b=$env:PT_OABASE;$d=Get-ChildItem -LiteralPath $b -Directory -Filter 'app-*' -ErrorAction SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'resources') } | Sort-Object { try{[version]($_.Name -replace '^app-','')}catch{[version]'0.0'} } -Descending | Select-Object -First 1; if($d){ $d.Name | Out-File -FilePath $env:PT_OARES -Encoding ASCII }"
 set "PT_OABASE=" & set "PT_OARES="
 rem  Only the ASCII folder name comes back; a non-ASCII profile path would not survive the file.
-if exist "!_oares!" for /f "usebackq delims=" %%A in ("!_oares!") do set "_resdir=!_base!\%%A\resources"
+set "_appdir="
+if exist "!_oares!" for /f "usebackq delims=" %%A in ("!_oares!") do set "_resdir=!_base!\%%A\resources" & set "_appdir=%%A"
 del "!_oares!" >nul 2>&1
 if not defined _resdir ( echo [SKIP] %_flav%: no app-*\resources folder. & endlocal & goto :eof )
 set "_target=app.asar"
@@ -4993,7 +5944,8 @@ if exist "!_resdir!\app.asar.orig" set "_target=app.asar.orig"
 echo [%_flav%] Target: "!_resdir!\!_target!"
 rem  Back up the original beside the .asar and in the backup folder; report which one landed.
 set "_localbak=!_resdir!\!_target!.bak"
-set "_docbak=!BACKUP_DIR!\%_flav%_!_target!.bak"
+rem  One write-once copy per Discord version: each update ships a new app-* folder.
+set "_docbak=!BACKUP_DIR!\%_flav%_!_appdir!_!_target!.bak"
 set "_hadorig=0"
 set "_bakloc="
 if exist "!_resdir!\!_target!" (
@@ -5079,13 +6031,15 @@ rem  Reset the tally per preset; _RUNTRACK stays unset, as cleanup delete failur
 set "_FAILS=0"
 set "PRESET_JSON=!BACKUP_DIR!\Preset_%_pname%_%RANDOM%%RANDOM%.json"
 set "PRESET_JSON_TMP=!PRESET_JSON!.tmp"
-break>"!PRESET_JSON_TMP!"
+call :_pbTouch 2>nul
 if not exist "!PRESET_JSON_TMP!" (
     echo [ERROR] Could not create the preset JSON backup in "!BACKUP_DIR!".
     echo         Aborting so registry changes are NOT applied without an undo file.
     call :Log "ABORT: preset begin - JSON temp not writable"
     set "PRESET_JSON="
     set "PRESET_JSON_TMP="
+    rem  The menu callers clear the screen at once; a command-line run must never wait.
+    if not defined _CLIANY pause
     exit /b 1
 )
 set "PRESET_MODE=1"
@@ -5095,13 +6049,18 @@ echo Applying preset "%_pname%" - registry changes are being captured to one JSO
 echo.
 goto :eof
 
+:_pbTouch
+rem  One call down, so the caller's 2>nul also hides cmd's own error for a failed redirect.
+break>"!PRESET_JSON_TMP!"
+goto :eof
+
 :PresetEnd
 rem  Turn the captured JSONL temp into a proper JSON array, then drop the temp.
 set "PRESET_MODE="
 set "_LOGMSG=PRESET end -> !PRESET_JSON!" & call :LogVar _LOGMSG
 set "PT_TMP=!PRESET_JSON_TMP!"
 set "PT_FINAL=!PRESET_JSON!"
-start "" /min /wait powershell -NoProfile -Command "$t=$env:PT_TMP;$f=$env:PT_FINAL;if(Test-Path -LiteralPath $t){$o=@(Get-Content -LiteralPath $t | Where-Object {$_ -match '\S'});Set-Content -LiteralPath $f -Value ('['+($o -join ',')+']') -Encoding ASCII}else{Set-Content -LiteralPath $f -Value '[]' -Encoding ASCII}"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='Stop';try{$t=$env:PT_TMP;$f=$env:PT_FINAL;if(Test-Path -LiteralPath $t){$o=@(Get-Content -LiteralPath $t | Where-Object {$_ -match '\S'});Set-Content -LiteralPath $f -Value ('['+($o -join ',')+']') -Encoding ASCII}else{Set-Content -LiteralPath $f -Value '[]' -Encoding ASCII};exit 0}catch{exit 1}"
 set "_pendrc=%errorlevel%"
 rem  The temp file is the only copy of the captured values: keep it unless conversion succeeded.
 if not "%_pendrc%"=="0" goto _presetEndKeep
@@ -5300,6 +6259,8 @@ goto _oasInstall
 :_oasDlFail
 echo [ERROR] OpenAsar download failed - skipping. Put app.asar next to the script and retry.
 call :Log "PRESET OpenAsar: download failed"
+rem  Counted: an unattended run shows only :Summary and the exit code.
+set /a _FAILS+=1
 set "_OADL="
 goto :eof
 
@@ -5382,6 +6343,7 @@ echo.
 call :Summary "LIGHT preset applied."
 if defined PRESET_LAST (echo      Registry backup: !PRESET_LAST!) else (echo      Registry backup: none - it could not be written, see the [WARN] above.)
 echo      Reboot recommended.
+call :RestartNote
 pause
 goto MenuPresets
 rem =====================================================================================
@@ -5396,12 +6358,15 @@ echo  core tweaks - then offers to install OpenAsar. Registry changes go into ON
 echo  backup. This is the same set as "Apply recommended safe set", plus OpenAsar.
 echo ==================================================================================================
 call :LaptopAdvisory
-set "_rp=Y"
-set /p "_rp=Create a System Restore Point first? (Y/N): "
-if /i "!_rp!"=="Y" call :CreateRestorePoint
 set "_c="
 set /p "_c=Apply the MODERATE preset? (Y/N): "
 if /i not "!_c!"=="Y" goto MenuPresets
+rem  The restore point is asked after the go-ahead: a side question is not the Y, and declining
+rem  the change must not leave a restore point or System Protection switched on behind it.
+call :RpNote
+set "_rp=Y"
+set /p "_rp=Create a System Restore Point first? (Y/N): "
+if /i "!_rp!"=="Y" call :CreateRestorePoint
 call :PresetBegin moderate
 if errorlevel 1 goto MenuPresets
 call :PresetBodyModerate
@@ -5415,6 +6380,7 @@ set /p "_oa=Also install OpenAsar into Discord now? (Y/N): "
 if /i "!_oa!"=="Y" call :DoOpenAsarSilent
 echo.
 echo Reboot recommended.
+call :RestartNote
 pause
 goto MenuPresets
 rem =====================================================================================
@@ -5435,12 +6401,15 @@ echo  and the cleanup deletes files for good.
 echo  A REBOOT is required afterwards.
 echo ==================================================================================================
 call :LaptopAdvisory
-set "_rp=Y"
-set /p "_rp=Create a System Restore Point first? (strongly recommended) (Y/N): "
-if /i "!_rp!"=="Y" call :CreateRestorePoint
 set "_c="
 set /p "_c=Apply the HEAVY preset? (Y/N): "
 if /i not "!_c!"=="Y" goto MenuPresets
+rem  The restore point is asked after the go-ahead: a side question is not the Y, and declining
+rem  the change must not leave a restore point or System Protection switched on behind it.
+call :RpNote
+set "_rp=Y"
+set /p "_rp=Create a System Restore Point first? (strongly recommended) (Y/N): "
+if /i "!_rp!"=="Y" call :CreateRestorePoint
 call :PresetBegin heavy
 if errorlevel 1 goto MenuPresets
 call :PresetBodyHeavy
@@ -5453,6 +6422,7 @@ echo      REBOOT required for the timer / IPv6 / memory-compression changes to t
 echo.
 echo  Tip: to also enable a higher timer resolution, use  Apps ^& files ^> Apply timer
 echo       resolution  (it needs the bundled SetTimerResolution.exe).
+call :RestartNote
 pause
 goto MenuPresets
 rem =====================================================================================
@@ -5474,13 +6444,15 @@ if not exist "!_pdir!\" (
     pause
     goto MenuPresets
 )
+rem  The names stay in a file, shown and picked with delayed expansion off: a FOR copy under it
+rem  drops a "!" and every "^", so a name like Hi!There.preset pointed at a file that is not there.
+rem  The picked line comes back through set /p, which takes it as it is.
 set "_pn=0"
-rem  Store names only; the full path is rebuilt late from _pdir when one is picked.
-for %%F in ("!_pdir!\*.preset") do (
-    set /a _pn+=1
-    set "_pnm[!_pn!]=%%~nxF"
-)
+set "_plist=!TEMP!\sincript_presets_%RANDOM%%RANDOM%.txt"
+dir /b /a-d /on "!_pdir!\*.preset" >"!_plist!" 2>nul
+for /f %%n in ('find /c /v "" ^< "%%_plist%%" 2^>nul') do set "_pn=%%n"
 if "%_pn%"=="0" (
+    del "!_plist!" >nul 2>&1
     echo  The "sincript_presets" folder has no *.preset files yet.
     echo  Add a text file named e.g.  mypreset.preset  - see the README for the key list.
     echo.
@@ -5488,7 +6460,9 @@ if "%_pn%"=="0" (
     goto MenuPresets
 )
 echo  Available preset files in sincript_presets\:
-for /l %%I in (1,1,%_pn%) do echo     %%I.  !_pnm[%%I]!
+setlocal DisableDelayedExpansion
+for /f "tokens=1* delims=:" %%a in ('findstr /n /r "." "%%_plist%%" 2^>nul') do echo     %%a.  %%b
+endlocal
 echo     0.  Back
 echo ==================================================================================================
 
@@ -5497,15 +6471,43 @@ set "sel="
 set /p "sel=Choose a preset file: "
 if not defined sel call :NoInput || goto ExitScript
 if not defined sel goto PresetCustom_ask
-if "!sel!"=="0" goto MenuPresets
-set "_pfile="
-for /l %%I in (1,1,%_pn%) do if "!sel!"=="%%I" set "_pfile=!_pdir!\!_pnm[%%I]!"
-if not defined _pfile goto PresetCustom_ask
+if "!sel!"=="0" (del "!_plist!" >nul 2>&1 & goto MenuPresets)
+rem  The reply goes in as a FOR variable, so it is never parsed as code.
 set "_pshow="
-for /l %%I in (1,1,%_pn%) do if "!sel!"=="%%I" set "_pshow=!_pnm[%%I]!"
-set "_pbase="
-for %%F in ("!_pfile!") do set "_pbase=%%~nF"
-set "_pbase=%_pbase: =_%"
+set "_ppick=!TEMP!\sincript_pick_%RANDOM%%RANDOM%.txt"
+del "!_ppick!" >nul 2>&1
+for /f "delims=" %%o in ("!_ppick!") do for /f "delims=" %%r in ("!sel!") do (
+    setlocal DisableDelayedExpansion
+    for /f "tokens=1* delims=:" %%a in ('findstr /n /r "." "%%_plist%%" 2^>nul') do if "%%a"=="%%r" >"%%o" echo(%%b
+    endlocal
+)
+if exist "!_ppick!" set /p "_pshow=" <"!_ppick!"
+del "!_ppick!" >nul 2>&1
+if not defined _pshow goto PresetCustom_ask
+del "!_plist!" >nul 2>&1
+set "_pfile=!_pdir!\!_pshow!"
+rem  The backup name drops the extension; ! ^ and spaces become _ with delayed expansion off.
+setlocal DisableDelayedExpansion
+set "_pb=%_pshow:~0,-7%"
+set "_pb=%_pb:!=_%"
+set "_pb=%_pb:^=_%"
+set "_pb=%_pb: =_%"
+endlocal & set "_pbase=%_pb%"
+rem  A "!" on a directive line would be dropped by the line loop below, so it is refused.
+call :PresetBangCheck
+if errorlevel 2 (
+    echo.
+    echo [ERROR] Could not read !_pshow! - nothing was applied.
+    pause
+    goto MenuPresets
+)
+if errorlevel 1 (
+    echo.
+    echo [ERROR] !_pshow! has an exclamation mark on a directive line. sincript cannot read that
+    echo         character from a preset - remove it, then pick the file again.
+    pause
+    goto MenuPresets
+)
 rem ---- validate: read each key=value once, record valid directives, collect problems ----
 set "_perr=0"
 set "_pgood=0"
@@ -5539,12 +6541,19 @@ pause
 goto MenuPresets
 
 :_pcHaveValid
-if %_perr% lss 1 goto _pcReady
+rem  Picking the file is not the go-ahead: ask, naming the problems when there are some.
+if %_perr% lss 1 goto _pcAskClean
 set "_cc="
 set /p "_cc=Apply the valid directives and skip the problems? (Y/N): "
-if /i not "!_cc!"=="Y" goto MenuPresets
+goto _pcReady
+
+:_pcAskClean
+set "_cc="
+set /p "_cc=Apply these %_pgood% directive(s)? (Y/N): "
 
 :_pcReady
+if /i not "!_cc!"=="Y" goto MenuPresets
+call :RpNote
 set "_rp=Y"
 set /p "_rp=Create a System Restore Point first? (Y/N): "
 if /i "!_rp!"=="Y" call :CreateRestorePoint
@@ -5557,6 +6566,7 @@ echo.
 call :Summary "Custom preset applied."
 if defined PRESET_LAST (echo      Registry backup: !PRESET_LAST!) else (echo      Registry backup: none - it could not be written, see the [WARN] above.)
 echo      Reboot recommended.
+call :RestartNote
 pause
 goto MenuPresets
 
@@ -5683,11 +6693,15 @@ echo  Advanced ^> 4 ^(Windows defaults^); OpenAsar - its .bak. TCP tuning and me
 echo  have no in-app undo, and the cleanup deletes files for good.
 echo ==================================================================================================
 set "_rn=0"
-for /f "delims=" %%F in ('dir /b /o-d "!BACKUP_DIR!\Preset_*.json" 2^>nul') do (
+rem  UTF-8 for the read: a name in another alphabet would come back as "?" and name no file.
+call :Utf8On
+rem  The for /f child reads BACKUP_DIR itself: given the value, it would expand a variable reference in it.
+for /f "delims=" %%F in ('dir /b /o-d "%%BACKUP_DIR%%\Preset_*.json" 2^>nul') do (
     set /a _rn+=1
     set "_rf[!_rn!]=!BACKUP_DIR!\%%F"
     set "_rnm[!_rn!]=%%F"
 )
+call :Utf8Off
 if "%_rn%"=="0" (
     echo  No preset JSON backups were found in:
     echo     !BACKUP_DIR!
@@ -5720,20 +6734,34 @@ set "PT_FILE=!_rfile!"
 set "_prres=!TEMP!\pt_prres_%RANDOM%.txt"
 del "!_prres!" >nul 2>&1
 set "PT_PRRES=!_prres!"
-rem  The child writes ok, fail and badjson counts; an already-absent value counts as restored.
-start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue';$p=$env:PT_FILE;$ok=0;$fail=0;try{$items=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json}catch{'0 0 1'|Out-File -FilePath $env:PT_PRRES -Encoding ASCII;exit 2};foreach($it in $items){ if(-not $it.present){ reg delete $it.key /v $it.name /f 2>$null | Out-Null; if($LASTEXITCODE -eq 0){$ok++}else{ reg query $it.key /v $it.name 2>$null | Out-Null; if($LASTEXITCODE -ne 0){$ok++}else{$fail++} } } elseif($it.oldtype -eq 'REG_DWORD'){ reg add $it.key /v $it.name /t REG_DWORD /d $it.olddata /f 2>$null | Out-Null; if($LASTEXITCODE -eq 0){$ok++}else{$fail++} } elseif($it.oldtype -eq 'REG_SZ' -and $it.restorable -ne $false){ $rk=$it.key -replace '^HKLM\\','HKLM:\' -replace '^HKCU\\','HKCU:\' -replace '^HKCR\\','Registry::HKEY_CLASSES_ROOT\' -replace '^HKU\\','Registry::HKEY_USERS\' -replace '^HKCC\\','Registry::HKEY_CURRENT_CONFIG\'; try{ if(-not (Test-Path -LiteralPath $rk)){New-Item -Path $rk -Force -ErrorAction Stop|Out-Null}; Set-ItemProperty -LiteralPath $rk -Name $it.name -Value ([string]$it.olddata) -Type String -ErrorAction Stop; $ok++ }catch{$fail++} } }; (''+$ok+' '+$fail+' 0')|Out-File -FilePath $env:PT_PRRES -Encoding ASCII; if($fail -gt 0){exit 1}else{exit 0}"
+rem  The child writes ok, fail, unreadable, not-restorable and item counts; an already-absent
+rem  value counts as restored. A read error must stop it: SilentlyContinue alone skips the catch.
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue';$p=$env:PT_FILE;$ok=0;$fail=0;$skip=0;try{$raw=Get-Content -Raw -LiteralPath $p -ErrorAction Stop; if($null -eq $raw -or $raw -notmatch '\S'){throw 'empty'}; $items=$raw | ConvertFrom-Json -ErrorAction Stop}catch{'0 0 1 0 0'|Out-File -FilePath $env:PT_PRRES -Encoding ASCII;exit 2};$all=@($items | Where-Object { $null -ne $_ });foreach($it in $all){ if(-not $it.present){ reg delete $it.key /v $it.name /f 2>$null | Out-Null; if($LASTEXITCODE -eq 0){$ok++}else{ reg query $it.key /v $it.name 2>$null | Out-Null; if($LASTEXITCODE -ne 0){$ok++}else{$fail++} } } elseif($it.oldtype -eq 'REG_DWORD'){ reg add $it.key /v $it.name /t REG_DWORD /d $it.olddata /f 2>$null | Out-Null; if($LASTEXITCODE -eq 0){$ok++}else{$fail++} } elseif($it.oldtype -eq 'REG_SZ' -and $it.restorable -ne $false){ $rk=$it.key -replace '^HKLM\\','HKLM:\' -replace '^HKCU\\','HKCU:\' -replace '^HKCR\\','Registry::HKEY_CLASSES_ROOT\' -replace '^HKU\\','Registry::HKEY_USERS\' -replace '^HKCC\\','Registry::HKEY_CURRENT_CONFIG\'; try{ if(-not (Test-Path -LiteralPath $rk)){New-Item -Path $rk -Force -ErrorAction Stop|Out-Null}; Set-ItemProperty -LiteralPath $rk -Name $it.name -Value ([string]$it.olddata) -Type String -ErrorAction Stop; $ok++ }catch{$fail++} } else { $skip++ } }; (''+$ok+' '+$fail+' 0 '+$skip+' '+$all.Count)|Out-File -FilePath $env:PT_PRRES -Encoding ASCII; if($fail -gt 0){exit 1}else{exit 0}"
 set "_prrc=%errorlevel%"
 set "PT_FILE=" & set "PT_PRRES="
-set "_okN=0" & set "_failN=0" & set "_badjson=0"
-if exist "!_prres!" for /f "usebackq tokens=1,2,3" %%a in ("!_prres!") do ( set "_okN=%%a" & set "_failN=%%b" & set "_badjson=%%c" )
+set "_okN=0" & set "_failN=0" & set "_badjson=0" & set "_skipN=0" & set "_allN="
+if exist "!_prres!" for /f "usebackq tokens=1-5" %%a in ("!_prres!") do ( set "_okN=%%a" & set "_failN=%%b" & set "_badjson=%%c" & set "_skipN=%%d" & set "_allN=%%e" )
 del "!_prres!" >nul 2>&1
 echo.
-if "!_badjson!"=="1" (
-    echo [ERROR] That backup file could not be read as valid JSON. Nothing was changed.
-    set "_LOGMSG=FAIL: preset restore - bad JSON !_rfile!" & call :LogVar _LOGMSG
-) else if "!_prrc!"=="0" (
+if not defined _allN (
+    echo [ERROR] PowerShell returned no answer - nothing was checked or restored.
+    set "_LOGMSG=FAIL: preset restore - no worker answer !_rfile!" & call :LogVar _LOGMSG
+) else if "!_badjson!"=="1" (
+    echo [ERROR] That backup file could not be read ^(missing, locked, empty or not valid JSON^).
+    echo         Nothing was changed.
+    set "_LOGMSG=FAIL: preset restore - unreadable !_rfile!" & call :LogVar _LOGMSG
+) else if "!_allN!"=="0" (
+    echo [SKIP] That backup holds no values - the preset did not change any registry value.
+    call :Log "SKIP: preset restore - the backup holds no values"
+) else if "!_prrc!!_skipN!"=="00" (
     echo [OK] Restore finished: !_okN! value^(s^) put back, 0 failed. A reboot is recommended.
+    call :RestartNote
     call :Log "OK: preset restore ok=!_okN! fail=!_failN!"
+) else if "!_prrc!"=="0" (
+    echo [WARN] Restore finished: !_okN! put back, but !_skipN! value^(s^) this file cannot restore
+    echo        ^(a type or text it does not hold^) - use the full registry backup or a restore point.
+    call :RestartNote
+    call :Log "WARN: preset restore ok=!_okN! notrestorable=!_skipN!"
 ) else (
     echo [WARN] Restore incomplete: !_okN! restored, !_failN! FAILED ^(not elevated, or a protected key^).
     echo        Re-run elevated if HKLM values did not restore. Details are in the log.
@@ -5754,10 +6782,14 @@ echo  registry tweak - the same files you can also double-click in the backup fo
 echo  Full-registry exports (FullReg_*.reg) are not listed here; import those manually.
 echo ==================================================================================================
 set "_qn=0"
-for /f "delims=" %%F in ('dir /b /a-d /o-d "!BACKUP_DIR!\*.reg" 2^>nul ^| findstr /I /V /B "FullReg_"') do (
-    set /a _qn+=1
-    set "_qf[!_qn!]=!BACKUP_DIR!\%%F"
-    set "_qnm[!_qn!]=%%F"
+rem  No pipe, and BACKUP_DIR read by the child: each side of a pipe would parse the path again.
+for /f "delims=" %%F in ('dir /b /a-d /o-d "%%BACKUP_DIR%%\*.reg" 2^>nul') do (
+    set "_qx=%%F"
+    if /i not "!_qx:~0,8!"=="FullReg_" (
+        set /a _qn+=1
+        set "_qf[!_qn!]=!BACKUP_DIR!\%%F"
+        set "_qnm[!_qn!]=%%F"
+    )
 )
 if "%_qn%"=="0" (
     echo  No per-value .reg backups were found in:
@@ -5799,6 +6831,7 @@ if errorlevel 1 (
     call :Log "  FAIL reg import %_qshow%"
 ) else (
     echo [OK] Backup imported. A sign out/in or reboot may be needed for some values.
+    call :RestartNote
     call :Log "  OK reg import %_qshow%"
 )
 pause
@@ -5821,10 +6854,13 @@ echo  CPU power throttling is NOT in it: Backups ^& status ^> Restore a single v
 echo  ^(the ...Control_Power_PowerThrottling_*.reg file^).
 echo ==================================================================================================
 set "_pn=0"
-for /f "delims=" %%F in ('dir /b /a-d /o-d "!BACKUP_DIR!\PowerPlan_*.bat" 2^>nul') do (
+rem  Oldest first: each visit writes a new file holding the state of that moment, so the
+rem  oldest one holds the state before sincript's first change.
+for /f "delims=" %%F in ('dir /b /a-d /od "%%BACKUP_DIR%%\PowerPlan_*.bat" 2^>nul') do (
     set /a _pn+=1
     set "_pf[!_pn!]=!BACKUP_DIR!\%%F"
     set "_pnm[!_pn!]=%%F"
+    for %%G in ("!BACKUP_DIR!\%%F") do set "_pdt[!_pn!]=%%~tG"
 )
 if "%_pn%"=="0" (
     echo  No power-settings backups were found in:
@@ -5834,8 +6870,8 @@ if "%_pn%"=="0" (
     pause
     goto MenuBackups
 )
-echo  Power backups (newest first):
-for /l %%I in (1,1,%_pn%) do echo     %%I.  !_pnm[%%I]!
+echo  Power backups (oldest first - the top one is from before the first change):
+for /l %%I in (1,1,%_pn%) do echo     %%I.  !_pnm[%%I]!   !_pdt[%%I]!
 echo     0.  Back
 echo ==================================================================================================
 
@@ -5858,8 +6894,9 @@ rem  Leave _RUNTRACK clear: nothing here goes through :Run, and only :Summary wo
 set "_FAILS=0" & set "_RUNTRACK="
 set "_LOGMSG=POWER revert from !_pfile!" & call :LogVar _LOGMSG
 rem  Child cmd, not call, so a syntax error in the file cannot end sincript; /q skips its pause.
-rem  /v:off: the file is written for plain expansion, not delayed.
-cmd /d /v:off /s /c ""!_pfile!" /q"
+rem  /v:off: the file is written for plain expansion, not delayed. The child reads _pfile itself:
+rem  given the path, it would expand a variable reference in it and not find the file.
+cmd /d /v:off /s /c ""%%_pfile%%" /q"
 if errorlevel 1 (
     echo [WARN] The undo file reported a failure. Run it elevated, or open Control Panel ^>
     echo        Power Options and set the plan back by hand.
@@ -5889,10 +6926,13 @@ echo  Registry policy values are NOT in this file: those have their own .reg bac
 echo  "Restore a single value backup" above.
 echo ==================================================================================================
 set "_tn=0"
-for /f "delims=" %%F in ('dir /b /a-d /o-d "!BACKUP_DIR!\Telemetry_*.bat" 2^>nul') do (
+rem  Oldest first: each visit writes a new file holding the state of that moment, so the
+rem  oldest one holds the state before sincript's first change.
+for /f "delims=" %%F in ('dir /b /a-d /od "%%BACKUP_DIR%%\Telemetry_*.bat" 2^>nul') do (
     set /a _tn+=1
     set "_tf[!_tn!]=!BACKUP_DIR!\%%F"
     set "_tnm[!_tn!]=%%F"
+    for %%G in ("!BACKUP_DIR!\%%F") do set "_tdt[!_tn!]=%%~tG"
 )
 if "%_tn%"=="0" (
     echo  No telemetry backups were found in:
@@ -5902,8 +6942,8 @@ if "%_tn%"=="0" (
     pause
     goto MenuBackups
 )
-echo  Telemetry backups ^(newest first^):
-for /l %%I in (1,1,%_tn%) do echo     %%I.  !_tnm[%%I]!
+echo  Telemetry backups ^(oldest first - the top one is from before the first change^):
+for /l %%I in (1,1,%_tn%) do echo     %%I.  !_tnm[%%I]!   !_tdt[%%I]!
 echo     0.  Back
 echo ==================================================================================================
 
@@ -5926,8 +6966,8 @@ rem  Leave _RUNTRACK clear: nothing here goes through :Run, and only :Summary wo
 set "_FAILS=0" & set "_RUNTRACK="
 set "_LOGMSG=TELEMETRY revert from !_tfile!" & call :LogVar _LOGMSG
 rem  Child cmd, not call, so a syntax error in the file cannot end sincript; /q skips its pause.
-rem  /v:off: the file is written for plain expansion, not delayed.
-cmd /d /v:off /s /c ""!_tfile!" /q"
+rem  /v:off: the file is written for plain expansion, not delayed. The child reads _tfile itself.
+cmd /d /v:off /s /c ""%%_tfile%%" /q"
 if errorlevel 1 (
     echo [WARN] The undo file reported a failure. Re-run it from an elevated prompt, or put the
     echo        services back in services.msc and the tasks back in Task Scheduler.
@@ -5989,7 +7029,7 @@ set "_c2="
 set /p "_c2=Delete the older full exports, keeping the newest of each hive? (Y/N): "
 if /i not "!_c2!"=="Y" goto _mbDone
 set "_keepL=0" & set "_keepU=0" & set "_keepO=0" & set "_delN=0" & set "_delFail=0"
-for /f "delims=" %%F in ('dir /b /a-d /o-d "!BACKUP_DIR!\FullReg_*.reg" 2^>nul') do call :_mbPrune "%%F"
+for /f "delims=" %%F in ('dir /b /a-d /o-d "%%BACKUP_DIR%%\FullReg_*.reg" 2^>nul') do call :_mbPrune "%%F"
 call :Log "MANAGE pruned !_delN! old full registry exports, !_delFail! could not be deleted"
 if "!_delFail!"=="0" echo  [OK] Deleted !_delN! older full export^(s^); kept the newest HKLM and HKCU export.
 if not "!_delFail!"=="0" echo  [WARN] Deleted !_delN! older full export^(s^), but !_delFail! could not be deleted - in use or read-only.
