@@ -161,6 +161,9 @@ function Invoke-CmdDriver {
     $psi.Arguments = '/d /s /c ""' + $path + '""'
     $psi.WorkingDirectory = $Dir
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    # System32 first: a harness started from Git Bash or MSYS hands the child a PATH where GNU find, sort
+    # and timeout shadow Windows' own; GNU find reads `/c` as the C: drive and walks it past any limit.
+    $psi.EnvironmentVariables['Path'] = (Join-Path $env:SystemRoot 'System32') + ';' + $env:Path
     $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     $p = [System.Diagnostics.Process]::Start($psi)
     $p.StandardInput.Close()
@@ -462,8 +465,8 @@ Invoke-Test 'Registry actions reset _FAILS and report via :Summary' {
     $all = ($cmd -join "`n")
     $sum = ([regex]::Matches($all, '(?i)call :Summary')).Count
     $rst = ([regex]::Matches($all, '(?i)set "_FAILS=0"')).Count
-    Assert-True ($sum -eq 39) ("Expected exactly 39 :Summary call sites (update the count when an action is added or removed), found {0} - registry actions may have lost honest reporting (regression of Critical #1)." -f $sum)
-    Assert-True ($rst -eq 32) ("Expected exactly 32 _FAILS resets (update the count when an action is added or removed), found {0} - a gated action may be missing its reset (regression of Critical #1)." -f $rst)
+    Assert-True ($sum -eq 40) ("Expected exactly 40 :Summary call sites (update the count when an action is added or removed), found {0} - registry actions may have lost honest reporting (regression of Critical #1)." -f $sum)
+    Assert-True ($rst -eq 33) ("Expected exactly 33 _FAILS resets (update the count when an action is added or removed), found {0} - a gated action may be missing its reset (regression of Critical #1)." -f $rst)
 }
 
 # 16. An empty preset value (key=) cannot crash :PresetCheckLine.
@@ -6784,7 +6787,7 @@ Invoke-Test 'A registry backup must hold the value before the write, and removin
         Assert-True ($b.Count -gt 1) "test 169: :$lb is missing."
         if ($lb -eq 'BackupValueLine') { $b = @('if defined PT_NOVAL goto :eof') + $b }
         $parts += ':' + $lb
-        $parts += @($b | ForEach-Object { $_.Replace($q, 'type "!PTQ!"').Replace($add, 'echo [REGADD] !_val!=!_data!').Replace($del, 'echo [REGDEL] !_val!') })
+        $parts += @($b | ForEach-Object { if ($_.Contains('PT_BK_FILE') -and $_.Trim().StartsWith('start ""')) { 'if defined PT_MULTI echo [MULTI] >>"!_bkp!"' } else { $_.Replace($q, 'type "!PTQ!"').Replace($add, 'echo [REGADD] !_val!=!_data!').Replace($del, 'echo [REGDEL] !_val!') } })
     }
     Assert-True (@($parts | Where-Object { $_ -match '(?i)\breg\s+(add|delete|query)\b' -and $_.Trim() -notmatch '^(?i)(rem|echo)\b' }).Count -eq 0) 'test 169: a real reg command survived the stubbing - refusing to run.'
     $pp = @(Get-BodyLines -Lines $cmd -Label 'ProcPriority' -NoEcho | ForEach-Object { $_.Trim() })
@@ -6792,21 +6795,27 @@ Invoke-Test 'A registry backup must hold the value before the write, and removin
     for ($i = 0; $i -lt $pp.Count; $i++) { if ($pp[$i].StartsWith('call :Summary "Priority override for !_exe! removed')) { $is = $i } }
     Assert-True ($ia -ge 0 -and $is -gt $ia -and (Test-BlockExit -Lines (Get-BodyLines -Lines $cmd -Label 'ProcPriority') -Open '^if defined _SRD_ABSENT \($' -Exit '^goto MenuAdvanced$') -eq 1) 'Removing a priority override that does not exist still ends in "removed".'
     $dir = Join-Path ([IO.Path]::GetTempPath()) ('pt169_' + [guid]::NewGuid().ToString('N'))
-    foreach ($d in 'b0', 'b2', 'b3', 'b4', 'q') { [void](New-Item -ItemType Directory -Path (Join-Path $dir $d)) }
+    foreach ($d in 'b0', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'q') { [void](New-Item -ItemType Directory -Path (Join-Path $dir $d)) }
     try {
         $qf = Join-Path $dir 'q\present.txt'
         [IO.File]::WriteAllText($qf, "`r`nHKEY_CURRENT_USER\Software\X`r`n    Val    REG_DWORD    0x1`r`n`r`n")
         $gone = Join-Path $dir 'nope\deeper'
-        # routine call, backup folder, query answer, header-only
-        $cases = @(@('call :SafeRegAdd "HKCU\Software\X" "Val" REG_DWORD 0 "set Val"', (Join-Path $dir 'b0'), $qf, ''),
-                   @('call :SafeRegAdd "HKCU\Software\X" "Val" REG_DWORD 0 "set Val"', $gone, $qf, ''),
-                   @('call :SafeRegAdd "HKCU\Software\X" "Val" REG_DWORD 0 "set Val"', (Join-Path $dir 'b2'), $qf, '1'),
-                   @('call :SafeRegDelete "HKCU\Software\X" "Val" "remove Val"', (Join-Path $dir 'b3'), (Join-Path $dir 'q\absent.txt'), ''),
-                   @('call :SafeRegDelete "HKCU\Software\X" "Val" "remove Val"', (Join-Path $dir 'b4'), $qf, ''))
+        $qm = Join-Path $dir 'q\multi.txt'; $qs = Join-Path $dir 'q\multi_same.txt'
+        [IO.File]::WriteAllText($qm, "`r`nHKEY_CURRENT_USER\Software\X`r`n    Multi    REG_MULTI_SZ    x\0y`r`n`r`n")
+        [IO.File]::WriteAllText($qs, "`r`nHKEY_CURRENT_USER\Software\X`r`n    Multi    REG_MULTI_SZ    a\0b`r`n`r`n")
+        # routine call, backup folder, query answer, header-only, the multi-string worker wrote its line
+        $cases = @(@('call :SafeRegAdd "HKCU\Software\X" "Val" REG_DWORD 0 "set Val"', (Join-Path $dir 'b0'), $qf, '', ''),
+                   @('call :SafeRegAdd "HKCU\Software\X" "Val" REG_DWORD 0 "set Val"', $gone, $qf, '', ''),
+                   @('call :SafeRegAdd "HKCU\Software\X" "Val" REG_DWORD 0 "set Val"', (Join-Path $dir 'b2'), $qf, '1', ''),
+                   @('call :SafeRegDelete "HKCU\Software\X" "Val" "remove Val"', (Join-Path $dir 'b3'), (Join-Path $dir 'q\absent.txt'), '', ''),
+                   @('call :SafeRegDelete "HKCU\Software\X" "Val" "remove Val"', (Join-Path $dir 'b4'), $qf, '', ''),
+                   @('call :SafeRegAdd "HKCU\Software\X" "Multi" REG_MULTI_SZ "a\0b" "set Multi"', (Join-Path $dir 'b5'), $qm, '', '1'),
+                   @('call :SafeRegAdd "HKCU\Software\X" "Multi" REG_MULTI_SZ "a\0b" "set Multi"', (Join-Path $dir 'b6'), $qm, '', ''),
+                   @('call :SafeRegAdd "HKCU\Software\X" "Multi" REG_MULTI_SZ "a\0b" "set Multi"', (Join-Path $dir 'b7'), $qs, '', '1'))
         $drv = @('@echo off', 'setlocal EnableDelayedExpansion')
         for ($c = 0; $c -lt $cases.Count; $c++) {
             $x = $cases[$c]
-            $drv += @(('set "BACKUP_DIR=' + $x[1] + '"'), ('set "PTQ=' + $x[2] + '"'), ('set "PT_NOVAL=' + $x[3] + '"'), 'set "_FAILS=0"', "echo [CASE#$c]", $x[0], 'echo [FAILS]!_FAILS! [ABSENT]!_SRD_ABSENT!')
+            $drv += @(('set "BACKUP_DIR=' + $x[1] + '"'), ('set "PTQ=' + $x[2] + '"'), ('set "PT_NOVAL=' + $x[3] + '"'), ('set "PT_MULTI=' + $x[4] + '"'), 'set "_FAILS=0"', "echo [CASE#$c]", $x[0], 'echo [FAILS]!_FAILS! [ABSENT]!_SRD_ABSENT!')
         }
         $drv += @('echo [END]', 'exit /b 0') + $parts + @(':Log', 'goto :eof', ':LogVar', 'goto :eof')
         $r = Invoke-CmdDriver -Lines $drv -Dir $dir
@@ -6819,6 +6828,10 @@ Invoke-Test 'A registry backup must hold the value before the write, and removin
         Assert-True ($sec[2].Contains('[FAIL]') -and -not $sec[2].Contains('[REGADD]') -and $sec[2].Contains('[FAILS]1') -and @(Get-ChildItem -LiteralPath (Join-Path $dir 'b2') -Filter '*.reg').Count -eq 0) ('A backup holding only its header must refuse the write and be removed: ' + $sec[2])
         Assert-True ($sec[3].Contains('[SKIP]') -and $sec[3].Contains('nothing to remove') -and $sec[3].Contains('[ABSENT]1') -and -not $sec[3].Contains('[REGDEL]') -and @(Get-ChildItem -LiteralPath (Join-Path $dir 'b3') -Filter '*.reg').Count -eq 0) ('Removing an absent value must say so, set _SRD_ABSENT and leave no backup: ' + $sec[3])
         Assert-True ($sec[4].Contains('[REGDEL] Val') -and $sec[4] -match '\[ABSENT\]\s*$' -and $sec[4].Contains('[FAILS]0') -and @(Get-ChildItem -LiteralPath (Join-Path $dir 'b4') -Filter '*.reg').Count -eq 1) ('Removing a present value must back it up, delete it and leave _SRD_ABSENT clear: ' + $sec[4])
+        $b5 = @(Get-ChildItem -LiteralPath (Join-Path $dir 'b5') -Filter '*.reg')
+        Assert-True ($sec[5].Contains('[REGADD] Multi=a\0b') -and $sec[5].Contains('[FAILS]0') -and $b5.Count -eq 1 -and @(Get-Content -LiteralPath $b5[0].FullName).Count -ge 4 -and (Get-Content -Raw -LiteralPath $b5[0].FullName).Contains('[MULTI]')) ('A REG_MULTI_SZ must be backed up through its own worker line and then written: ' + $sec[5])
+        Assert-True ($sec[6].Contains('[FAIL]') -and -not $sec[6].Contains('[REGADD]') -and $sec[6].Contains('[FAILS]1') -and @(Get-ChildItem -LiteralPath (Join-Path $dir 'b6') -Filter '*.reg').Count -eq 0) ('A REG_MULTI_SZ whose backup worker wrote nothing must refuse the write: ' + $sec[6])
+        Assert-True ($sec[7].Contains('[SKIP]') -and -not $sec[7].Contains('[REGADD]') -and $sec[7].Contains('[FAILS]0') -and @(Get-ChildItem -LiteralPath (Join-Path $dir 'b7') -Filter '*.reg').Count -eq 0) ('A REG_MULTI_SZ already holding the strings must be skipped, not backed up and rewritten: ' + $sec[7])
     }
     finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
 }
@@ -7809,6 +7822,291 @@ function global:Clear-RecycleBin { [CmdletBinding()] param([switch]$Force)
         Assert-True ($sec[3].Contains('[WARN] Recycle Bin: 2 item(s) could not be deleted') -and -not $sec[3].Contains('[OK]')) ('A Clear-RecycleBin that deleted nothing must be a [WARN]: ' + $sec[3])
         foreach ($i in 4, 5) { Assert-True ($sec[$i].Contains('[WARN] Recycle Bin: its item count could not be read') -and -not $sec[$i].Contains('[OK]') -and -not $sec[$i].Contains('item(s)')) ('An unread count must not read as emptied or as items left: ' + $sec[$i]) }
         Assert-True (@(Get-ChildItem -LiteralPath $dir -Filter 'pt_rb_*').Count -eq 0) 'The Recycle Bin answer file was left in TEMP.'
+    }
+    finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# 192. Remove stale system actions: reads first, judges each finding, fixes only what was asked, and the
+#      boot-menu fixes stop when the store could not be saved (run).
+Invoke-Test 'Remove stale system actions reads first, judges each finding, and fixes only what was asked (run)' {
+    $cmd = Read-Lines $CmdPath
+    $w = @($cmd | Where-Object { $_.Contains('PT_SA_BCD') -and $_ -match '^\s*start "" /min /wait powershell' })
+    Assert-True ($w.Count -eq 1) 'test 192: the boot-menu worker could not be found.'
+    Assert-True ($w[0] -notmatch '(?i)Set(Boolean|Integer|String|Object|Device)\w*Element|DeleteElement|DeleteObject|bcdedit|CreateStore|ImportStore|CreateObject') 'The boot-menu worker can change the store - it must only read.'
+    foreach ($c in '0x24000001', '0x24000002', '0x25000004', '0x26000020', '0x23000003', '0x11000001', '0x12000002', '0x12000004', '0x21000001', '0x22000002') { Assert-True ($w[0].Contains($c)) ("The boot-menu worker no longer reads element $c (Microsoft's documented code).") }
+    Assert-True ($w[0].Contains("@{Id='{9dea862c-5cdd-4e70-acc1-f32b344d4795}'}") -and $w[0].Contains("@{Id='{fa926493-6f1c-4193-a414-58f0b2456d1e}'}")) 'The worker no longer opens {bootmgr} and {current} by their well-known IDs.'
+    $labels = @('StaleActions', '_saBoot', '_saBootOne', '_saKeep', '_saDirtyVol', '_saBcd', '_saBmRec', '_saOsRec', '_saBcdBackup', '_saBcdDel', '_saPending')
+    $beq = 'reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager" /v BootExecute 2^>nul ^| findstr /I /C:"REG_MULTI_SZ"'
+    $pend = [ordered]@{ 'reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending" >nul 2>&1 &&' = 'if exist "!PT192!\cbs.txt"'
+                        'reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired" >nul 2>&1 &&' = 'if exist "!PT192!\wu.txt"'
+                        'reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager" /v PendingFileRenameOperations >nul 2>&1 &&' = 'if exist "!PT192!\pfro.txt"' }
+    $drvBody = @(); $subs = 0
+    foreach ($lb in $labels) {
+        $b = @(Get-BodyLines -Lines $cmd -Label $lb)
+        Assert-True ($b.Count -gt 1) ":$lb is missing or did not unroll."
+        $drvBody += ':' + $lb
+        foreach ($s in $b) {
+            $t = $s.Trim()
+            if ($t -ieq 'cls' -or $t -ieq 'pause' -or $t -ieq 'call :Logo') { $drvBody += 'rem ' + $t; continue }
+            if ($s.Contains('PT_SA_DIRTY') -and $t.StartsWith('start ""')) { $drvBody += 'if exist "!PT192!\dirty.txt" copy /y "!PT192!\dirty.txt" "!_sadf!" >nul'; $subs++; continue }
+            if ($s.Contains('PT_SA_BCD') -and $t.StartsWith('start ""')) { $drvBody += 'if exist "!PT192!\bcd.txt" copy /y "!PT192!\bcd.txt" "!_sabf!" >nul'; $subs++; continue }
+            if ($s.Contains($beq)) { $drvBody += $s.Replace($beq, 'type "!PT192!\be.txt"'); $subs++; continue }
+            $x = $s
+            foreach ($k in $pend.Keys) { if ($x.Contains($k)) { $x = $x.Replace($k, $pend[$k]); $subs++ } }
+            $x = $x.Replace('if exist "%SystemRoot%\System32\!_safile!"', 'if exist "!PT192!\sys32\!_safile!"')
+            $drvBody += ($x -replace '^(\s*)set /p "(\w+)=.*$', '$1set "$2=!PT_ANS!" & echo [PROMPT]')
+        }
+    }
+    Assert-True ($subs -eq 6) ("test 192: expected 6 stub substitutions, made $subs - the screen changed shape.")
+    Assert-True (@($drvBody | Where-Object { $_.Contains('%SystemRoot%\System32\!_safile!') -or $_ -match '^\s*set /p ' }).Count -eq 0 -and @($drvBody | Where-Object { $_.Contains('"!PT192!\sys32\!_safile!"') }).Count -eq 1) 'test 192: a real System32 check or a set /p survived the stubbing.'
+    $stubs = @(':Run', 'echo [RUN] %~1', 'set "_runrc=!PT_RUNRC!"', 'goto :eof', ':RunVar', 'echo [RUNVAR] !%~1!', 'set "_runrc=!PT_EXPRC!"', 'goto :eof',
+               ':SafeRegAdd', 'echo [ADD] %~1 / %~2 / %~3 / %~4', 'goto :eof', ':Summary', 'echo [SUM] %~1', 'goto :eof', ':RestartNote', 'echo [RESTART]', 'goto :eof',
+               ':Utf8On', 'goto :eof', ':Utf8Off', 'goto :eof', ':MenuAdvanced', 'goto :eof', ':Log', 'goto :eof', ':LogVar', 'goto :eof')
+    $vol = { param($s) "VOL|$s`r`nEND|ok`r`n" }
+    $bcdOk = "BM|timeout|0`r`nBM|menu|0`r`nBM|default|{A}`r`nOS|{A}|ok|Windows 11`r`nEND|ok`r`n"
+    $bcdDirty = "BM|timeout|30`r`nBM|menu|1`r`nBM|default|{A}`r`nOS|{A}|ok|Windows 11`r`nOS|{B}|novol|Windows 10 (old)`r`nOS|{C}|noload|Windows Setup`r`nOS|{D}|unknown|Linux (VHD)`r`nEND|ok`r`n"
+    $bcdDefStale = "BM|timeout|30`r`nBM|menu|0`r`nBM|default|{B}`r`nOS|{A}|ok|Windows 11`r`nOS|{B}|novol|Old`r`nEND|ok`r`n"
+    $bcdTwoOk = "BM|timeout|0`r`nBM|menu|0`r`nBM|default|{A}`r`nOS|{A}|ok|Windows 11`r`nOS|{F}|ok|Second`r`nEND|ok`r`n"
+    $bcdOneStaleMenu = "BM|timeout|30`r`nBM|menu|1`r`nBM|default|{A}`r`nOS|{A}|ok|Windows 11`r`nOS|{B}|novol|Old`r`nEND|ok`r`n"
+    $bcdSeqSetup = "BM|timeout|30`r`nBM|menu|0`r`nBM|default|{A}`r`nBM|seq|{H}`r`nOS|{A}|ok|Windows 11`r`nOS|{H}|setup|Windows 11 (Volume 3)`r`nEND|ok`r`n"
+    $beDirty = 'autocheck autochk /p \??\D:\0autocheck autochk /k:E *\0autocheck sdnclean64.exe\0autocheck autochk *\0pdboot *'
+    $addKey = '[ADD] HKLM\SYSTEM\CurrentControlSet\Control\Session Manager / BootExecute / REG_MULTI_SZ / '
+    $act = '^\[(RUN|RUNVAR|ADD|SUM|RESTART)\]'
+    # BootExecute data ($null = unreadable), dirty answer, boot-menu answer, pending markers, System32 files, elevated, answer,
+    # export exit code, bcdedit exit code, actions (prefix match, in order), must say, must not say, prompts, _FAILS
+    $cases = @(
+        @('autocheck autochk *', (& $vol 'C:|0'), $bcdOk, @(), @(), 1, 'Y', '0', '0', @(),
+          @('[OK] No disk check is queued', '[OK] No volume is marked dirty', '[OK] One entry and the text-mode menu is off', '[OK] Windows reports no pending restart', '[OK] Nothing stale among the actions this checks.'),
+          @('[PROMPT]', '[STALE]', '[WARN]'), 0, '0'),
+        @($beDirty, "VOL|C:|0`r`nVOL|D:|1`r`nEND|ok`r`n", $bcdDirty, @('cbs.txt', 'pfro.txt'), @('pdboot.exe'), 1, 'Y', '0', '0',
+          @(($addKey + 'autocheck autochk /k:E *\0autocheck autochk *\0pdboot *'), '[RUNVAR] bcdedit /export "', '[RUN] bcdedit /delete {B}', '[RUN] bcdedit /delete {C}', '[RUN] bcdedit /deletevalue {bootmgr} displaybootmenu', '[RUN] bcdedit /timeout 0', '[SUM] Stale actions removed', '[RESTART]'),
+          @('[STALE] A disk check is queued for the next start: autochk /p \??\D:', 'Excluded from the start-up check (chkntfs /x): autochk /k:E *', '[STALE] Boot-time program sdnclean64.exe: its file is gone', 'Boot-time program pdboot is installed', 'Volume D: is marked dirty',
+            '[STALE] "Windows 10 (old)" {B} - its disk or partition is no longer here', '[STALE] "Windows Setup" {C} - no Windows loader', '"Linux (VHD)" {D} - starts from a device this check cannot judge. Kept', '[OK] "Windows 11" (default) {A}',
+            'text-mode boot menu is switched on', '4 entries are offered for 30 s', 'servicing reports a restart is pending', 'File replacements wait for the next restart', '[BACKUP] Boot configuration', '2 entries stay in the menu'),
+          @('[OK] Nothing stale', 'bcdedit /default', '[STALE] "Windows 11"', 'Windows Update reports a restart', '[OK] Windows reports no pending restart'), 4, '0'),
+        @($beDirty, (& $vol 'C:|0'), $bcdDirty, @(), @('pdboot.exe'), 1, 'N', '0', '0', @(), @('[STALE] A disk check is queued', '[STALE] "Windows 10 (old)"'), @('[ADD]', '[RUN]', '[RUNVAR]', '[SUM]', '[BACKUP]'), 4, '0'),
+        @('autocheck autochk /r \??\C:', (& $vol 'C:|1'), $bcdDefStale, @(), @(), 1, 'Y', '0', '0',
+          @(($addKey + 'autocheck autochk *'), '[RUNVAR] bcdedit /export "', '[RUN] bcdedit /default {current}', '[RUN] bcdedit /delete {B}', '[SUM] Stale actions removed', '[RESTART]'),
+          @('[STALE] The default entry "autocheck autochk *" is missing', '[STALE] A disk check is queued for the next start: autochk /r \??\C:', '"Old" (default) {B} - its disk or partition is no longer here', 'Volume C: is marked dirty'),
+          @('timeout 0', 'displaybootmenu', '[OK] No disk check'), 2, '0'),
+        @($beDirty, (& $vol 'C:|0'), $bcdDirty, @(), @('pdboot.exe'), 0, 'Y', '0', '0', @(),
+          @('[STALE] A disk check is queued', '[i] Skipped: reading the boot configuration needs Administrator.', '[WARN] Not elevated - nothing can be removed from here'),
+          @('[PROMPT]', '[ADD]', '[STALE] "Windows 10', '[OK] Nothing stale'), 0, '0'),
+        @($null, "VOL|unreadable`r`n", "BM|unreadable`r`n", @(), @(), 1, 'Y', '0', '0', @(),
+          @('[i] The start-up program list could not be read', '[i] Whether a volume is marked dirty could not be read', '[i] The boot configuration could not be read', '[OK] Nothing stale in what could be read'),
+          @('[PROMPT]', '[STALE]', '[OK] Nothing stale among'), 0, '0'),
+        @('autocheck autochk *', (& $vol 'C:|0'), $bcdOneStaleMenu, @(), @(), 1, 'Y', '1', '0', @('[RUNVAR] bcdedit /export "'),
+          @('[FAIL] The boot configuration could not be saved first', '[STALE] "Old" {B}', 'text-mode boot menu is switched on'), @('[RUN]', '[SUM]', '[BACKUP]'), 1, '1'),
+        @('autocheck autochk *\0autocheck autochk /k:D *', (& $vol 'C:|0'), $bcdTwoOk, @('wu.txt'), @(), 1, 'Y', '0', '0', @(),
+          @('[i] Excluded from the start-up check (chkntfs /x): autochk /k:D *', '[OK] No disk check is queued', '[OK] 2 entries, timeout 0', 'Windows Update reports a restart is pending', '[OK] Nothing stale among the actions this checks.'),
+          @('[PROMPT]', '[STALE]', '[OK] Windows reports no pending restart'), 0, '0'),
+        @('autocheck autochk *', (& $vol 'C:|0'), $bcdOneStaleMenu, @(), @(), 1, 'Y', '0', '1',
+          @('[RUNVAR] bcdedit /export "', '[RUN] bcdedit /delete {B}', '[RUN] bcdedit /deletevalue {bootmgr} displaybootmenu', '[SUM] Stale actions removed', '[RESTART]'),
+          @('[BACKUP] Boot configuration'), @('timeout 0'), 2, '2'),
+        @('autocheck autochk /q /v *\0autocheck autochk * /p \??\C:\0autocheck autochk /m:D', (& $vol 'C:|0'), $bcdSeqSetup, @(), @(), 1, 'Y', '0', '0',
+          @(($addKey + 'autocheck autochk /q /v *'), '[RUNVAR] bcdedit /export "', '[RUN] bcdedit /delete {H}', '[RUN] bcdedit /deletevalue {bootmgr} bootsequence', '[SUM] Stale actions removed', '[RESTART]'),
+          @('[STALE] A disk check is queued for the next start: autochk * /p \??\C:', '[STALE] A disk check is queued for the next start: autochk /m:D', '[STALE] "Windows 11 (Volume 3)" {H} - a leftover of a Windows upgrade', '[STALE] A one-time boot order is still set (bootsequence): the next start begins with {H}.'),
+          @('[STALE] The default entry', 'autochk /q /v * - kept', 'timeout 0', 'displaybootmenu'), 3, '0'))
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('pt192_' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $dir)
+    try {
+        $drv = @('@echo off', 'setlocal EnableDelayedExpansion')
+        for ($c = 0; $c -lt $cases.Count; $c++) {
+            $x = $cases[$c]; $cd = Join-Path $dir "c$c"; [void](New-Item -ItemType Directory -Path (Join-Path $cd 'sys32'))
+            [IO.File]::WriteAllText((Join-Path $cd 'be.txt'), $(if ($null -ne $x[0]) { "    BootExecute    REG_MULTI_SZ    " + $x[0] + "`r`n" } else { '' }))
+            [IO.File]::WriteAllText((Join-Path $cd 'dirty.txt'), $x[1]); [IO.File]::WriteAllText((Join-Path $cd 'bcd.txt'), $x[2])
+            foreach ($m in $x[3]) { [IO.File]::WriteAllText((Join-Path $cd $m), 'x') }
+            foreach ($m in $x[4]) { [IO.File]::WriteAllText((Join-Path $cd "sys32\$m"), 'x') }
+            $drv += @(('set "PT192=' + $cd + '"'), ('set "BACKUP_DIR=' + $cd + '"'), ('set "TEMP=' + $cd + '"'), ('set "_ELEV=' + $x[5] + '"'), ('set "PT_ANS=' + $x[6] + '"'), ('set "PT_EXPRC=' + $x[7] + '"'), ('set "PT_RUNRC=' + $x[8] + '"'), 'set "_FAILS=0"', "echo [CASE#$c]", 'call :StaleActions', 'echo [FAILS]!_FAILS!')
+        }
+        $drv += @('echo [END]', 'exit /b 0') + $drvBody + $stubs
+        $r = Invoke-CmdDriver -Lines $drv -Dir $dir -Allow '^(?i)((if .*?)?call :Run "[^"]*"|set "_sacmd=bcdedit /export "!_sabak!"")$'
+        Assert-True ($r.Exit -eq 0 -and $r.Err -eq '') ('test 192: the driver failed (exit {0}): {1}' -f $r.Exit, $r.Err)
+        $sec = Get-CaseSections -Out $r.Out -Count $cases.Count
+        for ($c = 0; $c -lt $cases.Count; $c++) {
+            $x = $cases[$c]; $who = "case $c (elevated $($x[5]), answer $($x[6]), export exit $($x[7]), bcdedit exit $($x[8]))"
+            $got = @($sec[$c] -split "`n" | Where-Object { $_ -match $act } | ForEach-Object { $_.TrimEnd() })
+            $ok = $got.Count -eq @($x[9]).Count
+            for ($i = 0; $ok -and $i -lt $got.Count; $i++) { $ok = $got[$i].StartsWith($x[9][$i]) }
+            Assert-True $ok ('{0}: did [{1}], expected [{2}]' -f $who, ($got -join ' | '), (@($x[9]) -join ' | '))
+            foreach ($m in $x[10]) { Assert-True ($sec[$c].Contains($m)) ('{0}: should say "{1}". Output: {2}' -f $who, $m, $sec[$c]) }
+            foreach ($m in $x[11]) { Assert-True (-not $sec[$c].Contains($m)) ('{0}: should not say "{1}". Output: {2}' -f $who, $m, $sec[$c]) }
+            Assert-True (([regex]::Matches($sec[$c], '\[PROMPT\]')).Count -eq $x[12]) ('{0}: asked {1} question(s), expected {2}. Output: {3}' -f $who, ([regex]::Matches($sec[$c], '\[PROMPT\]')).Count, $x[12], $sec[$c])
+            Assert-True ($sec[$c].Contains('[FAILS]' + $x[13])) ('{0}: _FAILS must end at {1}. Output: {2}' -f $who, $x[13], $sec[$c])
+            Assert-True (@(Get-ChildItem -LiteralPath (Join-Path $dir "c$c") -Filter 'pt_sa*').Count -eq 0) ("$who left a worker answer file in TEMP.")
+        }
+    }
+    finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# 193. The stale-actions workers, run with the store, the volumes and the registry faked: the boot-menu worker
+#      judges each entry by its device and loader and never the running one, the dirty-bit worker tells
+#      unreadable from clean, and a REG_MULTI_SZ backup is a hex(7) line that decodes back to the value (run).
+Invoke-Test 'The stale-actions workers judge entries by device and loader, read dirty bits honestly, and back up a REG_MULTI_SZ as hex(7) (run)' {
+    $cmd = Read-Lines $CmdPath
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('pt193_' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $dir)
+    try {
+        $f = { param($n) Join-Path $dir $n }
+        $read = { param($n) if (Test-Path -LiteralPath (& $f $n)) { @([IO.File]::ReadAllLines((& $f $n))) -join ';' } else { '<none>' } }
+        # the dirty-bit worker
+        $w = Get-WorkerPayload -Lines $cmd -Key 'PT_SA_DIRTY'
+        $fakeVol = @'
+function global:Get-CimInstance { [CmdletBinding()] param($ClassName, $Filter) @([pscustomobject]@{ DriveLetter = 'C:'; DirtyBitSet = $true }, [pscustomobject]@{ DriveLetter = $null; DirtyBitSet = $true }, [pscustomobject]@{ DriveLetter = 'D:'; DirtyBitSet = $null }) }
+'@
+        $r = Invoke-PsPayload ("`$env:PT_SA_DIRTY = '" + (& $f 'dirty.txt') + "'`n" + $fakeVol + "`n" + $w)
+        Assert-True ((& $read 'dirty.txt') -ceq 'VOL|C:|1;VOL|D:|-;END|ok') ('The dirty-bit worker must report C: dirty, skip a volume without a letter and show an unknown flag as -: ' + (& $read 'dirty.txt') + ' ' + $r.Err)
+        $r = Invoke-PsPayload ("`$env:PT_SA_DIRTY = '" + (& $f 'dirty2.txt') + "'`n" + $script:FakeDead + "`n" + $w)
+        Assert-True ((& $read 'dirty2.txt') -ceq 'VOL|unreadable') ('A WMI that does not answer must read as unreadable, never as clean: ' + (& $read 'dirty2.txt') + ' ' + $r.Err)
+        # the boot-menu worker: a scripted store around this PC's own system volume
+        $nt = $null
+        foreach ($n in 1..24) { if ([IO.Directory]::Exists("\\?\GLOBALROOT\Device\HarddiskVolume$n\Windows\System32")) { $nt = "\Device\HarddiskVolume$n"; break } }
+        Assert-True ($null -ne $nt) 'test 193: no \Device\HarddiskVolumeN holding \Windows\System32 was reachable through GLOBALROOT, so the loader check cannot be exercised here.'
+        $ldr = '\Windows\System32\winload.exe'; if ([IO.File]::Exists("\\?\GLOBALROOT$nt\Windows\System32\winload.efi")) { $ldr = '\Windows\System32\winload.efi' }
+        Assert-True ([IO.File]::Exists("\\?\GLOBALROOT$nt$ldr")) 'test 193: no Windows loader on the system volume.'
+        $w = Get-WorkerPayload -Lines $cmd -Key 'PT_SA_BCD'
+        $fakeBcd = @'
+function global:Invoke-CimMethod { [CmdletBinding()] param($Namespace, $ClassName, $MethodName, $Arguments, $InputObject)
+    $S = $global:PT193
+    if ($MethodName -eq 'OpenStore') { if ($S.dead) { throw 'no store (test)' }; return [pscustomobject]@{ ReturnValue = $true; Store = [pscustomobject]@{ kind = 'store' } } }
+    if ($MethodName -eq 'OpenObject') { $id = [string]$Arguments.Id; if ($id -eq '{fa926493-6f1c-4193-a414-58f0b2456d1e}') { $id = $S.current }
+        $o = $S.objects[$id]; if ($null -eq $o) { return [pscustomobject]@{ ReturnValue = $false; Object = $null } }
+        return [pscustomobject]@{ ReturnValue = $true; Object = [pscustomobject]@{ Id = $id; el = $o } } }
+    if ($MethodName -eq 'GetElement') { $k = '{0:x8}' -f [uint32]$Arguments.Type; $e = $InputObject.el[$k]; if ($null -eq $e) { throw 'element not set (test)' }
+        return [pscustomobject]@{ ReturnValue = $true; Element = [pscustomobject]$e } }
+    throw ('unexpected method ' + $MethodName)
+}
+function global:Part([string]$p) { [pscustomobject]@{ CimClass = [pscustomobject]@{ CimClassName = 'BcdDevicePartitionData' }; Path = $p } }
+function global:Loc() { [pscustomobject]@{ CimClass = [pscustomobject]@{ CimClassName = 'BcdDeviceLocateElementData' } } }
+'@
+        $store = @"
+`$global:PT193 = @{ dead = `$false; current = '{A}'; objects = @{
+  '{9dea862c-5cdd-4e70-acc1-f32b344d4795}' = @{ '25000004' = @{ Integer = 30 }; '26000020' = @{ Boolean = `$true }; '23000003' = @{ Id = '{B}' }; '24000002' = @{ Ids = @('{B}', '{H}') }; '24000001' = @{ Ids = @('{A}', '{B}', '{C}', '{D}', '{E}', '{F}', '{G}', '{H}', '{I}') } };
+  '{A}' = @{ '12000004' = @{ String = 'Windows 11' }; '11000001' = @{ Device = (Part '\Device\HarddiskVolume999') }; '12000002' = @{ String = '$ldr' } };
+  '{B}' = @{ '12000004' = @{ String = 'Old' }; '11000001' = @{ Device = (Part '\Device\HarddiskVolume999') }; '12000002' = @{ String = '$ldr' } };
+  '{C}' = @{ '12000004' = @{ String = 'Setup' }; '11000001' = @{ Device = (Part '$nt') }; '12000002' = @{ String = '\pt193\none\winload.efi' } };
+  '{D}' = @{ '12000004' = @{ String = 'Linux' }; '11000001' = @{ Device = (Loc) }; '12000002' = @{ String = '$ldr' } };
+  '{E}' = @{ '12000004' = @{ String = 'Windows.old' }; '11000001' = @{ Device = (Part '$nt') }; '12000002' = @{ String = '$ldr' }; '21000001' = @{ Device = (Part '$nt') }; '22000002' = @{ String = '\pt193nowhere' } };
+  '{F}' = @{ '12000004' = @{ String = 'Win & "x" | y' }; '11000001' = @{ Device = (Part '$nt') }; '12000002' = @{ String = '$ldr' }; '21000001' = @{ Device = (Part '$nt') }; '22000002' = @{ String = '\Windows' } };
+  '{G}' = @{ '12000004' = @{ String = 'No device' } };
+  '{H}' = @{ '12000004' = @{ String = 'Windows 11 (Volume 3)' }; '11000001' = @{ Device = (Part '$nt') }; '12000002' = @{ String = '\`$WINDOWS.~BT\NewOS\WINDOWS\system32\winload.efi' }; '22000002' = @{ String = '\`$WINDOWS.~BT\NewOS\WINDOWS' } };
+  '{I}' = @{ '12000004' = @{ String = 'Gone disk' }; '11000001' = @{ Device = [pscustomobject]@{ CimClass = [pscustomobject]@{ CimClassName = 'BcdDeviceUnknownData' } } }; '12000002' = @{ String = '$ldr' } } } }
+"@
+        $dead = '$global:PT193 = @{ dead = $true; current = ''{A}''; objects = @{} }'
+        $bare = '$global:PT193 = @{ dead = $false; current = ''{A}''; objects = @{ ''{9dea862c-5cdd-4e70-acc1-f32b344d4795}'' = @{ ''24000001'' = @{ Ids = @() } } } }'
+        foreach ($k in @(@('bcd1.txt', $store, 'BM|timeout|30;BM|menu|1;BM|default|{B};BM|seq|{B};{H};OS|{A}|ok|Windows 11;OS|{B}|novol|Old;OS|{C}|noload|Setup;OS|{D}|unknown|Linux;OS|{E}|nowin|Windows.old;OS|{F}|ok|Win ? ?x? ? y;OS|{G}|unknown|No device;OS|{H}|setup|Windows 11 (Volume 3);OS|{I}|novol|Gone disk;END|ok'),
+                         @('bcd2.txt', $dead, 'BM|unreadable'), @('bcd3.txt', $bare, 'BM|timeout|-;BM|menu|-;BM|default|-;BM|seq|-;END|ok'))) {
+            $r = Invoke-PsPayload ("`$env:PT_SA_BCD = '" + (& $f $k[0]) + "'`n" + $fakeBcd + "`n" + $k[1] + "`n" + $w)
+            Assert-True ((& $read $k[0]) -ceq $k[2]) ('The boot-menu worker must answer "{0}": {1} {2}' -f $k[2], (& $read $k[0]), $r.Err)
+        }
+        # the REG_MULTI_SZ backup worker: the value read from the registry (faked), written as hex(7)
+        $w = Get-WorkerPayload -Lines $cmd -Key 'PT_BK_FILE'
+        $fakeReg = @'
+function global:Get-ItemProperty { [CmdletBinding()] param($LiteralPath, $Name) $global:PT193Q = [string]$LiteralPath; $o = New-Object psobject; $o | Add-Member -MemberType NoteProperty -Name $Name -Value @('autocheck autochk /p \??\C:', '', ('caf' + [char]0xE9)); $o }
+'@
+        $bk = & $f 'bk.reg'; [IO.File]::WriteAllText($bk, "Windows Registry Editor Version 5.00`r`n`r`n[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager]`r`n")
+        $r = Invoke-PsPayload ("`$env:PT_BK_KEY = 'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager'; `$env:PT_BK_VAL = 'BootExecute'; `$env:PT_BK_FILE = '" + $bk + "'`n" + $fakeReg + "`n" + $w + "`n[Console]::Out.Write('KEY=' + `$global:PT193Q)")
+        $txt = @([IO.File]::ReadAllLines($bk))
+        Assert-True ($txt.Count -ge 5 -and $txt[3].StartsWith('"BootExecute"=hex(7):') -and $txt[3].EndsWith('\') -and $txt[4].StartsWith('  ')) ('The REG_MULTI_SZ backup must be a wrapped hex(7) value line: ' + ($txt -join ' / ') + ' ' + $r.Err)
+        $hex = (($txt[3..($txt.Count - 1)] -join '') -replace '\\', '' -replace '\s', '') -replace '^"BootExecute"=hex\(7\):', ''
+        $bytes = [byte[]]@($hex -split ',' | Where-Object { $_ } | ForEach-Object { [Convert]::ToByte($_, 16) })
+        $dec = @(([Text.Encoding]::Unicode.GetString($bytes)) -split [char]0)
+        Assert-True ($dec.Count -eq 5 -and $dec[0] -ceq 'autocheck autochk /p \??\C:' -and $dec[1] -ceq '' -and $dec[2] -ceq ('caf' + [char]0xE9) -and $dec[3] -ceq '' -and $dec[4] -ceq '') ('The hex(7) must decode to the three strings, an empty and a non-ASCII one included, with the double terminator: ' + ($dec -join '|'))
+        Assert-True (($r.Out -join '').Contains('KEY=Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager')) ('The backup worker must read the value under the full hive name: ' + $r.Out)
+    }
+    finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# 194. The VM probe reads the firmware strings from the registry and the question is interactive only.
+Invoke-Test 'A virtual machine is recognised from the firmware strings, asked about interactively and never on the command line (run)' {
+    $cmd = Read-Lines $CmdPath
+    $b = Get-RoutineBody -Lines $cmd -Label 'VmDetect'
+    Assert-True ($b.Count -gt 0) ':VmDetect is missing.'
+    $code = @($b | Where-Object { $_.Trim() -notmatch '^(?i)(echo|rem)\b' })
+    $text = $code -join "`n"
+    Assert-True ($text -match 'reg query "HKLM\\HARDWARE\\DESCRIPTION\\System\\BIOS"') ':VmDetect no longer reads the firmware strings from the registry.'
+    Assert-True ($text -notmatch '(?i)powershell|wmic|Get-CimInstance|systeminfo') ':VmDetect went to WMI, PowerShell or systeminfo - the registry read is the point: no startup cost, no provider, no localisation.'
+    foreach ($w in @('QEMU', 'VMware', 'VirtualBox', '"Virtual Machine"', '"HVM domU"', 'Parallels')) { Assert-True ($text.Contains($w)) (':VmDetect lost the platform word ' + $w) }
+    Assert-True ($text -match '(?i)set "VM=unknown"' -and $text -match '(?i)set "VM=no"') ':VmDetect must start from unknown and reach no only after a real read.'
+    Assert-True ($text -notmatch '(?i)for /f[^\n]*_vmf') ':VmDetect reads the dump through a for /f - a value with an odd character would then be parsed (regression).'
+    # placement: the probe before the start log line that records it; the question after the command-line
+    # branches (an unattended run is never asked) and before :MainMenu; the question ends the script on anything but Y
+    $iCli = -1; $iMenu = -1; $iAsk = -1; $iLog = -1; $iCall = -1
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        if ($iCli -lt 0 -and $cmd[$i] -match '^if defined _CLIANY goto CliRun') { $iCli = $i }
+        if ($iMenu -lt 0 -and $cmd[$i] -match '^:MainMenu$') { $iMenu = $i }
+        if ($iAsk -lt 0 -and $cmd[$i] -match '^if not "!VM!"=="no" if not "!VM!"=="unknown" \($') { $iAsk = $i }
+        if ($iLog -lt 0 -and $cmd[$i] -match '^call :Log "PerfTweaks start') { $iLog = $i }
+        if ($iCall -lt 0 -and $cmd[$i] -match '^call :VmDetect$') { $iCall = $i }
+    }
+    Assert-True ($iCli -ge 0 -and $iMenu -ge 0 -and $iAsk -ge 0 -and $iLog -ge 0 -and $iCall -ge 0) 'The VM question, its probe call, the command-line branch, the start log line or :MainMenu could not be found.'
+    Assert-True ($iCall -lt $iLog) ':VmDetect must run before the start log line that records it.'
+    Assert-True ($cmd[$iLog] -match 'vm=%VM%') 'The start log line no longer records vm=.'
+    Assert-True ($iCli -lt $iAsk -and $iAsk -lt $iMenu) 'The VM question must sit after the command-line branches and before :MainMenu.'
+    $blk = $cmd[$iAsk..$iMenu]
+    Assert-True ((Test-BlockExit -Lines $blk -Open '^if not "!VM!"=="no" if not "!VM!"=="unknown" \($' -Exit '^if /i not "!_vmq!"=="Y" exit /b$') -eq 1) 'The VM question no longer ends the script on anything but Y.'
+    Assert-True (($blk -join "`n") -match 'set /p "_vmq=Proceed anyway\? \(Y/N\): "') 'The VM question lost its prompt.'
+    Assert-True (($blk -join "`n") -match '(?i)It appears that you.re currently using a virtual machine') 'The VM question no longer says what it found.'
+    # run :VmDetect on firmware dumps, the registry read answered from a file; the last read fails outright
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('pt194_' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $dir)
+    try {
+        $k = "HKEY_LOCAL_MACHINE\HARDWARE\DESCRIPTION\System\BIOS`r`n"
+        $dumps = @(
+            @('qemu',   ($k + "    SystemManufacturer    REG_SZ    QEMU`r`n    SystemProductName    REG_SZ    Standard PC (Q35 + ICH9, 2009)`r`n    BIOSVendor    REG_SZ    SeaBIOS`r`n"), 'QEMU'),
+            @('vmware', ($k + "    SystemManufacturer    REG_SZ    VMware, Inc.`r`n    SystemProductName    REG_SZ    VMware Virtual Platform`r`n    BIOSVendor    REG_SZ    Phoenix Technologies LTD`r`n"), 'VMware'),
+            @('hyperv', ($k + "    SystemManufacturer    REG_SZ    Microsoft Corporation`r`n    SystemProductName    REG_SZ    Virtual Machine`r`n    BIOSVendor    REG_SZ    Microsoft Corporation`r`n"), 'Hyper-V'),
+            @('vbox',   ($k + "    SystemManufacturer    REG_SZ    innotek GmbH`r`n    SystemProductName    REG_SZ    VirtualBox`r`n    BIOSVendor    REG_SZ    innotek GmbH`r`n"), 'VirtualBox'),
+            @('xen',    ($k + "    SystemManufacturer    REG_SZ    Xen`r`n    SystemProductName    REG_SZ    HVM domU`r`n    BIOSVendor    REG_SZ    Xen`r`n"), 'Xen'),
+            @('lenovo', ($k + "    SystemManufacturer    REG_SZ    LENOVO`r`n    SystemProductName    REG_SZ    20XYZ Xenon Edition`r`n    SystemVersion    REG_SZ    ThinkPad P1 Gen 4i Xeon W-11955M`r`n    BIOSVendor    REG_SZ    LENOVO`r`n    BaseBoardProduct    REG_SZ    20XYZ`r`n"), 'no'),
+            @('empty',  '', 'unknown')
+        )
+        $body = @($b | ForEach-Object { $_ -replace '^reg query "HKLM\\HARDWARE\\DESCRIPTION\\System\\BIOS" >"!_vmf!" 2>nul$', 'copy /y "!PT194!" "!_vmf!" >nul 2>&1' })
+        Assert-True (@($body | Where-Object { $_ -match '^copy /y "!PT194!"' }).Count -eq 1) 'test 194: the registry read line of :VmDetect is not the one line the test replaces.'
+        $drv = @('@echo off', 'setlocal EnableDelayedExpansion', ('set "TEMP=' + $dir + '"'))
+        for ($c = 0; $c -lt $dumps.Count; $c++) {
+            $f = Join-Path $dir ($dumps[$c][0] + '.txt'); [IO.File]::WriteAllText($f, $dumps[$c][1], [Text.Encoding]::ASCII)
+            $drv += @(('set "PT194=' + $f + '"'), "echo [CASE#$c]", 'call :VmDetect', 'echo VM=!VM!')
+        }
+        $drv += @(('set "PT194=' + (Join-Path $dir 'missing.txt') + '"'), ('echo [CASE#' + $dumps.Count + ']'), 'call :VmDetect', 'echo VM=!VM!')
+        $drv += @('echo [END]', 'exit /b 0', ':VmDetect') + $body
+        $r = Invoke-CmdDriver -Lines $drv -Dir $dir
+        Assert-True ($r.Exit -eq 0 -and $r.Err -eq '') ('test 194: the driver failed: ' + $r.Err)
+        $sec = Get-CaseSections -Out $r.Out -Count ($dumps.Count + 1)
+        for ($c = 0; $c -lt $dumps.Count; $c++) { Assert-True ($sec[$c] -match ('(?m)^VM=' + [regex]::Escape($dumps[$c][2]) + '$')) ('test 194: the ' + $dumps[$c][0] + ' dump must give VM=' + $dumps[$c][2] + ', got: ' + $sec[$c]) }
+        Assert-True ($sec[$dumps.Count] -match '(?m)^VM=unknown$') ('test 194: a registry read that fails must give VM=unknown, never no: ' + $sec[$dumps.Count])
+        Assert-True (@(Get-ChildItem -Path $dir -Filter 'pt_vm_*.txt').Count -eq 0) 'test 194: :VmDetect left its dump file behind.'
+    }
+    finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# 195. System32 first on the script's own PATH, before anything runs.
+Invoke-Test 'System32 leads the script''s own PATH before any command runs, and the line prepends without truncating (run)' {
+    $cmd = Read-Lines $CmdPath
+    $line = 'set "PATH=%SystemRoot%\System32;%PATH%"'
+    $iPath = -1; $iDe = -1; $iProbe = -1; $iFind = -1
+    for ($i = 0; $i -lt $cmd.Count; $i++) {
+        $t = $cmd[$i].Trim()
+        if ($iPath -lt 0 -and $t -ceq $line) { $iPath = $i }
+        if ($iDe -lt 0 -and $t -match '^(?i)setlocal EnableDelayedExpansion$') { $iDe = $i }
+        if ($iProbe -lt 0 -and $t -match '^net session >nul 2>&1 \|\| fltmc') { $iProbe = $i }
+        if ($iFind -lt 0 -and $t -notmatch '^(?i)rem\b' -and $t -match '(?i)\bfind /c /v ""') { $iFind = $i }
+    }
+    Assert-True ($iPath -ge 0) 'The PATH line (set "PATH=%SystemRoot%\System32;%PATH%") is gone: a GNU find ahead of System32 walks the C: drive on "find /c /v"".'
+    Assert-True ($iDe -ge 0 -and $iProbe -ge 0 -and $iFind -ge 0) 'test 195: the delayed-expansion switch, the elevation probe or the first find /c /v line could not be found.'
+    Assert-True ($iPath -lt $iDe) 'The PATH line must run while delayed expansion is still off (a "!" in PATH would otherwise be eaten).'
+    Assert-True ($iPath -lt $iProbe -and $iPath -lt $iFind) 'The PATH line must come before the elevation probe and before the first find /c /v.'
+    Assert-True (@($cmd | Where-Object { $_ -match '(?i)^\s*setx\b' }).Count -eq 0) 'A setx appeared: PATH must change for this process only (setx truncates PATH and flattens REG_EXPAND_SZ).'
+    # run the line itself: with SystemRoot and PATH set to known values, PATH comes out prepended and whole
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('pt195_' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $dir)
+    try {
+        $long = ((1..40) | ForEach-Object { 'C:\dir' + $_ }) -join ';'
+        $drv = @('@echo off', 'setlocal DisableDelayedExpansion', 'set "SystemRoot=C:\Fake"', ('set "PATH=' + $long + '"'), 'echo [CASE#0]', $line, 'echo PATH=%PATH%', 'echo [END]', 'exit /b 0')
+        $r = Invoke-CmdDriver -Lines $drv -Dir $dir
+        Assert-True ($r.Exit -eq 0 -and $r.Err -eq '') ('test 195: the driver failed: ' + $r.Err)
+        $sec = Get-CaseSections -Out $r.Out -Count 1
+        Assert-True ($sec[0] -ceq ('PATH=C:\Fake\System32;' + $long)) ('test 195: the PATH line must prepend %SystemRoot%\System32 and keep the rest whole, got: ' + $sec[0])
     }
     finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
 }
