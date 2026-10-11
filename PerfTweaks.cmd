@@ -6,6 +6,10 @@ rem  and pass values built from them in a variable, never as a call argument.
 setlocal DisableDelayedExpansion
 set "SCRIPT_DIR=%~dp0"
 set "_SELFPATH=%~f0"
+rem  Windows' own tools first: a PATH with a Git or MSYS bin folder ahead of System32 hands the
+rem  script GNU find, sort and timeout, and GNU find reads the line count find /c /v "" as a
+rem  search of the C: drive and walks it. This process only; nothing outside the script changes.
+set "PATH=%SystemRoot%\System32;%PATH%"
 rem  Backup folder too, while delayed expansion is off. Resolves OneDrive-redirected Documents.
 set "DOCS=%USERPROFILE%\Documents"
 rem  Read it with the console on UTF-8: the pipe converts reg's output to the console code page,
@@ -195,12 +199,27 @@ for /f "tokens=3" %%M in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\CmB
 if not defined _bat ( reg query "HKLM\SYSTEM\CurrentControlSet\Services\CmBatt" >nul 2>&1 && set "_bat=0x0" )
 if "%_bat%"=="0x0" set "MACHINE=desktop"
 if defined _bat if not "%_bat%"=="0x0" set "MACHINE=laptop"
-call :Log "PerfTweaks start - build %WIN_BUILD% win11=%IS_WIN11% cpu=%CPU% gpu=%GPU% machine=%MACHINE%"
+rem ---------- Virtual machine (firmware strings) ----------
+rem  Windows copies the firmware's system, board and BIOS strings into the registry at boot, and
+rem  every hypervisor names itself there. One reg query, no WMI/PowerShell. Warning-only use.
+call :VmDetect
+call :Log "PerfTweaks start - build %WIN_BUILD% win11=%IS_WIN11% cpu=%CPU% gpu=%GPU% machine=%MACHINE% vm=%VM%"
 rem  Command-line paths branch here, after the probes they need. Both exit; neither returns.
 if defined _CLIHELP goto CliHelp
 if defined _CLIANY goto CliRun
 rem  Resize only here: mode con clears the scrollback, which a command-line run must not do.
 mode con: cols=100 lines=36 >nul 2>&1
+rem  A virtual machine is a fine place to look at sincript and a poor one for hardware tweaks:
+rem  say so once and let the user decide. Interactive only: a command-line run never reaches this.
+if not "!VM!"=="no" if not "!VM!"=="unknown" (
+    echo.
+    echo [i] It appears that you're currently using a virtual machine ^(!VM!^).
+    echo     Most tweaks here target real hardware: inside a VM they change little, and the
+    echo     power, timer, GPU and network ones can misbehave or be undone by the hypervisor.
+    set "_vmq="
+    set /p "_vmq=Proceed anyway? (Y/N): "
+    if /i not "!_vmq!"=="Y" exit /b
+)
 rem =====================================================================================
 rem  MAIN MENU
 rem =====================================================================================
@@ -420,6 +439,7 @@ echo     8.  %GPU% telemetry / tasks, Intel and AMD usage reports off
 echo     9.  GPU hardware scheduling (HAGS) on/off
 echo    10.  Set permanent process priority  (per .exe, e.g. a game)
 echo    11.  Windows Update driver installs on/off
+echo    12.  Remove stale system actions    (queued disk check, boot-menu leftovers)
 echo     0.  Back
 echo ==================================================================================================
 
@@ -439,6 +459,7 @@ if "!sel!"=="8" goto GpuTelemetry
 if "!sel!"=="9" goto HagsToggle
 if "!sel!"=="10" goto ProcPriority
 if "!sel!"=="11" goto WuDrivers
+if "!sel!"=="12" goto StaleActions
 if "!sel!"=="0" goto MainMenu
 goto MenuAdvanced
 rem =====================================================================================
@@ -2880,6 +2901,310 @@ goto :eof
 set "_wdlog=INFO: could not read Registry.pol to check whether gpedit.msc also sets ExcludeWUDriversInQualityUpdate"
 call :LogVar _wdlog
 echo   [i] Could not check whether the Group Policy Editor also sets this policy ^(Registry.pol^).
+goto :eof
+rem =====================================================================================
+rem  ACTION: Remove stale system actions (reads first; every fix is its own question)
+rem =====================================================================================
+:StaleActions
+cls
+call :Logo
+echo ================================  Remove stale system actions  ===================================
+echo  Finds what Windows still has queued from earlier and would run again at the next start:
+echo  a disk check ^(chkdsk^) scheduled for the next start, boot-time programs whose files are
+echo  gone, and a boot menu that keeps appearing - a leftover Windows entry, the text-mode menu
+echo  switched on, or a timeout with more than one entry. Everything is read first and each fix
+echo  is its own question. Undo: a .reg backup of the value, and for the boot menu a copy of the
+echo  boot configuration in the backup folder ^(bcdedit /import puts it back^). If BitLocker is on,
+echo  a boot configuration change can ask for the recovery key at the next start - suspend it first.
+echo ==================================================================================================
+set "_san=0" & set "_sadid=" & set "_sapart=" & set "_sabak="
+echo.
+echo  [Disk check at the next start]
+call :_saBoot
+echo.
+echo  [Boot menu]
+if "%_ELEV%"=="0" echo   [i] Skipped: reading the boot configuration needs Administrator.
+if "%_ELEV%"=="0" set "_sapart=1"
+if not "%_ELEV%"=="0" call :_saBcd
+echo.
+echo  [Restart pending]
+call :_saPending
+echo.
+if "!_san!"=="0" if not defined _sapart echo [OK] Nothing stale among the actions this checks.
+if "!_san!"=="0" if defined _sapart echo [OK] Nothing stale in what could be read - see the [i] lines for what was not.
+if "!_san!"=="0" goto _saEnd
+if "%_ELEV%"=="0" echo [WARN] Not elevated - nothing can be removed from here. Re-run as Administrator.
+if "%_ELEV%"=="0" goto _saEnd
+set "_FAILS=0" & set "_RUNTRACK=1"
+
+:_saFixBoot
+if "!_saq!"=="0" if "!_sag!"=="0" if defined _sadef goto _saFixBcd
+set "_c="
+set /p "_c=Fix the start-up list (drop queued checks and gone programs, keep the default)? (Y/N): "
+if /i not "!_c!"=="Y" goto _saFixBcd
+rem  The kept entries in their old order; the default check goes first when it was missing.
+set "_sanew=!_sakeep!"
+if not defined _sadef if defined _sanew set "_sanew=autocheck autochk *\0!_sanew!"
+if not defined _sadef if not defined _sanew set "_sanew=autocheck autochk *"
+set "_sadid=1"
+call :SafeRegAdd "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager" "BootExecute" REG_MULTI_SZ "!_sanew!" "Start-up program list without the stale entries"
+
+:_saFixBcd
+if not defined _sabok goto _saFixDone
+set "_saremain=!_sabn!"
+if "!_sabstn!"=="0" goto _saFixMenu
+set "_c="
+set /p "_c=Delete the !_sabstn! leftover boot menu entry/entries? (Y/N): "
+if /i not "!_c!"=="Y" goto _saFixMenu
+call :_saBcdBackup || goto _saFixDone
+set "_sadid=1"
+rem  A stale default would leave the menu pointing nowhere: hand the default to {current} first.
+if defined _sabdefstale call :Run "bcdedit /default {current}"
+if defined _sabdefstale if not "!_runrc!"=="0" set /a _FAILS+=1
+for %%e in (!_sabstale!) do call :_saBcdDel %%e
+set /a _saremain=_sabn-_sabstn
+
+:_saFixMenu
+if not defined _sabmenuon goto _saFixSeq
+set "_c="
+set /p "_c=Switch the text-mode boot menu off again (displaybootmenu)? (Y/N): "
+if /i not "!_c!"=="Y" goto _saFixSeq
+call :_saBcdBackup || goto _saFixDone
+set "_sadid=1"
+call :Run "bcdedit /deletevalue {bootmgr} displaybootmenu"
+if not "!_runrc!"=="0" set /a _FAILS+=1
+
+:_saFixSeq
+if not defined _sabseqon goto _saFixTimeout
+set "_c="
+set /p "_c=Clear the one-time boot order (bootsequence)? (Y/N): "
+if /i not "!_c!"=="Y" goto _saFixTimeout
+call :_saBcdBackup || goto _saFixDone
+set "_sadid=1"
+call :Run "bcdedit /deletevalue {bootmgr} bootsequence"
+if not "!_runrc!"=="0" set /a _FAILS+=1
+
+:_saFixTimeout
+if !_saremain! LEQ 1 goto _saFixDone
+if "!_sabto!"=="0" goto _saFixDone
+echo   !_saremain! entries stay in the menu. With a timeout of 0 the boot manager waits no time
+echo   before it starts the default one, which normally skips the menu; Advanced startup
+echo   ^(Shift+Restart^) still offers the others. The timeout now ^(!_sabto! s^) is in the saved copy.
+set "_c="
+set /p "_c=Skip the choice of operating system at start (timeout 0)? (Y/N): "
+if /i not "!_c!"=="Y" goto _saFixDone
+call :_saBcdBackup || goto _saFixDone
+set "_sadid=1"
+call :Run "bcdedit /timeout 0"
+if not "!_runrc!"=="0" set /a _FAILS+=1
+
+:_saFixDone
+if defined _sadid call :Summary "Stale actions removed - in force from the next start."
+if defined _sadid call :RestartNote
+
+:_saEnd
+pause
+goto MenuAdvanced
+
+:_saBoot
+rem  BootExecute is what Session Manager runs first at start-up: the default "autocheck autochk *"
+rem  (check the volumes marked dirty), a check queued by chkdsk or chkntfs (/p or /r and a \??\
+rem  volume), an exclusion (/k:X, a setting) or another program, a native image in System32.
+set "_saq=0" & set "_sag=0" & set "_sakeep=" & set "_sadef=" & set "_saln="
+for /f "delims=" %%L in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager" /v BootExecute 2^>nul ^| findstr /I /C:"REG_MULTI_SZ"') do set "_saln=%%L"
+if not defined _saln (
+    echo   [i] The start-up program list could not be read - nothing judged here.
+    set "_sapart=1" & set "_sadef=1"
+    goto _saBootDirty
+)
+set "_sabe=!_saln:*REG_MULTI_SZ=!"
+for /f "tokens=*" %%a in ("!_sabe!") do set "_sabe=%%a"
+if "!_sabe: =!"=="" set "_sabe="
+rem  reg query joins the strings with \0; a | never occurs in them, so it stands in as the separator.
+if defined _sabe set "_sabe=!_sabe:\0=|!"
+
+:_saBootNext
+if not defined _sabe goto _saBootSum
+for /f "tokens=1* delims=|" %%a in ("!_sabe!") do ( set "_sae=%%a" & set "_sabe=%%b" )
+call :_saBootOne
+goto _saBootNext
+
+:_saBootSum
+if not defined _sadef (
+    echo   [STALE] The default entry "autocheck autochk *" is missing: a volume marked dirty would not
+    echo           be checked at start. The fix below puts it back.
+    set /a _san+=1
+)
+if "!_saq!"=="0" if "!_sag!"=="0" if defined _sadef echo   [OK] No disk check is queued and every boot-time program is in place.
+
+:_saBootDirty
+rem  Read-only: Win32_Volume.DirtyBitSet per fixed volume. A dirty volume is checked at the next
+rem  start whatever is queued, and only a completed chkdsk clears that - reported, not removed.
+set "_sadf=!TEMP!\pt_sadirty_%RANDOM%%RANDOM%.txt"
+set "PT_SA_DIRTY=!_sadf!"
+del "!_sadf!" >nul 2>&1
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $r=New-Object System.Collections.Generic.List[string]; try{ foreach($v in @(Get-CimInstance Win32_Volume -Filter 'DriveType=3')){ if(-not $v.DriveLetter){ continue }; $d='-'; if($null -ne $v.DirtyBitSet){ $d=[int][bool]$v.DirtyBitSet }; $r.Add('VOL|'+$v.DriveLetter+'|'+$d) }; $r.Add('END|ok') }catch{ $r.Clear(); $r.Add('VOL|unreadable') }; Set-Content -LiteralPath $env:PT_SA_DIRTY -Value $r -Encoding ASCII"
+set "PT_SA_DIRTY="
+set "_sadok=" & set "_sadn=0"
+if exist "!_sadf!" for /f "usebackq tokens=1-3 delims=|" %%a in ("!_sadf!") do (
+    if "%%a"=="END" set "_sadok=1"
+    if "%%a"=="VOL" if "%%c"=="1" call :_saDirtyVol "%%b"
+)
+del "!_sadf!" >nul 2>&1
+if not defined _sadok echo   [i] Whether a volume is marked dirty could not be read.
+if defined _sadok if "!_sadn!"=="0" echo   [OK] No volume is marked dirty.
+goto :eof
+
+:_saDirtyVol
+set /a _sadn+=1
+echo   [i] Volume %~1 is marked dirty: Windows checks it at the next start whatever is queued, and
+echo       only a completed chkdsk clears that. Nothing to remove here.
+goto :eof
+
+:_saBootOne
+rem  _sae = one entry, "autocheck <program> <args>" or "<program> <args>"; the program is a native
+rem  image under System32, usually written without .exe. Kept entries are collected in _sakeep.
+set "_sat1=" & set "_sat2=" & set "_sar="
+for /f "tokens=1,2,*" %%p in ("!_sae!") do ( set "_sat1=%%p" & set "_sat2=%%q" & set "_sar=%%r" )
+if not defined _sat1 goto :eof
+set "_saprog=!_sat1!" & set "_saargs=!_sat2!"
+if defined _sar set "_saargs=!_sat2! !_sar!"
+if /i "!_sat1!"=="autocheck" ( set "_saprog=!_sat2!" & set "_saargs=!_sar!" )
+if not defined _saargs set "_saargs=-"
+if /i not "!_saprog!"=="autochk" goto _saBootProg
+rem  A queued check names a volume (\??\X:) or carries /p, /r or /m (chkdsk, chkntfs /c; Windows NT wrote
+rem  /m:D); /k: is an exclusion (chkntfs /x); any other form ending in * is the default (chkntfs also
+rem  writes /q /v *).
+rem  Substitution tests, not a for over the text: a plain for would read the * as a wildcard.
+set "_saqd=" & set "_sap= !_saargs! "
+if not "!_sap:\??\=!"=="!_sap!" set "_saqd=1"
+if not "!_sap: /p=!"=="!_sap!" set "_saqd=1"
+if not "!_sap: /r=!"=="!_sap!" set "_saqd=1"
+if not "!_sap: /m=!"=="!_sap!" set "_saqd=1"
+if defined _saqd (
+    echo   [STALE] A disk check is queued for the next start: autochk !_saargs!
+    set /a _saq+=1, _san+=1
+    goto :eof
+)
+if not "!_sap: /k:=!"=="!_sap!" ( echo   [i] Excluded from the start-up check ^(chkntfs /x^): autochk !_saargs! - a setting, kept. & call :_saKeep & goto :eof )
+if "!_saargs:~-1!"=="*" ( set "_sadef=1" & call :_saKeep & goto :eof )
+echo   [i] Start-up check entry in a form this check does not judge: autochk !_saargs! - kept.
+call :_saKeep
+goto :eof
+
+:_saBootProg
+if not defined _saprog goto :eof
+set "_sabad="
+for /f "eol=a delims=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" %%c in ("!_saprog!") do set "_sabad=1"
+if defined _sabad ( echo   [i] Boot-time entry with an unusual name, not judged: !_sae! - kept. & call :_saKeep & goto :eof )
+set "_safile=!_saprog!"
+if "!_safile:.=!"=="!_safile!" set "_safile=!_safile!.exe"
+if exist "%SystemRoot%\System32\!_safile!" ( echo   [i] Boot-time program !_saprog! is installed ^(System32^): kept. & call :_saKeep & goto :eof )
+echo   [STALE] Boot-time program !_saprog!: its file is gone from System32, so Windows fails to start it.
+set /a _sag+=1, _san+=1
+goto :eof
+
+:_saKeep
+if defined _sakeep (set "_sakeep=!_sakeep!\0!_sae!") else (set "_sakeep=!_sae!")
+goto :eof
+
+:_saBcd
+rem  Read-only worker on the BCD WMI provider, so no localized bcdedit text is parsed. For each
+rem  entry in the boot manager's display order it tests the entry's own device and loader through
+rem  the NT path (\\?\GLOBALROOT\Device\HarddiskVolumeN): novol = the partition or disk is gone, noload =
+rem  no loader at its path, nowin = no Windows at its system root, setup = it lives under Windows
+rem  Setup's $WINDOWS.~BT work folder (an upgrade leftover), unknown = a device it cannot judge
+rem  (ramdisk, VHD, a locked volume) - kept. The running entry is always ok. Names are UTF-8.
+set "_sabf=!TEMP!\pt_sabcd_%RANDOM%%RANDOM%.txt"
+set "PT_SA_BCD=!_sabf!"
+del "!_sabf!" >nul 2>&1
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $r=New-Object System.Collections.Generic.List[string]; function GetEl($o,$t){ try{ $g=Invoke-CimMethod -InputObject $o -MethodName GetElement -Arguments @{Type=[uint32]$t}; if($g.ReturnValue){ $g.Element } }catch{} }; function San($x){ ([string]$x) -replace '[^\p{L}\p{N} ._()-]','?' }; function State($dev,$path){ if($null -eq $dev){ return 'unknown' }; if($dev.CimClass.CimClassName -eq 'BcdDeviceUnknownData'){ return 'novol' }; if($dev.CimClass.CimClassName -ne 'BcdDevicePartitionData'){ return 'unknown' }; $root='\\?\GLOBALROOT'+$dev.Path+'\'; if(-not [IO.Directory]::Exists($root)){ return 'novol' }; try{ [void][IO.Directory]::GetFileSystemEntries($root) }catch{ return 'unknown' }; if($path -and -not [IO.File]::Exists($root.TrimEnd('\')+$path)){ return 'noload' }; 'ok' }; try{ $st=(Invoke-CimMethod -Namespace root\wmi -ClassName BcdStore -MethodName OpenStore -Arguments @{File=''}).Store; $bm=Invoke-CimMethod -InputObject $st -MethodName OpenObject -Arguments @{Id='{9dea862c-5cdd-4e70-acc1-f32b344d4795}'}; if(-not $bm.ReturnValue){ throw 'no boot manager' }; $cur=Invoke-CimMethod -InputObject $st -MethodName OpenObject -Arguments @{Id='{fa926493-6f1c-4193-a414-58f0b2456d1e}'}; $curId=''; if($cur.ReturnValue){ $curId=[string]$cur.Object.Id }; $e=GetEl $bm.Object 0x25000004; $r.Add('BM|timeout|'+$(if($e){ [uint64]$e.Integer }else{ '-' })); $e=GetEl $bm.Object 0x26000020; $r.Add('BM|menu|'+$(if($e){ [int][bool]$e.Boolean }else{ '-' })); $e=GetEl $bm.Object 0x23000003; $r.Add('BM|default|'+$(if($e){ [string]$e.Id }else{ '-' })); $e=GetEl $bm.Object 0x24000002; $r.Add('BM|seq|'+$(if($e){ (@($e.Ids) -join ';') }else{ '-' })); $e=GetEl $bm.Object 0x24000001; $ids=@(); if($e){ $ids=@($e.Ids) }; foreach($id in $ids){ $o=Invoke-CimMethod -InputObject $st -MethodName OpenObject -Arguments @{Id=$id}; if(-not $o.ReturnValue){ $r.Add('OS|'+$id+'|unknown|?'); continue }; $d=GetEl $o.Object 0x12000004; $desc='(no name)'; if($d){ $desc=San $d.String }; if($id -eq $curId){ $r.Add('OS|'+$id+'|ok|'+$desc); continue }; $dev=GetEl $o.Object 0x11000001; $pth=GetEl $o.Object 0x12000002; $pts=''; if($pth){ $pts=[string]$pth.String }; $sr=GetEl $o.Object 0x22000002; $srs=''; if($sr){ $srs=[string]$sr.String }; $s=State $(if($dev){ $dev.Device }) $pts; if($s -eq 'ok' -and $srs){ $od=GetEl $o.Object 0x21000001; if($od){ $s2=State $od.Device ($srs.TrimEnd('\')+'\System32\ntoskrnl.exe'); if($s2 -eq 'novol'){ $s='novol' } elseif($s2 -eq 'noload'){ $s='nowin' } } }; if(($pts+'|'+$srs) -match '(?i)\\\$WINDOWS\.~(BT|WS)\\'){ $s='setup' }; $r.Add('OS|'+$id+'|'+$s+'|'+$desc) }; $r.Add('END|ok') }catch{ $r.Clear(); $r.Add('BM|unreadable') }; [IO.File]::WriteAllLines($env:PT_SA_BCD,$r,(New-Object Text.UTF8Encoding $false))"
+set "PT_SA_BCD="
+set "_sabok=" & set "_sabn=0" & set "_sabstale=" & set "_sabstn=0" & set "_sabto=-" & set "_sabmenu=-" & set "_sabdef=" & set "_sabdefstale=" & set "_sabmenuon=" & set "_sabseq=-" & set "_sabseqon="
+call :Utf8On
+if exist "!_sabf!" for /f "usebackq tokens=1-4 delims=|" %%a in ("!_sabf!") do (
+    if "%%a"=="END" set "_sabok=1"
+    if "%%a"=="BM" call :_saBmRec "%%b" "%%c"
+    if "%%a"=="OS" call :_saOsRec "%%b" "%%c" "%%d"
+)
+call :Utf8Off
+del "!_sabf!" >nul 2>&1
+if not defined _sabok (
+    echo   [i] The boot configuration could not be read - nothing judged here.
+    set "_sapart=1"
+    goto :eof
+)
+if "!_sabto!"=="-" set "_sabto=30"
+if "!_sabmenu!"=="1" (
+    echo   [STALE] The text-mode boot menu is switched on ^(displaybootmenu yes^): it shows at every start.
+    set /a _san+=1
+    set "_sabmenuon=1"
+)
+if not "!_sabseq!"=="-" (
+    echo   [STALE] A one-time boot order is still set ^(bootsequence^): the next start begins with !_sabseq!.
+    set /a _san+=1
+    set "_sabseqon=1"
+)
+if "!_sabn!"=="0" echo   [i] No entry is in the boot menu's display order.
+if !_sabn! GTR 1 if not "!_sabto!"=="0" echo   [i] !_sabn! entries are offered for !_sabto! s at every start ^(the choice of operating system^).
+if !_sabn! GTR 1 if "!_sabto!"=="0" echo   [OK] !_sabn! entries, timeout 0: the default one starts at once, no menu.
+if "!_sabn!"=="1" if not "!_sabmenu!"=="1" echo   [OK] One entry and the text-mode menu is off: no boot menu is shown.
+goto :eof
+
+:_saBmRec
+rem  %1 = timeout, menu or default; %2 = its value from the worker (- when the element is not set).
+if "%~1"=="timeout" set "_sabto=%~2"
+if "%~1"=="menu" set "_sabmenu=%~2"
+if "%~1"=="default" set "_sabdef=%~2"
+if "%~1"=="seq" set "_sabseq=%~2"
+goto :eof
+
+:_saOsRec
+rem  %1 = the entry's id, %2 = ok / novol / noload / nowin / setup / unknown, %3 = its name (sanitized).
+set /a _sabn+=1
+set "_said=%~1" & set "_sast=%~2" & set "_sads=%~3" & set "_satag=" & set "_sas="
+if "!_said!"=="!_sabdef!" set "_satag= (default)"
+if "!_sast!"=="ok" echo   [OK] "!_sads!"!_satag! !_said! - its Windows is in place.
+if "!_sast!"=="unknown" echo   [i] "!_sads!"!_satag! !_said! - starts from a device this check cannot judge. Kept.
+if "!_sast!"=="novol" ( echo   [STALE] "!_sads!"!_satag! !_said! - its disk or partition is no longer here. & set "_sas=1" )
+if "!_sast!"=="noload" ( echo   [STALE] "!_sads!"!_satag! !_said! - no Windows loader at its path any more. & set "_sas=1" )
+if "!_sast!"=="nowin" ( echo   [STALE] "!_sads!"!_satag! !_said! - no Windows at its system root any more. & set "_sas=1" )
+if "!_sast!"=="setup" ( echo   [STALE] "!_sads!"!_satag! !_said! - a leftover of a Windows upgrade ^(it lives under $WINDOWS.~BT^). & set "_sas=1" )
+if not defined _sas goto :eof
+set /a _sabstn+=1, _san+=1
+set "_sabstale=!_sabstale! !_said!"
+if "!_said!"=="!_sabdef!" set "_sabdefstale=1"
+goto :eof
+
+:_saBcdBackup
+rem  One copy of the whole store per visit, before the first change: bcdedit /import puts it back.
+if defined _sabak exit /b 0
+set "_sabak=!BACKUP_DIR!\BCD_%RANDOM%%RANDOM%.bak"
+set "_sacmd=bcdedit /export "!_sabak!""
+call :RunVar _sacmd
+if not "!_runrc!"=="0" (
+    echo   [FAIL] The boot configuration could not be saved first - the boot menu was left alone.
+    set /a _FAILS+=1
+    set "_sabak="
+    exit /b 1
+)
+echo   [BACKUP] Boot configuration -^> !_sabak!
+exit /b 0
+
+:_saBcdDel
+call :Run "bcdedit /delete %~1"
+if not "!_runrc!"=="0" set /a _FAILS+=1
+goto :eof
+
+:_saPending
+rem  Read-only: Windows' own "restart to finish" markers, cleared by the restart that finishes
+rem  them - reported, never removed by hand.
+set "_sapn=0"
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending" >nul 2>&1 && ( echo   [i] Windows servicing reports a restart is pending ^(an update waits to finish^). & set /a _sapn+=1 )
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired" >nul 2>&1 && ( echo   [i] Windows Update reports a restart is pending. & set /a _sapn+=1 )
+reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager" /v PendingFileRenameOperations >nul 2>&1 && ( echo   [i] File replacements wait for the next restart ^(PendingFileRenameOperations^). & set /a _sapn+=1 )
+if "!_sapn!"=="0" echo   [OK] Windows reports no pending restart.
+if not "!_sapn!"=="0" echo       A restart finishes these; nothing here is removed by hand.
 goto :eof
 rem =====================================================================================
 rem  ACTION: Permanent process priority (per .exe)
@@ -5563,6 +5888,26 @@ set "_RUNTRACK="
 set "_SUMCAUSE="
 goto :eof
 
+:VmDetect
+rem  VM = the platform that matched (QEMU, VMware, VirtualBox, Hyper-V, ...), "no" when none did,
+rem  "unknown" when the key could not be read. The strings are the firmware's own; a physical PC's
+rem  never carry these words. The dump stays in a file: findstr /C: tests each word literally and
+rem  the values never pass through a for /f, so an odd character in them is harmless. Xen is
+rem  matched by its product name "HVM domU", not by the three letters, which a real model name
+rem  could contain.
+set "VM=unknown"
+set "_vmf=!TEMP!\pt_vm_%RANDOM%%RANDOM%.txt"
+reg query "HKLM\HARDWARE\DESCRIPTION\System\BIOS" >"!_vmf!" 2>nul
+if not exist "!_vmf!" exit /b
+for %%z in ("!_vmf!") do if %%~zz EQU 0 (del "!_vmf!" >nul 2>&1 & exit /b)
+set "VM=no"
+for %%w in (QEMU KVM VMware VirtualBox innotek "Virtual Machine" "HVM domU" Parallels Bochs bhyve Nutanix OpenStack "Google Compute" "Amazon EC2" "Apple Virtualization") do if "!VM!"=="no" findstr /I /C:%%w "!_vmf!" >nul && set "VM=%%~w"
+if "!VM!"=="Virtual Machine" set "VM=Hyper-V"
+if "!VM!"=="HVM domU" set "VM=Xen"
+if "!VM!"=="innotek" set "VM=VirtualBox"
+del "!_vmf!" >nul 2>&1
+exit /b
+
 :LaptopAdvisory
 rem  Warning-only laptop and undervolt advisory: never blocks or changes a default or preset.
 rem  %1 = timer for the timer-resolution screen; otherwise the undervolt text is the power plan's.
@@ -5677,6 +6022,7 @@ rem  Skip backup and write if the value already equals the target, so the origin
 if not defined _ln goto _sraDoWrite
 if /i "!_type!"=="REG_DWORD" goto _sraIdemDword
 if /i "!_type!"=="REG_SZ" goto _sraIdemSz
+if /i "!_type!"=="REG_MULTI_SZ" goto _sraIdemMulti
 goto _sraDoWrite
 
 :_sraIdemDword
@@ -5702,6 +6048,17 @@ set "_td=REG_!_ln:*REG_=!"
 set "_rd="
 for /f "tokens=1,*" %%a in ("!_td!") do ( set "_rt=%%a" & set "_rd=%%b" )
 if /i not "!_rt!"=="REG_SZ" goto _sraDoWrite
+if not defined _rd set "_rd="
+if not "!_rd!"=="!_data!" goto _sraDoWrite
+echo   [SKIP] !_desc! - already set.
+endlocal & goto :eof
+
+:_sraIdemMulti
+rem  reg query shows the strings joined by \0, the notation the call site passes in /d too.
+set "_td=REG_!_ln:*REG_=!"
+set "_rd="
+for /f "tokens=1,*" %%a in ("!_td!") do ( set "_rt=%%a" & set "_rd=%%b" )
+if /i not "!_rt!"=="REG_MULTI_SZ" goto _sraDoWrite
 if not defined _rd set "_rd="
 if not "!_rd!"=="!_data!" goto _sraDoWrite
 echo   [SKIP] !_desc! - already set.
@@ -5829,6 +6186,7 @@ if not defined _ln (
 set "_td=REG_!_ln:*REG_=!"
 set "_rd="
 for /f "tokens=1,*" %%a in ("!_td!") do ( set "_rt=%%a" & set "_rd=%%b" )
+if /i "!_rt!"=="REG_MULTI_SZ" goto _bvlMulti
 rem  Non-ASCII data would restore as mojibake from an ANSI .reg; flag it and decline below.
 set "_naData="
 if defined _rd call :NonAsciiCheck
@@ -5851,6 +6209,16 @@ if /i "!_rt!"=="REG_SZ" (
 )
 >>"!_bkp!" echo ; original value was !_rt! = !_rd!
 >>"!_bkp!" echo ; not auto-restorable from this file - use the full registry backup or a restore point
+goto :eof
+
+:_bvlMulti
+rem  hex(7), as regedit exports it: the strings in UTF-16LE, each ended by 00,00, then one more pair
+rem  (the canonical shape, which reg add writes too), 25 bytes a line. Read from the registry itself,
+rem  since reg query's text cannot show an empty string. A worker that writes nothing leaves the file
+rem  under four lines, which the caller refuses.
+set "PT_BK_KEY=!_key!" & set "PT_BK_VAL=!_val!" & set "PT_BK_FILE=!_bkp!"
+start "" /min /wait powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $k=$env:PT_BK_KEY; foreach($p in @(@('HKLM\','HKEY_LOCAL_MACHINE\'),@('HKCU\','HKEY_CURRENT_USER\'),@('HKU\','HKEY_USERS\'),@('HKCR\','HKEY_CLASSES_ROOT\'),@('HKCC\','HKEY_CURRENT_CONFIG\'))){ if($k.StartsWith($p[0])){ $k=$p[1]+$k.Substring($p[0].Length) } }; $n=$env:PT_BK_VAL; $v=@((Get-ItemProperty -LiteralPath ('Registry::'+$k) -Name $n).$n); $b=New-Object System.Collections.Generic.List[byte]; foreach($s in $v){ $b.AddRange([Text.Encoding]::Unicode.GetBytes([string]$s)); $b.Add(0); $b.Add(0) }; $b.Add(0); $b.Add(0); $h=@($b | ForEach-Object { $_.ToString('x2') }); $l=New-Object System.Collections.Generic.List[string]; for($i=0; $i -lt $h.Count; $i+=25){ $l.Add(($h[$i..([Math]::Min($i+24,$h.Count-1))]) -join ',') }; Add-Content -LiteralPath $env:PT_BK_FILE -Value ([char]34+$n+[char]34+'=hex(7):'+($l -join (','+[char]92+[char]13+[char]10+'  '))) -Encoding ASCII"
+set "PT_BK_KEY=" & set "PT_BK_VAL=" & set "PT_BK_FILE="
 goto :eof
 
 :RpState
